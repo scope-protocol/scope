@@ -21,6 +21,10 @@ pub struct RecoveredPayment {
     pub payment_public_key: [u8; 32],
 
     payment_scalar: Zeroizing<Scalar>,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the ct_ikm export, plan Q14")
+    )]
     shared_secret: PaymentSharedSecret,
 }
 
@@ -31,6 +35,10 @@ impl RecoveredPayment {
     }
 
     /// Internal access for the future encryption module.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the ct_ikm export, plan Q14")
+    )]
     pub(crate) fn shared_secret(&self) -> &PaymentSharedSecret {
         &self.shared_secret
     }

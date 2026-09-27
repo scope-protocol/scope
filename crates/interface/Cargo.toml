@@ -1,0 +1,12 @@
+[package]
+name = "scope-interface"
+description = "Account layouts, instruction data, seeds, errors and a Token-2022 account reader shared by the program and the client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

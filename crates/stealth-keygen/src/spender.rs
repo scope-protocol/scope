@@ -32,11 +32,19 @@ pub struct SenderPayment {
     /// Public information needed for recipient discovery.
     pub announcement: PaymentAnnouncement,
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the ct_ikm export, plan Q14")
+    )]
     shared_secret: PaymentSharedSecret,
 }
 
 impl SenderPayment {
     /// Internal access for the future encryption module.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the ct_ikm export, plan Q14")
+    )]
     pub(crate) fn shared_secret(&self) -> &PaymentSharedSecret {
         &self.shared_secret
     }

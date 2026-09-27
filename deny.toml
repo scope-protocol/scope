@@ -1,0 +1,28 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+# Unmaintained notices count only for our direct dependencies; the ones in the
+# tree today (bincode, paste, derivative, ansi_term, libsecp256k1) arrive through
+# Solana crates. Vulnerabilities still fail at any depth.
+unmaintained = "workspace"
+
+[licenses]
+allow = ["0BSD", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "MIT", "Unicode-3.0"]
+
+[licenses.private]
+ignore = true
+
+[bans]
+# Expected duplicates, all harmless: curve25519-dalek 4 (solana-zk-sdk) and 5
+# (stealth-keygen), only bytes cross between them (research: stealth-keygen-review,
+# item 11); solana-address 1.x inside litesvm's loader; solana-zk-sdk 5.x inside
+# litesvm's ZK ElGamal builtin next to our 7.0.1.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

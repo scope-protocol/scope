@@ -1,0 +1,40 @@
+[package]
+name = "scope-client"
+description = "Payer engine, scan, sweep and receipts for the confidential payout rail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+litesvm = ["dep:litesvm"]
+
+[dependencies]
+litesvm = { workspace = true, optional = true }
+scope-interface.workspace = true
+solana-address = { workspace = true, features = ["atomic", "curve25519", "sha2"] }
+solana-instruction.workspace = true
+solana-instruction-error.workspace = true
+solana-keypair.workspace = true
+solana-message.workspace = true
+solana-sha256-hasher = { workspace = true, features = ["sha2"] }
+solana-signer.workspace = true
+solana-system-interface.workspace = true
+solana-transaction.workspace = true
+solana-transaction-error.workspace = true
+solana-zk-sdk.workspace = true
+spl-token-2022-interface.workspace = true
+spl-token-confidential-transfer-proof-extraction.workspace = true
+spl-token-confidential-transfer-proof-generation.workspace = true
+stealth-keygen.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+solana-commitment-config.workspace = true
+solana-rpc-client.workspace = true
+solana-transaction-status-client-types.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,152 @@
+use crate::address::{
+    announcement_address, program_id, token_2022, token_account_address, token_account_seed_str,
+};
+use core::num::NonZeroI8;
+use scope_interface::instruction::{AnnounceData, RECLAIM_DATA};
+use solana_address::Address;
+use solana_instruction::{AccountMeta, Instruction};
+use solana_zk_sdk::{
+    encryption::{auth_encryption::AeKey, elgamal::ElGamalKeypair},
+    zk_elgamal_proof_program::pubkey_validity::build_pubkey_validity_proof_data,
+};
+use spl_token_2022_interface::{
+    extension::confidential_transfer::instruction::{
+        configure_account, disable_non_confidential_credits,
+    },
+    instruction::{AuthorityType, initialize_account3, set_authority},
+};
+use spl_token_confidential_transfer_proof_extraction::instruction::ProofLocation;
+
+pub fn announce(payer: &Address, e: &[u8; 32], k: u8, view_tag: u8) -> Instruction {
+    let token_account = token_account_address(payer, e, k);
+    let (announcement, _) = announcement_address(&token_account);
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*payer, true),
+            AccountMeta::new_readonly(token_account, false),
+            AccountMeta::new(announcement, false),
+            AccountMeta::new_readonly(Address::default(), false),
+        ],
+        data: AnnounceData {
+            ephemeral: *e,
+            k,
+            view_tag,
+        }
+        .to_bytes()
+        .to_vec(),
+    }
+}
+
+pub fn reclaim(announcement: &Address, token_account: &Address, payer: &Address) -> Instruction {
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*announcement, false),
+            AccountMeta::new(*token_account, false),
+            AccountMeta::new(*payer, false),
+            AccountMeta::new_readonly(token_2022(), false),
+        ],
+        data: RECLAIM_DATA.to_vec(),
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    #[error("proof generation failed: {0}")]
+    Proof(String),
+    #[error("token instruction rejected: {0}")]
+    Token(String),
+}
+
+fn token<E: core::fmt::Display>(e: E) -> BuildError {
+    BuildError::Token(e.to_string())
+}
+
+/// Everything the payer needs to set up one stealth account.
+pub struct StealthSetup<'a> {
+    pub payer: Address,
+    pub mint: Address,
+    pub ephemeral: [u8; 32],
+    pub k: u8,
+    pub view_tag: u8,
+    pub one_time_owner: Address,
+    pub elgamal: &'a ElGamalKeypair,
+    pub ae: &'a AeKey,
+    pub rent_lamports: u64,
+    pub space: u64,
+    pub lamports_for_owner: u64,
+}
+
+const fn offset(n: i8) -> NonZeroI8 {
+    match NonZeroI8::new(n) {
+        Some(v) => v,
+        None => panic!("proof offset must be nonzero"),
+    }
+}
+
+/// The payer's setup sequence, in order, ending with `announce` and the lamports for P.
+/// The confidential Transfer and its proofs are appended by the caller.
+pub fn stealth_setup(s: &StealthSetup<'_>) -> Result<Vec<Instruction>, BuildError> {
+    let t22 = token_2022();
+    let ta = token_account_address(&s.payer, &s.ephemeral, s.k);
+    let (announcement, _) = announcement_address(&ta);
+    let seed = token_account_seed_str(&s.ephemeral, s.k);
+    let proof = build_pubkey_validity_proof_data(s.elgamal)
+        .map_err(|e| BuildError::Proof(e.to_string()))?;
+    let mut ixs = vec![
+        solana_system_interface::instruction::create_account_with_seed(
+            &s.payer,
+            &ta,
+            &s.payer,
+            &seed,
+            s.rent_lamports,
+            s.space,
+            &t22,
+        ),
+        initialize_account3(&t22, &ta, &s.mint, &s.payer).map_err(token)?,
+    ];
+    ixs.extend(
+        configure_account(
+            &t22,
+            &ta,
+            &s.mint,
+            &s.ae.encrypt(0).into(),
+            1,
+            &s.payer,
+            &[],
+            ProofLocation::InstructionOffset(offset(1), &proof),
+        )
+        .map_err(token)?,
+    );
+    ixs.push(disable_non_confidential_credits(&t22, &ta, &s.payer, &[]).map_err(token)?);
+    ixs.push(
+        set_authority(
+            &t22,
+            &ta,
+            Some(&announcement),
+            AuthorityType::CloseAccount,
+            &s.payer,
+            &[],
+        )
+        .map_err(token)?,
+    );
+    ixs.push(
+        set_authority(
+            &t22,
+            &ta,
+            Some(&s.one_time_owner),
+            AuthorityType::AccountOwner,
+            &s.payer,
+            &[],
+        )
+        .map_err(token)?,
+    );
+    ixs.push(announce(&s.payer, &s.ephemeral, s.k, s.view_tag));
+    ixs.push(solana_system_interface::instruction::transfer(
+        &s.payer,
+        &s.one_time_owner,
+        s.lamports_for_owner,
+    ));
+    Ok(ixs)
+}
