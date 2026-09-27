@@ -25,7 +25,7 @@ pinocchio-system = "0.6.1"
 solana-sha256-hasher = "3.1.0"
 
 # Off-chain Solana crates follow litesvm 0.16's line (solana-address 2.6). Move them
-# together when litesvm moves to 2.7 (research: 2026-09-25-valentyn-r1-code).
+# together when litesvm moves to 2.7 (docs/verification.md, V29).
 solana-address = "~2.6.1"
 solana-commitment-config = "=3.1.1"
 solana-instruction = "~3.4.1"

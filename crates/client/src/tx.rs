@@ -8,7 +8,7 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
 /// Compute budget for one stealth payment side: about 226k CU of proofs plus
-/// Token-2022 work (research: valentyn-r1-mechanics section 4). S5 replaces it
+/// Token-2022 work (docs/verification.md, V27). S5 replaces it
 /// with a measured value plus 10%.
 pub const COMPUTE_UNIT_LIMIT: u32 = 600_000;
 

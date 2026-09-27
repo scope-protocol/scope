@@ -16,8 +16,8 @@ ignore = true
 
 [bans]
 # Expected duplicates, all harmless: curve25519-dalek 4 (solana-zk-sdk) and 5
-# (stealth-keygen), only bytes cross between them (research: stealth-keygen-review,
-# item 11); solana-address 1.x inside litesvm's loader; solana-zk-sdk 5.x inside
+# (stealth-keygen), only bytes cross between them (docs/crypto.md);
+# solana-address 1.x inside litesvm's loader; solana-zk-sdk 5.x inside
 # litesvm's ZK ElGamal builtin next to our 7.0.1.
 multiple-versions = "warn"
 wildcards = "deny"
