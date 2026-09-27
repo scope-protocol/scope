@@ -1,0 +1,8 @@
+/target
+/test-ledger
+/.surfpool
+
+# Keypairs never enter this public repo.
+*keypair*.json
+id.json
+.env
