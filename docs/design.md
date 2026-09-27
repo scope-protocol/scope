@@ -17,7 +17,7 @@ Marks: [verified] backed by a row in [verification.md](verification.md); [likely
 | Program `scope-program` | on-chain, Pinocchio 0.11.2, `no_std`, id `EwbfwDdaRdxzF6wJFBKQmqcGoh93wNFL7FMo31eK9V2H` | `announce` verifies a payer's setup and writes the announcement; `reclaim` returns rent to the payer |
 | Token-2022 and the ZK ElGamal proof program | Solana's, unchanged | confidential balances, proof verification, auditor key; live on mainnet-beta and devnet (verification: V15) |
 | `scope-interface` | `no_std`, no dependencies | account layout, instruction data, seeds, errors, Token-2022 account reader; shared by program and client |
-| CLI `scope` | off-chain, Rust | payer: pay, bench; recipient: scan, sweep; either: disclose, verify |
+| CLI `scope` | off-chain, Rust | payer: pay, bench; recipient: register (prints an encoded meta-address; the on-chain registry is P4), scan, sweep; either: disclose, verify |
 
 No relayer, no indexer, no second program, no on-chain registry in v1.
 

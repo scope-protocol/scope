@@ -34,14 +34,14 @@ The host toolchain is pinned in `rust-toolchain.toml`; the program builds with S
 ```sh
 cargo fmt --all --check
 cargo lint                                   # clippy, all targets, warnings are errors
-cargo build-sbf --manifest-path programs/scope/Cargo.toml
+cargo build-sbf --manifest-path programs/scope/Cargo.toml -- --locked
 cargo test --workspace --locked
 cargo deny check                             # licenses, advisories, sources
 ```
 
 Unit tests sit next to the code. Program tests load `target/deploy/scope_program.so`, so run `cargo build-sbf` first; the test kit stops with the build command if the file is missing or older than the program sources. Engine tests, including resume and chaos, will go in `crates/client/tests/`.
 
-CI runs the same commands on every pull request. `cargo build-sbf` writes the program keypair to `target/deploy/`; that keypair is the program id, and `cargo clean` deletes it, so keep a copy outside the repo. Keypair files are ignored by git.
+CI runs the same commands on every pull request. The program id in `crates/interface/src/lib.rs` belongs to a keypair kept outside the repo by the program owner; deploy with `solana program deploy --program-id <that keypair> target/deploy/scope_program.so`. The keypair `cargo build-sbf` writes to `target/deploy/` is not used. Keypair files are ignored by git.
 
 ## Working in the repo
 

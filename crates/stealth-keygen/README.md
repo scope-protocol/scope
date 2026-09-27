@@ -8,7 +8,7 @@
 
 A matching discovery tag identifies a candidate; the recipient must check the destination authority before accepting a payment.
 
-This library explores stealth key generation as a step toward building our Turbin3 Builders capstone project.
+In SCOPE this crate holds the stealth half of the key recipe: recipient keys, the shared secret, the view tag, the one-time key P and raw-scalar signing (docs/crypto.md).
 
 ## Dependencies
 
