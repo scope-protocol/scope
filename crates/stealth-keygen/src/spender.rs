@@ -4,11 +4,12 @@
 //! The sender never obtains the recipient's payment signing key.
 
 use rand_core::TryCryptoRng;
+use solana_zk_sdk::encryption::elgamal::ElGamalKeypair;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519Secret};
 use zeroize::Zeroizing;
 
 use crate::{
-    derivation::{DeriveError, PaymentSharedSecret, payment_public_key},
+    derivation::{DeriveError, ElGamalContext, PaymentSharedSecret, payment_public_key},
     keys::RecipientPublicKeys,
 };
 
@@ -32,19 +33,19 @@ pub struct SenderPayment {
     /// Public information needed for recipient discovery.
     pub announcement: PaymentAnnouncement,
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the ct_ikm export, plan Q14")
-    )]
     shared_secret: PaymentSharedSecret,
 }
 
 impl SenderPayment {
+    /// Derive this account's encryption keypair. The recipient can derive it too.
+    pub fn derive_elgamal_keypair(
+        &self,
+        context: &ElGamalContext,
+    ) -> Result<ElGamalKeypair, DeriveError> {
+        self.shared_secret().elgamal_keypair(context)
+    }
+
     /// Internal access for the future encryption module.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the ct_ikm export, plan Q14")
-    )]
     pub(crate) fn shared_secret(&self) -> &PaymentSharedSecret {
         &self.shared_secret
     }
