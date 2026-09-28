@@ -85,6 +85,21 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), JournalError> {
     file.sync_all().map_err(io(path))
 }
 
+/// Takes the exclusive lock on `dir/.lock`, creating both; released when the file drops.
+pub fn lock_dir(dir: &Path) -> Result<File, JournalError> {
+    std::fs::create_dir_all(dir).map_err(io(dir))?;
+    let path = dir.join(".lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(io(&path))?;
+    lock(&file, &path)?;
+    Ok(file)
+}
+
 impl Journal {
     /// Creates `dir` and a new journal in it, locked.
     pub fn create(dir: &Path) -> Result<Self, JournalError> {

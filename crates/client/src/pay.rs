@@ -351,6 +351,8 @@ pub fn start<C: Chain>(
     let text = std::str::from_utf8(input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
     let rows = input::parse(text, info.decimals)?;
     let input_sha256 = hex(&solana_sha256_hasher::hash(input_bytes).to_bytes());
+    // Held from the duplicate check until the new journal exists, so two runs of one input cannot race.
+    let _runs_lock = journal::lock_dir(&opts.runs_dir)?;
     if !opts.again
         && let Some(run_id) = earlier_run(&opts.runs_dir, &input_sha256)?
     {
@@ -462,10 +464,22 @@ pub fn resume<C: Chain>(
     let mut landed = HashSet::new();
     let mut open: Option<Record> = None;
     let mut paid = Vec::new();
+    let mut posts: HashMap<&str, &str> = HashMap::new();
+    let mut last_post: Option<&str> = None;
     for r in &records[1..] {
         match r {
-            Record::Attempt { .. } => open = Some(r.clone()),
+            Record::Attempt {
+                signature, post, ..
+            } => {
+                posts.insert(signature, post);
+                open = Some(r.clone());
+            }
             Record::Landed { row, signature } => {
+                last_post = Some(
+                    posts
+                        .get(signature.as_str())
+                        .ok_or(corrupt("landed without an attempt"))?,
+                );
                 landed.insert(*row);
                 paid.push(Paid {
                     row: *row,
@@ -552,6 +566,13 @@ pub fn resume<C: Chain>(
         let state = engine.source_state(Commitment::Confirmed)?;
         engine.balance = verified_balance(&engine.keys, &state, &engine.source)?;
         engine.current = state.available;
+    } else if let Some(post) = last_post
+        && Some(engine.current) != ciphertext(post)
+    {
+        // A `landed` record is written at confirmed; a fork that dropped it shows up here.
+        return Err(PayError::Halted(
+            "source is not where the last landed row left it".into(),
+        ));
     }
     engine.run(&order, &landed)
 }
@@ -572,12 +593,29 @@ impl<C: Chain> Engine<'_, C> {
         for &row in order.iter().filter(|r| !landed.contains(*r)) {
             self.pay_row(row)?;
         }
+        self.await_finalized()?;
         self.journal.append(&Record::Done)?;
         (self.opts.log)(&format!("run {} done", self.run_id));
         Ok(Report {
             run_id: self.run_id.clone(),
             paid: std::mem::take(&mut self.paid),
         })
+    }
+
+    /// Rows land at confirmed. Each transfer is built on the previous one's ciphertext, so
+    /// the finalized source showing the last one means every row of the run is final.
+    fn await_finalized(&self) -> Result<(), PayError> {
+        loop {
+            if self.source_state(Commitment::Finalized)?.available == self.current {
+                return Ok(());
+            }
+            if self.source_state(Commitment::Confirmed)?.available != self.current {
+                return Err(PayError::Halted(
+                    "a confirmed transfer was dropped before finalizing".into(),
+                ));
+            }
+            std::thread::sleep(self.opts.poll);
+        }
     }
 
     fn pay_row(&mut self, row: usize) -> Result<(), PayError> {

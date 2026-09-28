@@ -106,6 +106,7 @@ fn only_run(o: &PayOptions) -> String {
     let mut runs: Vec<PathBuf> = std::fs::read_dir(&o.runs_dir)
         .expect("runs dir")
         .map(|e| e.expect("entry").path())
+        .filter(|p| p.is_dir())
         .collect();
     assert_eq!(runs.len(), 1);
     runs.pop()
@@ -177,7 +178,10 @@ fn refuses_bad_recipients_and_overspend_before_sending() {
         start(&mut h, &overspend, &o),
         Err(PayError::Insufficient { .. })
     ));
-    assert!(!o.runs_dir.exists(), "no run was created");
+    let runs = std::fs::read_dir(&o.runs_dir)
+        .map(|d| d.flatten().filter(|e| e.path().is_dir()).count())
+        .unwrap_or(0);
+    assert_eq!(runs, 0, "no run was created");
 }
 
 #[test]
@@ -448,4 +452,57 @@ fn source_keys_match_spl_token_cli() {
     assert_eq!(ours.elgamal.pubkey(), cli.pubkey());
     let other = SourceKeys::from_signer(&Keypair::new()).expect("keys");
     assert_ne!(ours.elgamal.pubkey(), other.elgamal.pubkey());
+}
+
+#[test]
+fn halts_when_a_landed_row_is_not_on_chain() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 3);
+    let o = opts("halt-landed");
+    let (mint, source) = (h.mint, h.source);
+    // Row one lands and is recorded; the run dies before the second attempt.
+    let killed = pay::start(
+        Killer::new(SvmChain::new(&mut h.svm), KillAt::Simulate(2)),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        mint,
+        source,
+        input(&rs).as_bytes(),
+        &o,
+    );
+    assert!(killed.is_err());
+    // The source moves, as it would if the landed row's slot were dropped.
+    pay::start(
+        SvmChain::new(&mut h.svm),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        mint,
+        source,
+        format!("{},7\n", rs[0].account).as_bytes(),
+        &opts("halt-landed-outside"),
+    )
+    .expect("outside payment");
+    let resumed = pay::resume(
+        SvmChain::new(&mut h.svm),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        &only_run(&o),
+        &o,
+    );
+    assert!(
+        matches!(resumed, Err(PayError::Halted(_))),
+        "got {resumed:?}"
+    );
+}
+
+#[test]
+fn a_concurrent_start_is_refused() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 1);
+    let o = opts("runs-lock");
+    let _held = scope_client::journal::lock_dir(&o.runs_dir).expect("lock");
+    assert!(matches!(
+        start(&mut h, &input(&rs), &o),
+        Err(PayError::Journal(_))
+    ));
 }
