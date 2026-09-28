@@ -10,7 +10,7 @@ It joins two existing pieces that were never combined, stealth addresses and Tok
 - Program with `announce` and `reclaim` built and tested in LiteSVM, including the decoy-account attack on `reclaim`.
 - Spike S3 green end to end: payer setup, handover and payment in one transaction, the recipient's sweep and rent refund in another.
 - Spike S1 green on Surfpool; the devnet run is pending.
-- Payer engine next. Phases and gates: [docs/plan.md](docs/plan.md).
+- `scope pay` pays plain confidential recipients, resumably; stealth rows follow the keygen convergence. Phases and gates: [docs/plan.md](docs/plan.md).
 
 ## Layout
 
@@ -20,9 +20,9 @@ One cargo workspace.
 |---|---|---|
 | `programs/scope` | `scope-program` | The Pinocchio program: `announce`, `reclaim`. Its LiteSVM tests and the S1 and S3 spikes live in `tests/it/` |
 | `crates/interface` | `scope-interface` | `no_std`, no dependencies: program id, announcement layout, instruction data, seeds, error codes, a read-only view of Token-2022 token accounts. Shared by the program and the client |
-| `crates/client` | `scope-client` | Address derivation, instruction and v1 transaction builders, the LiteSVM test kit (feature `litesvm`), and the S1 and S4 spike binaries in `examples/`. The payer engine, scan, sweep and receipts go here |
+| `crates/client` | `scope-client` | Address derivation, instruction and v1 transaction builders, the payer engine and its journal, the chain trait with RPC and LiteSVM (feature `litesvm`) backends, and spike binaries in `examples/`. Scan, sweep and receipts go here |
 | `crates/stealth-keygen` | `stealth-keygen` | Recipient keys, HKDF stealth derivation, raw-scalar signing, and protected account-scoped `ct_ikm`. Off-chain |
-| `cli` | `scope-cli`, binary `scope` | Argument parsing and output over `crates/client`. Every command is a stub so far |
+| `cli` | `scope-cli`, binary `scope` | Argument parsing and output over `crates/client`. `pay` works for plain recipients; the other commands are stubs |
 | `docs/` | | Brief, design, client, crypto, privacy, plan, decisions, verification. Start at [docs/README.md](docs/README.md) |
 
 The program and the client depend on `crates/interface`, which depends on nothing. `crates/stealth-keygen` derives stealth keys and account-scoped `ct_ikm`. `scope-client::confidential` converts that material into ElGamal and symmetric keys with the workspace ZK SDK. Remaining protocol integration is tracked in Q14.
@@ -39,7 +39,7 @@ cargo test --workspace --locked
 cargo deny check                             # licenses, advisories, sources
 ```
 
-Unit tests sit next to the code. Program tests load `target/deploy/scope_program.so`, so run `cargo build-sbf` first; the test kit stops with the build command if the file is missing or older than the program sources. Engine tests, including resume and chaos, will go in `crates/client/tests/`.
+Unit tests sit next to the code. Program tests load `target/deploy/scope_program.so`, so run `cargo build-sbf` first; the test kit stops with the build command if the file is missing or older than the program sources. Engine tests, resume after a kill included, are in `crates/client/tests/`.
 
 CI runs the same commands on every pull request. The program id in `crates/interface/src/lib.rs` belongs to a keypair kept outside the repo by the program owner; deploy with `solana program deploy --program-id <that keypair> target/deploy/scope_program.so`. The keypair `cargo build-sbf` writes to `target/deploy/` is not used. Keypair files are ignored by git.
 

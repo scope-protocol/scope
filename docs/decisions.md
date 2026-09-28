@@ -10,7 +10,16 @@ Docs describe the present; this file holds the why. Design history from before t
 
 ## 2026-09-28 Migrate the tested crypto library
 
-Import the standalone `stealth-keygen` HKDF-SHA256, ElGamal, symmetric-key, test-vector and documentation changes. Preserve its derivation constants and use SCOPE's pinned SDK 7.0.1 so returned key types match the client dependency. This migration does not resolve Q14 or replace the target protocol tree. Rejected for this change: silently rewriting the imported derivation to HKDF-SHA512 or adding a second direct SDK version. Evidence: V48.
+Import the standalone `stealth-keygen` HKDF-SHA256, ElGamal, symmetric-key, test-vector and documentation changes. Preserve its derivation constants and use SCOPE's pinned SDK 7.0.1 so returned key types match the client dependency. This migration does not resolve Q14 or replace the target protocol tree. Rejected for this change: silently rewriting the imported derivation to HKDF-SHA512 or adding a second direct SDK version. Evidence: V53.
+
+## 2026-09-28 Payer engine, plain rows first
+
+- **Plain rows before stealth rows.** `scope pay` pays plain recipients now; stealth rows need the run secret, E from it, and the `ct_ikm` export, which wait on Q14. Rejected: building stealth rows against the pre-convergence `stealth-keygen` API and rewriting them after Q14.
+- **Confidential funding only (Q3).** The engine spends the source's available balance and never deposits; the payer shields and applies before a run. A deposit inside `pay` would publish each run's total at the run's start; funding ahead of time keeps the two apart. Rejected for v1: a deposit step inside `pay`.
+- **Source keys as spl-token-cli 5.6 derives them.** Per wallet, `derive_confidential_keys(payer, b"")`, so a source set up with that CLI works and one keypair backs up everything (V50). Rejected: per-account seeds (no CLI can then fund or apply) and zk-sdk's legacy signer derivation, deprecated in 7.0.1.
+- **Send order from OS randomness until the run secret exists.** The permutation is stored in the run header, which resume needs anyway; with stealth rows it derives from the run secret as client.md says. Rejected: file order, which the chain would mirror.
+- **Simulate, journal, then send.** An attempt that fails simulation is never journaled or sent, so a bad row halts the run instead of looping through expiries. Sends skip preflight and RPC retries; the engine resends until the attempt lands or its blockhash is finalized dead.
+- **Two more permissive licenses.** The RPC client's TLS brings ISC (ring, rustls-webpki, untrusted) and CDLA-Permissive-2.0 (the webpki-roots CA bundle); `deny.toml` allows both.
 
 ## 2026-09-28 Design at the start of this repository
 
