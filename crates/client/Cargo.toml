@@ -37,5 +37,10 @@ solana-commitment-config.workspace = true
 solana-rpc-client.workspace = true
 solana-transaction-status-client-types.workspace = true
 
+# Examples are not tested by default; this one has unit tests.
+[[example]]
+name = "s4_fees"
+test = true
+
 [lints]
 workspace = true

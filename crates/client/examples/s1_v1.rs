@@ -1,8 +1,8 @@
 //! Spike S1: send the stealth payer transaction as a v1 transaction to a live cluster.
 //!
-//! `cargo run -p scope-client --example s1_v1 -- [RPC_URL]` (default http://127.0.0.1:8899).
-//! The program must already be deployed at `scope_interface::ID`; the fee payer is
-//! `~/.config/solana/id.json`.
+//! `cargo run -p scope-client --example s1_v1 -- [RPC_URL] [KEYPAIR]`, defaults
+//! http://127.0.0.1:8899 and `~/.config/solana/id.json`. The program must already be
+//! deployed at `scope_interface::ID`; the keypair pays every fee and rent.
 
 use core::num::NonZeroI8;
 use scope_client::{
@@ -139,11 +139,17 @@ impl Cluster {
 }
 
 fn main() -> Res<()> {
-    let url = std::env::args()
-        .nth(1)
+    let mut args = std::env::args().skip(1);
+    let url = args
+        .next()
         .unwrap_or_else(|| "http://127.0.0.1:8899".into());
-    let home = std::env::home_dir().ok_or("no home directory")?;
-    let payer = read_keypair_file(home.join(".config/solana/id.json"))?;
+    let keypair = match args.next() {
+        Some(path) => path.into(),
+        None => std::env::home_dir()
+            .ok_or("no home directory")?
+            .join(".config/solana/id.json"),
+    };
+    let payer = read_keypair_file(&keypair)?;
     let c = Cluster {
         rpc: RpcClient::new(url.clone()),
         payer,

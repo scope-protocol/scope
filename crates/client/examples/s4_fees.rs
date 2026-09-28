@@ -175,8 +175,11 @@ fn main() -> Res<()> {
         return sample(&rpc, &csv_path);
     }
 
+    // A multi-day run outlives any one RPC error; a gap in the CSV is the record of it.
     loop {
-        sample(&rpc, &csv_path)?;
+        if let Err(err) = sample(&rpc, &csv_path) {
+            eprintln!("sample failed: {err}");
+        }
         sleep(SAMPLE_INTERVAL);
     }
 }
