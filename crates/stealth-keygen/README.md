@@ -1,6 +1,6 @@
 <h1 align="center">stealth-keygen</h1>
 
-`stealth-keygen` is a Rust library for generating recipient spend and scan keypairs, deriving one-time payment public keys, recovering their private signing scalars, and signing messages with the recovered keys. A sender uses the recipient's public keys and fresh randomness to derive a destination and a public announcement. The recipient uses their private keys and that announcement to recover the matching payment key. All key calculations happen off-chain.
+`stealth-keygen` is a Rust library for generating recipient spend and scan keypairs, deriving one-time payment public keys, recovering their private signing scalars, and signing messages with the recovered keys. A payer uses the recipient's public keys and fresh randomness to derive a destination and a public announcement. The recipient uses their private keys and that announcement to recover the matching payment key. All key calculations happen off-chain.
 
 <p align="center">
   <img src="docs/images/stealth-keygen-overview.svg" alt="Recipient key setup and sender flow: ephemeral key generation, X25519 shared-secret agreement, discovery tag and tweak derivation, and one-time payment public key" width="600" />
@@ -8,7 +8,8 @@
 
 A matching discovery tag identifies a candidate; the recipient must check the destination authority before accepting a payment.
 
-This library explores stealth key generation as a step toward building our Turbin3 Builders capstone project.
+This crate supplies SCOPE with stealth payment keys and account-scoped encryption keys.
+The remaining protocol integration is tracked in [Q14](../../docs/plan.md).
 
 ## Key derivation
 
@@ -18,7 +19,7 @@ Announcements contain only the ephemeral public key and discovery tag; neither
 a salt nor a scheme identifier needs to be included.
 
 The original SHA-256-only derivation is no longer supported. Existing stealth-address HKDF
-outputs are unchanged. Sender and recipient can also derive a shared ElGamal
+outputs are unchanged. Payer and recipient can also derive a shared ElGamal
 keypair with `derive_elgamal_keypair(&context)`. The context binds the key to a
 chain, application program, mint, and token account. Both parties can decrypt
 that account; only the recipient holds the payment signing key.
@@ -35,7 +36,7 @@ account operations belong to the consuming application.
 | Function or method | Purpose |
 |---|---|
 | `RecipientSecretKeys::generate(&mut rng)` | Generate the recipient's private spend and scan keys. |
-| `recipient.derive_public_keys()` | Obtain the public keys shared with senders. |
+| `recipient.derive_public_keys()` | Obtain the public keys shared with payers. |
 | `public_keys.spend_public_key_bytes()` | Export the public spend key as 32 bytes. |
 | `public_keys.scan_public_key_bytes()` | Export the public scan key as 32 bytes. |
 | `derive_payment(&public_keys, &mut rng)` | Derive a one-time payment public key and discovery announcement. |
@@ -51,17 +52,17 @@ address as 32-byte fields.
 
 ## Dependencies
 
-- `curve25519-dalek` — Edwards point and scalar arithmetic for spend and payment keys.
-- `hkdf` — HKDF-SHA256 extraction and expansion for discovery tags, spending tweaks, and account encryption keys.
-- `rand_core` — Cryptographic RNG traits for generating key material.
-- `sha2` — SHA-2 hashing for discovery tags, scalar tweaks, and signing.
-- `x25519-dalek` — X25519 key agreement, with the `static_secrets` feature enabled.
-- `solana-zk-sdk` — Solana-compatible ElGamal key types and symmetric balance encryption.
-- `zeroize` — Clearing sensitive key material and temporary buffers from memory.
+- `curve25519-dalek`: Edwards point and scalar arithmetic for spend and payment keys.
+- `hkdf`: HKDF-SHA256 extraction and expansion for discovery tags, spending tweaks, and account encryption keys.
+- `rand_core`: Cryptographic RNG traits for generating key material.
+- `sha2`: SHA-2 hashing for discovery tags, scalar tweaks, and signing.
+- `x25519-dalek`: X25519 key agreement, with the `static_secrets` feature enabled.
+- `solana-zk-sdk`: Solana-compatible ElGamal key types and symmetric balance encryption.
+- `zeroize`: Clearing sensitive key material and temporary buffers from memory.
 
 ## Tests
 
-Run `cargo test --locked` for unit tests and the public payment-flow integration
+Run `cargo test -p stealth-keygen --locked` for unit tests and the public payment-flow integration
 tests. Signatures are checked with `ed25519-dalek`, a test-only dependency.
 Fixed vectors and their independent Python generator are documented in
 [tests/fixtures/README.md](tests/fixtures/README.md).

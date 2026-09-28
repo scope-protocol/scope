@@ -8,7 +8,7 @@ last_verified: 2026-09-28
 TL;DR: a standard stealth-address construction on Curve25519, plus derivations from the same shared secret for the Token-2022 confidential keys and, on the recipient's side only, for the sweep destination.
 The shared-secret derivations are the new part and the source of every open concern; external review is pending (Q1).
 
-## Derivation tree
+## Target derivation tree
 
 Symbols follow [design.md](design.md), Keys.
 
@@ -80,7 +80,9 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 
 ## Implementation
 
-`crates/stealth-keygen` implements keys, ECDH with the zero check, view tag, tweak, P with small-order, mixed-order and identity rejection, and raw-scalar signing, with vectors from an independent Python generator. It does not yet follow the tree above. Converging it is Q14: HKDF leaves with E and k, a 64-byte tweak, protocol-named labels instead of `stealth-keygen-v1-*`, a `ct_ikm` export, `d`, the ephemeral key as an input, meta-address parsing, `recover_payment` checking the on-chain owner rather than the tag alone, and repo terms. The nonce-from-p construction and the vector generator stay. Until the crate and this file agree, this file is the target and the crate's vectors are the truth for what exists.
+`crates/stealth-keygen` now contains the standalone library's HKDF-SHA256 implementation (V48). It uses salt `stealth-keygen-v2`, labels `discovery-tag` and `spend-tweak`, and a 64-byte tweak reduced modulo the scalar order. Account keys use `elgamal-key-v1` and `balance-ae-key-v1`, each followed by the fixed-width context `chain_id || program_id || mint || token_account`. The ElGamal branch reduces 64 bytes, rejects zero, and constructs the SDK keypair from canonical scalar bytes. The balance branch supplies 16 bytes directly to `AeKey`. Both payer and recipient expose these operations. The SDK is the workspace's pinned 7.0.1; no SDK seed derivation is invoked.
+
+These are the implemented formulas, not the target tree above. Q14 remains open for protocol review, the `ct_ikm` receipt contract, recipient-only destination keys, externally supplied ephemeral material, meta-address parsing, and account validation in the consuming client. The migration preserves the standalone library's key outputs and nonce-from-p signing. Independent fixtures and public-API tests cover the implemented contract.
 
 ## Open questions
 

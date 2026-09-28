@@ -21,11 +21,11 @@ One cargo workspace.
 | `programs/scope` | `scope-program` | The Pinocchio program: `announce`, `reclaim`. Its LiteSVM tests and the S1 and S3 spikes live in `tests/it/` |
 | `crates/interface` | `scope-interface` | `no_std`, no dependencies: program id, announcement layout, instruction data, seeds, error codes, a read-only view of Token-2022 token accounts. Shared by the program and the client |
 | `crates/client` | `scope-client` | Address derivation, instruction and v1 transaction builders, the LiteSVM test kit (feature `litesvm`), and the S1 and S4 spike binaries in `examples/`. The payer engine, scan, sweep and receipts go here |
-| `crates/stealth-keygen` | `stealth-keygen` | Recipient keys, stealth derivation, raw-scalar signing. Off-chain, no Solana dependencies |
+| `crates/stealth-keygen` | `stealth-keygen` | Recipient keys, HKDF stealth derivation, raw-scalar signing, and account encryption keys. Off-chain, using the workspace ZK SDK |
 | `cli` | `scope-cli`, binary `scope` | Argument parsing and output over `crates/client`. Every command is a stub so far |
 | `docs/` | | Brief, design, client, crypto, privacy, plan, decisions, verification. Start at [docs/README.md](docs/README.md) |
 
-The program and the client depend on `crates/interface`, which depends on nothing. `crates/stealth-keygen` hands `ct_ikm` to the client as bytes.
+The program and the client depend on `crates/interface`, which depends on nothing. `crates/stealth-keygen` derives stealth keys and account-scoped ElGamal and symmetric keys using the workspace ZK SDK. The planned `ct_ikm` interface remains Q14.
 
 ## Build and test
 

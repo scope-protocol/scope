@@ -8,6 +8,10 @@ last_verified: 2026-09-28
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
 
+## 2026-09-28 Migrate the tested crypto library
+
+Import the standalone `stealth-keygen` HKDF-SHA256, ElGamal, symmetric-key, test-vector and documentation changes. Preserve its derivation constants and use SCOPE's pinned SDK 7.0.1 so returned key types match the client dependency. This migration does not resolve Q14 or replace the target protocol tree. Rejected for this change: silently rewriting the imported derivation to HKDF-SHA512 or adding a second direct SDK version. Evidence: V48.
+
 ## 2026-09-28 Design at the start of this repository
 
 The design as this repository starts. Evidence for each line is in [verification.md](verification.md).
