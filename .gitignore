@@ -1,6 +1,8 @@
 /target
 /test-ledger
 /.surfpool
+# Payer run journals and input copies: payroll data.
+/runs
 
 # Keypairs never enter this public repo.
 *keypair*.json

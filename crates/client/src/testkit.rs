@@ -1,20 +1,31 @@
 //! LiteSVM harness shared by the program and client tests.
 
-use crate::{address::*, ix::*, tx::v1_transaction};
+use crate::{
+    address::*,
+    chain::{AccountData, Chain, ChainError, Commitment},
+    ix::*,
+    tx::v1_transaction,
+};
 use litesvm::{LiteSVM, types::TransactionResult};
 use scope_interface::ScopeError;
 use solana_address::Address;
 use solana_instruction::Instruction;
 use solana_instruction_error::InstructionError;
 use solana_keypair::Keypair;
+use solana_message::Hash;
 use solana_signer::Signer;
+use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction_error::TransactionError;
-use solana_zk_sdk::encryption::{auth_encryption::AeKey, elgamal::ElGamalKeypair};
+use solana_zk_sdk::encryption::{
+    auth_encryption::AeKey,
+    elgamal::{ElGamalKeypair, ElGamalPubkey},
+};
 use spl_token_2022_interface::{
     extension::{ExtensionType, confidential_transfer::instruction as ct},
     instruction as t22,
     state::{Account, Mint},
 };
+use std::cell::Cell;
 use std::path::PathBuf;
 
 /// The built program; panics with the build command when missing or older than its sources.
@@ -76,6 +87,10 @@ pub const SOURCE_FUNDS: u64 = 1_000_000_000;
 
 impl Harness {
     pub fn new() -> Self {
+        Self::with_auditor(None)
+    }
+
+    pub fn with_auditor(auditor: Option<&ElGamalPubkey>) -> Self {
         let mut svm = LiteSVM::new();
         svm.add_program_from_file(program_id(), program_elf())
             .expect("load program");
@@ -92,7 +107,7 @@ impl Harness {
             source_ae: AeKey::new_rand(),
             source_balance: 0,
         };
-        h.create_mint();
+        h.create_mint(auditor);
         h.create_funded_source();
         h
     }
@@ -106,7 +121,7 @@ impl Harness {
         result
     }
 
-    fn create_mint(&mut self) {
+    fn create_mint(&mut self, auditor: Option<&ElGamalPubkey>) {
         let mint = Keypair::new();
         let t22 = token_2022();
         let space = ExtensionType::try_calculate_account_len::<Mint>(&[
@@ -126,7 +141,7 @@ impl Harness {
                 &mint.pubkey(),
                 Some(self.mint_authority.pubkey()),
                 true,
-                None,
+                auditor.map(|a| (*a).into()),
             )
             .expect("ct mint"),
             t22::initialize_mint2(
@@ -271,6 +286,79 @@ impl Harness {
 impl Default for Harness {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// [`Chain`] over LiteSVM. Every call to `finalized_block_height` advances the
+/// height by `HEIGHT_STEP`, so a dropped transaction expires after a few polls.
+pub struct SvmChain<'a> {
+    pub svm: &'a mut LiteSVM,
+    height: Cell<u64>,
+    /// Sends to swallow before executing any, to model lost transactions.
+    pub drop_sends: usize,
+}
+
+const HEIGHT_STEP: u64 = 40;
+/// Blocks a blockhash stays valid for, as on a real cluster.
+const BLOCKHASH_VALIDITY: u64 = 150;
+
+impl<'a> SvmChain<'a> {
+    pub fn new(svm: &'a mut LiteSVM) -> Self {
+        Self {
+            svm,
+            height: Cell::new(0),
+            drop_sends: 0,
+        }
+    }
+}
+
+impl Chain for SvmChain<'_> {
+    fn account(&self, address: &Address, _: Commitment) -> Result<Option<AccountData>, ChainError> {
+        Ok(self
+            .svm
+            .get_account(address)
+            .filter(|a| a.lamports > 0)
+            .map(|a| AccountData {
+                owner: a.owner,
+                lamports: a.lamports,
+                data: a.data,
+            }))
+    }
+
+    fn blockhash(&self) -> Result<(Hash, u64), ChainError> {
+        Ok((
+            self.svm.latest_blockhash(),
+            self.height.get() + BLOCKHASH_VALIDITY,
+        ))
+    }
+
+    fn finalized_block_height(&self) -> Result<u64, ChainError> {
+        self.height.set(self.height.get() + HEIGHT_STEP);
+        Ok(self.height.get())
+    }
+
+    fn simulate(&self, tx: &VersionedTransaction) -> Result<Result<(), String>, ChainError> {
+        Ok(self
+            .svm
+            .simulate_transaction(tx.clone())
+            .map(|_| ())
+            .map_err(|failed| format!("{:?}\n{:#?}", failed.err, failed.meta.logs)))
+    }
+
+    fn send(&mut self, tx: &VersionedTransaction) -> Result<(), ChainError> {
+        if self.drop_sends > 0 {
+            self.drop_sends -= 1;
+            return Ok(());
+        }
+        let result = self.svm.send_transaction(tx.clone());
+        self.svm.expire_blockhash();
+        result
+            .map(|_| ())
+            .map_err(|failed| ChainError(format!("{:?}", failed.err)))
+    }
+
+    fn recent_prices(&self) -> Result<Vec<u64>, ChainError> {
+        Ok(Vec::new())
     }
 }
 
