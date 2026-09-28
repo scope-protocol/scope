@@ -59,10 +59,11 @@ pub struct SourceKeys {
 }
 
 impl SourceKeys {
-    /// Keys from the owner's signature over the source address, zk-sdk's standard derivation.
-    pub fn from_signer(owner: &dyn Signer, source: &Address) -> Result<Self, PayError> {
-        let (elgamal, ae) = derive_confidential_keys(owner, source.as_ref())
-            .map_err(|e| PayError::Keys(e.to_string()))?;
+    /// Per-wallet keys from the owner's signature, as spl-token-cli 5.6.1 derives them
+    /// (`derive_confidential_keys(owner, b"")`), so a source set up with that CLI works here.
+    pub fn from_signer(owner: &dyn Signer) -> Result<Self, PayError> {
+        let (elgamal, ae) =
+            derive_confidential_keys(owner, b"").map_err(|e| PayError::Keys(e.to_string()))?;
         Ok(Self { elgamal, ae })
     }
 }

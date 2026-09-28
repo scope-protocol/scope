@@ -4,7 +4,6 @@ use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
 use scope_client::{
     chain::RpcChain,
-    journal::{self, Record},
     pay::{self, PayOptions, SourceKeys},
 };
 use solana_address::Address;
@@ -46,7 +45,8 @@ struct PayArgs {
     /// Token-2022 mint with confidential transfers enabled.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
     mint: Option<Address>,
-    /// The payer's confidential token account to pay from; its keys derive from --keypair.
+    /// The payer's confidential token account to pay from, configured with the keys
+    /// spl-token-cli derives from --keypair.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
     source: Option<Address>,
     /// Continue an interrupted run.
@@ -91,13 +91,7 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
     };
     let report = match args.resume {
         Some(run_id) => {
-            let Some(Record::Run { source, .. }) =
-                journal::read_header(&opts.runs_dir.join(&run_id))?
-            else {
-                bail!("run {run_id} has no header");
-            };
-            let source: Address = source.parse().context("source in the journal")?;
-            let keys = SourceKeys::from_signer(&payer, &source)?;
+            let keys = SourceKeys::from_signer(&payer)?;
             pay::resume(chain, &payer, keys, &run_id, &opts)?
         }
         None => {
@@ -108,7 +102,7 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
             );
             let bytes =
                 std::fs::read(&input).with_context(|| format!("reading {}", input.display()))?;
-            let keys = SourceKeys::from_signer(&payer, &source)?;
+            let keys = SourceKeys::from_signer(&payer)?;
             pay::start(chain, &payer, keys, mint, source, &bytes, &opts)?
         }
     };

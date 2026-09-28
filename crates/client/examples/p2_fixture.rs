@@ -120,11 +120,11 @@ fn main() -> Res<()> {
     };
     let owner = c.payer.insecure_clone();
     let mint = c.create_mint()?;
-    let source = c.confidential_account(&mint, &owner, |address| {
-        let k = SourceKeys::from_signer(&owner, address)?;
+    let source = c.confidential_account(&mint, &owner, |_| {
+        let k = SourceKeys::from_signer(&owner)?;
         Ok((k.elgamal, k.ae))
     })?;
-    let keys = SourceKeys::from_signer(&owner, &source)?;
+    let keys = SourceKeys::from_signer(&owner)?;
     let t22 = token_2022();
     let payer = owner.pubkey();
     c.send(

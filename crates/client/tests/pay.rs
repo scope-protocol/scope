@@ -439,16 +439,13 @@ fn a_second_writer_is_refused() {
 }
 
 #[test]
-fn source_keys_follow_the_standard_derivation() {
+fn source_keys_match_spl_token_cli() {
     let owner = Keypair::new();
-    let source = Address::new_unique();
-    let a = SourceKeys::from_signer(&owner, &source).expect("keys");
-    let b = SourceKeys::from_signer(&owner, &source).expect("keys");
-    assert_eq!(a.elgamal.pubkey(), b.elgamal.pubkey());
-    let (elgamal, _) =
-        solana_zk_sdk::encryption::derivation::derive_confidential_keys(&owner, source.as_ref())
-            .expect("zk-sdk derivation");
-    assert_eq!(a.elgamal.pubkey(), elgamal.pubkey());
-    let other = SourceKeys::from_signer(&owner, &Address::new_unique()).expect("keys");
-    assert_ne!(a.elgamal.pubkey(), other.elgamal.pubkey());
+    let ours = SourceKeys::from_signer(&owner).expect("keys");
+    // spl-token-cli 5.6.1 `command.rs`: `derive_confidential_keys(&*owner_signer, b"")`.
+    let (cli, _) = solana_zk_sdk::encryption::derivation::derive_confidential_keys(&owner, b"")
+        .expect("zk-sdk derivation");
+    assert_eq!(ours.elgamal.pubkey(), cli.pubkey());
+    let other = SourceKeys::from_signer(&Keypair::new()).expect("keys");
+    assert_ne!(ours.elgamal.pubkey(), other.elgamal.pubkey());
 }
