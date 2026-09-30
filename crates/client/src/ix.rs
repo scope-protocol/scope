@@ -17,8 +17,8 @@ use spl_token_2022_interface::{
 };
 use spl_token_confidential_transfer_proof_extraction::instruction::ProofLocation;
 
-pub fn announce(payer: &Address, e: &[u8; 32], k: u8, view_tag: u8) -> Instruction {
-    let token_account = token_account_address(payer, e, k);
+pub fn announce(payer: &Address, e: &[u8; 32], view_tag: u8) -> Instruction {
+    let token_account = token_account_address(payer, e);
     let (announcement, _) = announcement_address(&token_account);
     Instruction {
         program_id: program_id(),
@@ -30,7 +30,6 @@ pub fn announce(payer: &Address, e: &[u8; 32], k: u8, view_tag: u8) -> Instructi
         ],
         data: AnnounceData {
             ephemeral: *e,
-            k,
             view_tag,
         }
         .to_bytes()
@@ -68,7 +67,6 @@ pub struct StealthSetup<'a> {
     pub payer: Address,
     pub mint: Address,
     pub ephemeral: [u8; 32],
-    pub k: u8,
     pub view_tag: u8,
     pub one_time_owner: Address,
     pub elgamal: &'a ElGamalKeypair,
@@ -89,9 +87,9 @@ const fn offset(n: i8) -> NonZeroI8 {
 /// The confidential Transfer and its proofs are appended by the caller.
 pub fn stealth_setup(s: &StealthSetup<'_>) -> Result<Vec<Instruction>, BuildError> {
     let t22 = token_2022();
-    let ta = token_account_address(&s.payer, &s.ephemeral, s.k);
+    let ta = token_account_address(&s.payer, &s.ephemeral);
     let (announcement, _) = announcement_address(&ta);
-    let seed = token_account_seed_str(&s.ephemeral, s.k);
+    let seed = token_account_seed_str(&s.ephemeral);
     let proof = build_pubkey_validity_proof_data(s.elgamal)
         .map_err(|e| BuildError::Proof(e.to_string()))?;
     let mut ixs = vec![
@@ -142,7 +140,7 @@ pub fn stealth_setup(s: &StealthSetup<'_>) -> Result<Vec<Instruction>, BuildErro
         )
         .map_err(token)?,
     );
-    ixs.push(announce(&s.payer, &s.ephemeral, s.k, s.view_tag));
+    ixs.push(announce(&s.payer, &s.ephemeral, s.view_tag));
     ixs.push(solana_system_interface::instruction::transfer(
         &s.payer,
         &s.one_time_owner,

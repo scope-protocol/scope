@@ -11,7 +11,7 @@ use spl_token_2022_interface::{
 /// Announce, then have P close nothing: the token account is empty, so reclaim can run.
 fn announced() -> (Harness, StealthCase) {
     let mut h = Harness::new();
-    let case = h.stealth_case(0);
+    let case = h.stealth_case();
     h.send(&case.setup, &[]).expect("announce");
     (h, case)
 }

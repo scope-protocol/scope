@@ -18,7 +18,7 @@ use scope_interface::{
 };
 
 /// Checks, in order: data length, payer signed, System id, token account address
-/// from (payer, E, k), Token-2022 owned and initialized, close authority is the
+/// from (payer, R), Token-2022 owned and initialized, close authority is the
 /// announcement, owner handed over and no delegate, credit cap 1 with public credits
 /// off, announcement address canonical and unused.
 pub(crate) fn process(
@@ -36,8 +36,7 @@ pub(crate) fn process(
     if system.address() != &SYSTEM {
         return Err(err(ScopeError::WrongSystemProgram));
     }
-    if token_account.address() != &token_account_address(payer.address(), &data.ephemeral, data.k)?
-    {
+    if token_account.address() != &token_account_address(payer.address(), &data.ephemeral)? {
         return Err(err(ScopeError::TokenAccountAddressMismatch));
     }
     if !token_account.owned_by(&TOKEN_2022) {
@@ -63,7 +62,6 @@ pub(crate) fn process(
     )?;
     let record = Announcement {
         view_tag: data.view_tag,
-        k: data.k,
         bump,
         ephemeral: data.ephemeral,
         payer: payer.address().to_bytes(),

@@ -14,7 +14,7 @@ use scope_interface::{
 };
 
 /// Anyone may call it. The token account must be the one the announcement's own
-/// (payer, E, k) derive, so a decoy account cannot close someone else's announcement.
+/// (payer, R) derive, so a decoy account cannot close someone else's announcement.
 pub(crate) fn process(
     program_id: &Address,
     accounts: &mut [AccountView],
@@ -34,9 +34,7 @@ pub(crate) fn process(
     }
     let record = Announcement::from_bytes(&announcement.try_borrow()?).map_err(err)?;
     let stored_payer = Address::new_from_array(record.payer);
-    if token_account.address()
-        != &token_account_address(&stored_payer, &record.ephemeral, record.k)?
-    {
+    if token_account.address() != &token_account_address(&stored_payer, &record.ephemeral)? {
         return Err(err(ScopeError::TokenAccountAddressMismatch));
     }
     let derived = Address::derive_address(

@@ -71,7 +71,6 @@ pub struct Harness {
 /// One set-up-but-not-yet-sent stealth payment.
 pub struct StealthCase {
     pub ephemeral: [u8; 32],
-    pub k: u8,
     pub view_tag: u8,
     pub one_time_owner: Keypair,
     pub elgamal: ElGamalKeypair,
@@ -242,14 +241,14 @@ impl Harness {
     }
 
     /// Builds the payer's setup instructions for a fresh stealth payment.
-    pub fn stealth_case(&self, k: u8) -> StealthCase {
+    pub fn stealth_case(&self) -> StealthCase {
         let one_time_owner = Keypair::new();
         let elgamal = ElGamalKeypair::new_rand();
         let ae = AeKey::new_rand();
         let ephemeral: [u8; 32] = Keypair::new().pubkey().to_bytes();
         let view_tag = ephemeral[0];
         let payer = self.payer.pubkey();
-        let token_account = token_account_address(&payer, &ephemeral, k);
+        let token_account = token_account_address(&payer, &ephemeral);
         let (announcement, _) = announcement_address(&token_account);
         let space = ExtensionType::try_calculate_account_len::<Account>(&[
             ExtensionType::ConfidentialTransferAccount,
@@ -259,7 +258,6 @@ impl Harness {
             payer,
             mint: self.mint,
             ephemeral,
-            k,
             view_tag,
             one_time_owner: one_time_owner.pubkey(),
             elgamal: &elgamal,
@@ -271,7 +269,6 @@ impl Harness {
         .expect("setup");
         StealthCase {
             ephemeral,
-            k,
             view_tag,
             one_time_owner,
             elgamal,

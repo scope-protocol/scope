@@ -192,7 +192,7 @@ pub(crate) fn recipient_ixs(
 #[test]
 fn s3_payment_then_sweep_in_one_recipient_transaction() {
     let mut h = Harness::new();
-    let case = h.stealth_case(0);
+    let case = h.stealth_case();
     pay(&mut h, &case);
 
     let d_owner = Keypair::new();

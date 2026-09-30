@@ -23,7 +23,7 @@ fn wire_bytes(tx: &VersionedTransaction) -> Vec<u8> {
 #[test]
 fn s1_both_stealth_transactions_fit_4096_bytes() {
     let mut h = Harness::new();
-    let case = h.stealth_case(0);
+    let case = h.stealth_case();
     let payer_tx = v1_transaction(
         &h.payer,
         &[],

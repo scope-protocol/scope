@@ -8,14 +8,12 @@ use scope_interface::{
 pub(crate) const TOKEN_2022: Address = Address::new_from_array(TOKEN_2022_ID);
 pub(crate) const SYSTEM: Address = Address::new_from_array(SYSTEM_PROGRAM_ID);
 
-/// `create_with_seed(payer, seed(E, k), Token-2022)`; see scope_interface::seeds.
+/// `create_with_seed(payer, seed(R), Token-2022)`; see scope_interface::seeds.
 pub(crate) fn token_account_address(
     payer: &Address,
     ephemeral: &[u8; 32],
-    k: u8,
 ) -> Result<Address, ProgramError> {
-    let k = [k];
-    let digest = solana_sha256_hasher::hashv(&token_account_seed_parts(ephemeral, &k)).to_bytes();
+    let digest = solana_sha256_hasher::hashv(&token_account_seed_parts(ephemeral)).to_bytes();
     let seed = token_account_seed(&digest);
     let seed =
         core::str::from_utf8(&seed).map_err(|_| err(ScopeError::TokenAccountAddressMismatch))?;

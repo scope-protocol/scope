@@ -167,7 +167,7 @@ fn main() -> Res<()> {
     let (elgamal, ae) = (ElGamalKeypair::new_rand(), AeKey::new_rand());
     let ephemeral = Keypair::new().pubkey().to_bytes();
     let payer = c.payer.pubkey();
-    let token_account = token_account_address(&payer, &ephemeral, 0);
+    let token_account = token_account_address(&payer, &ephemeral);
     let (announcement, _) = announcement_address(&token_account);
     let space = ExtensionType::try_calculate_account_len::<Account>(&[
         ExtensionType::ConfidentialTransferAccount,
@@ -176,7 +176,6 @@ fn main() -> Res<()> {
         payer,
         mint,
         ephemeral,
-        k: 0,
         view_tag: ephemeral[0],
         one_time_owner: one_time_owner.pubkey(),
         elgamal: &elgamal,
