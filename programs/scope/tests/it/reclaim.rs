@@ -107,7 +107,7 @@ fn reclaim_rejects_decoy_token_account() {
     h.svm.send_transaction(tx).expect("decoy");
     h.svm.expire_blockhash();
     let ix = reclaim(&case.announcement, &decoy.pubkey(), &h.payer.pubkey());
-    assert_scope_error(h.send(&[ix], &[]), ScopeError::TokenAccountAddressMismatch);
+    assert_scope_error(h.send(&[ix], &[]), ScopeError::AnnouncementAddressMismatch);
     assert!(
         h.svm
             .get_account(&case.announcement)

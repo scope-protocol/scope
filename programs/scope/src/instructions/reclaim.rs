@@ -1,7 +1,7 @@
 //! `reclaim`: close an emptied one-time token account and its announcement, rent to the payer.
 
 use crate::{
-    address::{TOKEN_2022, announcement_address, announcement_seeds, token_account_address},
+    address::{TOKEN_2022, announcement_address, announcement_seeds},
     err,
 };
 use pinocchio::{
@@ -55,15 +55,12 @@ pub(crate) fn process(
         return Err(err(ScopeError::NotAnnouncement));
     }
     let record = Announcement::from_bytes(&announcement.try_borrow()?).map_err(err)?;
-    let stored_payer = Address::new_from_array(record.payer);
-    if token_account.address() != &token_account_address(&stored_payer, &record.ephemeral)? {
-        return Err(err(ScopeError::TokenAccountAddressMismatch));
-    }
+    // A decoy token account D gives PDA("ann", D), which cannot equal this announcement.
     let expected = announcement_address(token_account.address(), record.bump, program_id);
     if announcement.address() != &expected {
         return Err(err(ScopeError::AnnouncementAddressMismatch));
     }
-    if payer.address() != &stored_payer {
+    if payer.address().to_bytes() != record.payer {
         return Err(err(ScopeError::PayerMismatch));
     }
     close_token_account(token_account, payer, announcement, record.bump)?;
