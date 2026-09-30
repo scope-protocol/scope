@@ -7,10 +7,10 @@ It joins two existing pieces that were never combined, stealth addresses and Tok
 ## Status
 
 - Design decided ([docs/design.md](docs/design.md)).
-- Program with `announce` and `reclaim` built and tested in LiteSVM, including the decoy-account attack on `reclaim`.
+- Program with `announce` and `reclaim` built and tested in LiteSVM: every check has an attack test that trips it, and CI holds each instruction to a CU ceiling (announce 6,373 CU, reclaim 3,256).
 - Spike S3 green end to end: payer setup, handover and payment in one transaction, the recipient's sweep and rent refund in another.
 - Spike S1 green on Surfpool; the devnet run is pending.
-- `scope pay` pays plain confidential recipients, resumably; stealth rows follow the keygen convergence. Phases and gates: [docs/plan.md](docs/plan.md).
+- `scope pay` pays plain confidential recipients, resumably; stealth rows are next, on the `ct_ikm` export. Phases and gates: [docs/plan.md](docs/plan.md).
 
 ## Layout
 

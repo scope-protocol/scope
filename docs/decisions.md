@@ -1,12 +1,21 @@
 ---
 status: decided
-last_verified: 2026-09-28
+last_verified: 2026-09-30
 ---
 
 # Decisions
 
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
+
+## 2026-09-30 Program before devnet
+
+- **Payer as base, not a creator key from S.** Both block front-running: only a key that signs can create the account. A key A derived from S would let a recipient find the account from R alone, but adds a second signature to every payer transaction, a raw-scalar signer on the payer side, and gives up the program's check that R matches the account. Recipients know their payer in the target uses (payroll, invoices).
+- **Drop k.** v1 uses a fresh R per payment, so k was always 0. The seed is `sha256("stealth-ta/v1" || R)`, `announce` data is 33 bytes and the announcement 68, with the view tag still at offset 2. Rejected: keeping k for several accounts per R, which a fresh R covers at no cost. Supersedes the k in the 2026-09-28 `create_with_seed` line.
+- **`reclaim` binds by the announcement PDA.** Only `announce` writes an announcement, and only at `["ann", T]` for the token account T it checked, so a decoy D gives `["ann", D]` and fails. The recompute from (payer, R) proved the same fact a second time. Supersedes the 2026-09-28 line "`reclaim` recomputes the token account"; the decoy test stays (V34).
+- **One module per instruction.** Each instruction has an accounts struct that checks count, signer and program ids when it is built, and a `process` function for the rest. Rejected: a macro-generated error list, which added nothing the existing code-position test does not cover.
+- **One crypto tree in the docs.** crypto.md describes the tree the crate implements; Q14 keeps what is still missing.
+- **CU ceilings at bump 255.** `announce` searches for the canonical bump and each lower bump costs 1,500 CU, so budgets are measured at bump 255 (V55).
 
 ## 2026-09-28 Migrate the tested crypto library
 

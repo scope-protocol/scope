@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-09-28
+last_verified: 2026-09-30
 ---
 
 # Client
@@ -10,7 +10,7 @@ Today `crates/client` holds address derivation, builders, the LiteSVM test kit, 
 
 ## Payer engine
 
-Built for plain recipients in `crates/client/src/pay.rs`; stealth rows wait on the `stealth-keygen` convergence (Q14).
+Built for plain recipients in `crates/client/src/pay.rs`; stealth rows come next, on the `ct_ikm` export (crypto.md).
 
 **At most once.** Token-2022 applies a Transfer only on the exact source ciphertext its equality proof was built on (verification: V8), and every attempt for a row is built on the same ciphertext, so at most one lands. One source account per run, one attempt in flight. The source's available ciphertext is the oracle: equal to the attempt's post-transfer ciphertext (the equality proof's context, verification: V51) means it landed, equal to the pre-transfer one means nothing did, anything else halts. Each attempt is simulated first, then sent and resent until it lands; it is rebuilt only once the finalized block height passes its last valid block height and the finalized source still shows the pre-transfer ciphertext. A row is recorded landed at confirmed; since each transfer builds on the last one's ciphertext, `done` waits for the finalized source to show the run's final ciphertext, and resume halts if the chain is not where the last landed row left it. Tests: V48, V49.
 
@@ -32,9 +32,9 @@ Plain recipients: `recipient,amount` rows, amounts in token units. The engine pr
 
 ## Recipient flow (planned)
 
-Nothing on the recipient side is persisted: D_owner is derived from `b_spend` and (R, k), so a crash at any point is a retry.
+Nothing on the recipient side is persisted: D_owner is derived from `b_spend` and R, so a crash at any point is a retry.
 
-`scan`: `getProgramAccounts` on our program with `dataSize = 69`, `memcmp(0, [1])`, `memcmp(2, [tag])`; per candidate one X25519, re-derive the tag, derive the token account from (payer, R, k), recompute `B_spend + t·G` and compare it with that account's owner, then derive the confidential keys and decrypt the pending balance. Expected to hold to about 100k announcements on a paid RPC [unverified, spike S6]; an indexer beyond that is out of scope.
+`scan`: `getProgramAccounts` on our program with `dataSize = 68`, `memcmp(0, [1])`, `memcmp(2, [tag])`; per candidate one X25519, re-derive the tag, derive the token account from (payer, R), recompute `B_spend + t·G` and compare it with that account's owner, then derive the confidential keys and decrypt the pending balance. Expected to hold to about 100k announcements on a paid RPC [unverified, spike S6]; an indexer beyond that is out of scope.
 
 `sweep`: builds the recipient transaction in [design.md](design.md), signed by P (raw scalar, fee payer) and D_owner. It reads the one-time account's public amount first and adds a Burn if it is nonzero. It simulates with `reclaim` and, if `reclaim` is what fails, drops it and resends. If P cannot cover the fee and D's rent, it stops and says by how much, because the only top-up path links the recipient ([privacy.md](privacy.md)). It refuses a destination it has seen before unless overridden, and offers `--spend-to` for a whole-balance payment straight to a counterparty.
 
@@ -46,7 +46,7 @@ Works unmodified on mints whose `auto_approve_new_accounts` is true. The client 
 
 ## Audit (planned)
 
-Disclosure receipt `{R, k, ct_ikm, payer transaction signature}`. `verify` re-derives the ElGamal and AES keys from `ct_ikm`, checks the ElGamal pubkey against the proof instructions in the referenced transaction, and decrypts the amount. It works after the accounts are closed, and needs an archival RPC and `maxSupportedTransactionVersion: 1` on `getTransaction` (verification: V22). A mint auditor key, where the issuer sets one, is the secondary path (verification: V12). Receipts for plain payments are open (Q15).
+Disclosure receipt `{R, ct_ikm, payer transaction signature}`. `verify` re-derives the ElGamal and AES keys from `ct_ikm`, checks the ElGamal pubkey against the proof instructions in the referenced transaction, and decrypts the amount. It works after the accounts are closed, and needs an archival RPC and `maxSupportedTransactionVersion: 1` on `getTransaction` (verification: V22). A mint auditor key, where the issuer sets one, is the secondary path (verification: V12). Receipts for plain payments are open (Q15).
 
 ## Testing
 
@@ -55,9 +55,9 @@ What runs today, all with `cargo test --workspace --locked` after `cargo build-s
 - `crates/client/tests/pay.rs`: the payer engine on LiteSVM, with a fault-injecting chain that kills runs before a send, after a send and between rows (verification: V48).
 - `crates/client/tests/interface_crosscheck.rs`: the account reader, program ids and CloseAccount byte against spl-token-2022-interface 3.1.1 (verification: V35).
 - Unit tests in `crates/interface` (layout, instruction data, seeds, error codes) and `crates/stealth-keygen` (vectors from an independent Python generator, point checks, the nonce regression test).
-- Example binaries, run by hand: `s1_v1` sends the payer transaction to a cluster (V38); `s4_fees` samples priority fees (V40, V52); `p2_fixture` sets up a mint, a funded source and plain recipients for `scope pay` (V49).
+- Example binaries, run by hand: `s1_v1` sends the payer transaction to a cluster (V38), reads the announcement back, then announces an unpaid account and reclaims it; `s4_fees` samples priority fees (V40, V52); `p2_fixture` sets up a mint, a funded source and plain recipients for `scope pay` (V49).
 
-Planned: scan against Surfpool (P2); CU assertions from LiteSVM logs, and Mollusk 0.15.1 if a fuzz fixture is wanted (P4); a chaos harness over the existing `chain::Chain` trait that kills the engine at every step of a 20-recipient run and asserts convergence (P4); devnet release smoke (P5). The adversarial suite (P2 to P4) adds: `announce` with each of its nine checks broken; transfer, apply or empty signed by any key but P after handover; public credit after setup; a second confidential credit; wrong mint; a mint that does not auto-approve; two P signatures sharing an R.
+Done: an attack test for every `announce` and `reclaim` check, and CU ceilings from LiteSVM logs (V54, V55). Planned: scan against Surfpool (P2); Mollusk 0.15.1 if a fuzz fixture is wanted (P4); a chaos harness over the existing `chain::Chain` trait that kills the engine at every step of a 20-recipient run and asserts convergence (P4); devnet release smoke (P5). The rest of the adversarial suite (P2 to P4) adds: transfer, apply or empty signed by any key but P after handover; public credit after setup; a second confidential credit; wrong mint; a mint that does not auto-approve; two P signatures sharing an R.
 
 ## Stack
 
