@@ -369,7 +369,6 @@ impl Chain for SvmChain<'_> {
     }
 }
 
-/// Asserts a transaction failed with our custom error code.
 /// Compute units our program consumed, one entry per invocation, from the runtime log.
 pub fn program_compute_units(logs: &[String]) -> Vec<u64> {
     let prefix = format!("Program {} consumed ", program_id());
@@ -379,6 +378,7 @@ pub fn program_compute_units(logs: &[String]) -> Vec<u64> {
         .collect()
 }
 
+/// Asserts a transaction failed with our custom error code.
 pub fn assert_scope_error(result: TransactionResult, expected: ScopeError) {
     match result {
         Err(failed) => assert!(

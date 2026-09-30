@@ -33,4 +33,17 @@ proptest! {
         data[165] = 2;
         let _ = read_token_account(&data);
     }
+
+    /// A confidential-extension header at the first TLV slot reaches the fixed-offset reads.
+    #[test]
+    fn token_reader_never_panics_on_the_confidential_extension(
+        mut data in proptest::collection::vec(any::<u8>(), 170..700),
+    ) {
+        data[72..76].fill(0);
+        data[129..133].fill(0);
+        data[165] = 2;
+        // Type 5, length 295 (0x0127), little endian.
+        data[166..170].copy_from_slice(&[5, 0, 0x27, 0x01]);
+        let _ = read_token_account(&data);
+    }
 }

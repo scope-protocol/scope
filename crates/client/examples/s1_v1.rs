@@ -286,5 +286,8 @@ fn main() -> Res<()> {
         .value
         .is_none();
     println!("reclaim leg: payer {before} -> {after}, announcement gone: {gone}");
+    if !gone || after <= before {
+        return Err("reclaim leg: announcement still open or no rent returned".into());
+    }
     Ok(())
 }

@@ -41,6 +41,25 @@ fn announce_succeeds_when_announcement_prefunded() {
 }
 
 #[test]
+fn announce_keeps_a_prefund_at_or_above_rent() {
+    let mut h = Harness::new();
+    let case = h.stealth_case();
+    // At or above the minimum there is no deficit, so announce transfers nothing.
+    let lamports = h
+        .svm
+        .minimum_balance_for_rent_exemption(scope_interface::state::ANNOUNCEMENT_LEN)
+        + 1_000;
+    let tip = solana_system_interface::instruction::transfer(
+        &h.payer.pubkey(),
+        &case.announcement,
+        lamports,
+    );
+    h.send(&[tip], &[]).expect("prefund");
+    h.send(&case.setup, &[]).expect("announce lands");
+    assert_eq!(h.svm.get_balance(&case.announcement), Some(lamports));
+}
+
+#[test]
 fn announce_twice_fails() {
     let mut h = Harness::new();
     let case = h.stealth_case();

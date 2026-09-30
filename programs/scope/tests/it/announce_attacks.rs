@@ -174,6 +174,17 @@ fn rejects_non_canonical_announcement_address() {
 }
 
 #[test]
+fn rejects_announcement_owned_by_another_program() {
+    let mut h = Harness::new();
+    let case = h.stealth_case();
+    let mut claimed = h.svm.get_account(&h.payer.pubkey()).expect("payer");
+    claimed.lamports = h.svm.minimum_balance_for_rent_exemption(0);
+    claimed.owner = token_2022();
+    h.svm.set_account(case.announcement, claimed).expect("set");
+    assert_scope_error(h.send(&case.setup, &[]), ScopeError::AnnouncementInUse);
+}
+
+#[test]
 fn rejects_announcement_with_data() {
     let mut h = Harness::new();
     let case = h.stealth_case();

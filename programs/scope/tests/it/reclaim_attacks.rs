@@ -76,7 +76,16 @@ fn second_reclaim_fails() {
     let ix = reclaim(&case.announcement, &case.token_account, &h.payer.pubkey());
     h.send(std::slice::from_ref(&ix), &[])
         .expect("first reclaim");
-    assert_scope_error(h.send(&[ix], &[]), ScopeError::NotAnnouncement);
+    // A stranger pays the second attempt's fee, so the payer's balance must not move.
+    let stranger = solana_keypair::Keypair::new();
+    h.svm
+        .airdrop(&stranger.pubkey(), 1_000_000_000)
+        .expect("airdrop");
+    let before = h.svm.get_balance(&h.payer.pubkey()).expect("payer");
+    h.svm.expire_blockhash();
+    let tx = scope_client::tx::v1_transaction(&stranger, &[], &[ix], h.svm.latest_blockhash());
+    assert_scope_error(h.svm.send_transaction(tx), ScopeError::NotAnnouncement);
+    assert_eq!(h.svm.get_balance(&h.payer.pubkey()), Some(before));
     assert!(
         h.svm
             .get_account(&case.announcement)
