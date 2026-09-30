@@ -1,5 +1,6 @@
-use crate::s3_sweep::{pay, payer_ixs, recipient_ixs};
+use crate::s3_sweep::{payer_ixs, recipient_ixs};
 use scope_client::{
+    address::announcement_address,
     testkit::Harness,
     tx::{v1_transaction, v1_wire_size},
 };
@@ -20,10 +21,17 @@ fn wire_bytes(tx: &VersionedTransaction) -> Vec<u8> {
     bytes
 }
 
+/// S5: the same transactions are measured and sent. The case is pinned to canonical
+/// bump 255, since each lower bump adds about 1,500 CU to `announce`.
 #[test]
-fn s1_both_stealth_transactions_fit_4096_bytes() {
+fn s5_both_stealth_transactions_fit_and_are_measured() {
     let mut h = Harness::new();
-    let case = h.stealth_case();
+    let case = loop {
+        let case = h.stealth_case();
+        if announcement_address(&case.token_account).1 == 255 {
+            break case;
+        }
+    };
     let payer_tx = v1_transaction(
         &h.payer,
         &[],
@@ -31,7 +39,7 @@ fn s1_both_stealth_transactions_fit_4096_bytes() {
         h.svm.latest_blockhash(),
     );
     let payer_bytes = wire_bytes(&payer_tx);
-    pay(&mut h, &case);
+    let payer_meta = h.svm.send_transaction(payer_tx).expect("payer tx lands");
 
     let d_owner = Keypair::new();
     let (d_keys, d_ae) = (ElGamalKeypair::new_rand(), AeKey::new_rand());
@@ -43,6 +51,10 @@ fn s1_both_stealth_transactions_fit_4096_bytes() {
         h.svm.latest_blockhash(),
     );
     let recipient_bytes = wire_bytes(&recipient_tx);
+    let recipient_meta = h
+        .svm
+        .send_transaction(recipient_tx)
+        .expect("recipient tx lands");
 
     assert!(
         payer_bytes.len() <= MAX_TX_BYTES,
@@ -55,8 +67,10 @@ fn s1_both_stealth_transactions_fit_4096_bytes() {
         recipient_bytes.len()
     );
     println!(
-        "payer {} bytes, recipient {} bytes",
+        "S5 at bump 255: payer {} bytes {} CU, recipient {} bytes {} CU",
         payer_bytes.len(),
-        recipient_bytes.len()
+        payer_meta.compute_units_consumed,
+        recipient_bytes.len(),
+        recipient_meta.compute_units_consumed,
     );
 }
