@@ -9,6 +9,9 @@ use spl_token_2022_interface::{
     state::{Account, AccountState},
 };
 
+use proptest::prelude::*;
+use spl_token_2022_interface::extension::memo_transfer::MemoTransfer;
+
 #[test]
 fn token_2022_id_matches() {
     assert_eq!(
@@ -62,4 +65,76 @@ fn reader_agrees_with_official_unpack() {
     let ct = v.confidential.expect("ct");
     assert!(ct.approved && !ct.allow_non_confidential_credits);
     assert_eq!(ct.maximum_pending_balance_credit_counter, 1);
+}
+
+/// Eight knobs, one per field the reader returns; a struct would only rename them.
+#[allow(clippy::too_many_arguments)]
+fn build(
+    owner: [u8; 32],
+    delegate: Option<[u8; 32]>,
+    close: Option<[u8; 32]>,
+    frozen: bool,
+    amount: u64,
+    cap: u64,
+    allow_public: bool,
+    memo_first: bool,
+) -> Vec<u8> {
+    let mut types = vec![];
+    if memo_first {
+        types.push(ExtensionType::MemoTransfer);
+    }
+    types.push(ExtensionType::ConfidentialTransferAccount);
+    let len = ExtensionType::try_calculate_account_len::<Account>(&types).expect("len");
+    let mut data = vec![0u8; len];
+    {
+        let mut state =
+            StateWithExtensionsMut::<Account>::unpack_uninitialized(&mut data).expect("unpack");
+        if memo_first {
+            state.init_extension::<MemoTransfer>(true).expect("memo");
+        }
+        let ct = state
+            .init_extension::<ConfidentialTransferAccount>(true)
+            .expect("ct");
+        ct.approved = true.into();
+        ct.allow_confidential_credits = true.into();
+        ct.allow_non_confidential_credits = allow_public.into();
+        ct.maximum_pending_balance_credit_counter = cap.into();
+        state.base.owner = Address::new_from_array(owner);
+        state.base.amount = amount;
+        state.base.delegate = delegate.map(Address::new_from_array).into();
+        state.base.state = if frozen {
+            AccountState::Frozen
+        } else {
+            AccountState::Initialized
+        };
+        state.base.close_authority = close.map(Address::new_from_array).into();
+        state.pack_base();
+        state.init_account_type().expect("type");
+    }
+    data
+}
+
+proptest! {
+    #[test]
+    fn reader_agrees_with_official_unpack_on_generated_accounts(
+        owner: [u8; 32],
+        delegate: Option<[u8; 32]>,
+        close: Option<[u8; 32]>,
+        frozen: bool,
+        amount: u64,
+        cap: u64,
+        allow_public: bool,
+        memo_first: bool,
+    ) {
+        let data = build(owner, delegate, close, frozen, amount, cap, allow_public, memo_first);
+        let v = read_token_account(&data).expect("read");
+        prop_assert_eq!(v.owner, owner);
+        prop_assert_eq!(v.amount, amount);
+        prop_assert_eq!(v.delegate, delegate);
+        prop_assert_eq!(v.close_authority, close);
+        prop_assert_eq!(v.state, if frozen { AccountState::Frozen as u8 } else { AccountState::Initialized as u8 });
+        let ct = v.confidential.expect("ct");
+        prop_assert_eq!(ct.maximum_pending_balance_credit_counter, cap);
+        prop_assert_eq!(ct.allow_non_confidential_credits, allow_public);
+    }
 }
