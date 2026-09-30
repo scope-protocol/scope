@@ -41,20 +41,30 @@ pub fn program_elf() -> PathBuf {
             )
         });
     for dir in ["programs/scope/src", "crates/interface/src"] {
-        for entry in std::fs::read_dir(root.join(dir)).expect("source dir") {
-            let modified = entry
-                .expect("entry")
-                .metadata()
-                .and_then(|m| m.modified())
-                .expect("mtime");
-            assert!(
-                modified <= built,
-                "stale {}: run `cargo build-sbf --manifest-path programs/scope/Cargo.toml`",
-                so.display()
-            );
-        }
+        assert!(
+            newest_mtime(&root.join(dir)) <= built,
+            "stale {}: run `cargo build-sbf --manifest-path programs/scope/Cargo.toml`",
+            so.display()
+        );
     }
     so
+}
+
+/// Newest modification time of any file under `dir`, subdirectories included.
+fn newest_mtime(dir: &std::path::Path) -> std::time::SystemTime {
+    std::fs::read_dir(dir)
+        .expect("source dir")
+        .map(|entry| {
+            let entry = entry.expect("entry");
+            let meta = entry.metadata().expect("metadata");
+            if meta.is_dir() {
+                newest_mtime(&entry.path())
+            } else {
+                meta.modified().expect("mtime")
+            }
+        })
+        .max()
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
 }
 
 pub struct Harness {
@@ -369,5 +379,26 @@ pub fn assert_scope_error(result: TransactionResult, expected: ScopeError) {
             failed.meta.logs
         ),
         Ok(_) => panic!("expected {expected:?}, transaction succeeded"),
+    }
+}
+
+#[cfg(test)]
+mod elf_guard_tests {
+    use super::newest_mtime;
+
+    #[test]
+    fn newest_mtime_walks_subdirectories() {
+        let root = std::env::temp_dir().join(format!("scope-mtime-{}", std::process::id()));
+        let nested = root.join("a/b");
+        std::fs::create_dir_all(&nested).expect("dirs");
+        std::fs::write(root.join("top.rs"), "").expect("top");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let deep = nested.join("deep.rs");
+        std::fs::write(&deep, "").expect("deep");
+        let deep_mtime = std::fs::metadata(&deep)
+            .and_then(|m| m.modified())
+            .expect("mtime");
+        assert_eq!(newest_mtime(&root), deep_mtime);
+        std::fs::remove_dir_all(&root).expect("cleanup");
     }
 }
