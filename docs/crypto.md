@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-09-28
+last_verified: 2026-09-30
 ---
 
 # Cryptography
@@ -8,23 +8,23 @@ last_verified: 2026-09-28
 TL;DR: a standard stealth-address construction on Curve25519, plus derivations from the same shared secret for the Token-2022 confidential keys and, on the recipient's side only, for the sweep destination.
 The shared-secret derivations are the new part and the source of every open concern; external review is pending (Q1).
 
-## Derivation tree
+## Target derivation tree
 
 Symbols follow [design.md](design.md), Keys.
 
 ```
-S      = ECDH(e, B_scan) = ECDH(b_scan, E)              reject all-zero S
+S      = ECDH(r, B_scan) = ECDH(b_scan, R)              reject all-zero S
 PRK    = HKDF-SHA512-Extract(salt = "stealth-conf/v1", S)
-t      = mod_wide(Expand(PRK, "tweak"      || E || k, 64))     P = B_spend + t·G
-tag    = Expand(PRK, "view-tag"   || E || k, 1)
-ct_ikm = Expand(PRK, "ct-ikm"     || E || k, 32)  ->  zk-sdk derive_confidential_keys_from_ikm(ct_ikm)
+t      = mod_wide(Expand(PRK, "tweak"      || R || k, 64))     P = B_spend + t·G
+tag    = Expand(PRK, "view-tag"   || R || k, 1)
+ct_ikm = Expand(PRK, "ct-ikm"     || R || k, 32)  ->  zk-sdk derive_confidential_keys_from_ikm(ct_ikm)
 
 Recipient only:
 prefix = SHA512(len(label) || label || p)[32..64]  ->  nonce prefix for raw-scalar Ed25519 signing, from p, never from S
-d      = HKDF-SHA512(salt = "stealth-dest/v1", ikm = b_spend, info = "d-owner" || E || k)  ->  D_owner keypair
+d      = HKDF-SHA512(salt = "stealth-dest/v1", ikm = b_spend, info = "d-owner" || R || k)  ->  D_owner keypair
 ```
 
-Why: RFC 5869 says distinct `info` under a PRF gives computationally independent outputs; that is the whole argument for the three shared-secret leaves, the same pattern as a TLS 1.3 key schedule. BIP-352 is precedent only for binding E and an index k into the tweak; it derives one value from S, not three. `k` is in every account address so several accounts per handshake can be added later; v1 uses `k = 0`.
+Why: RFC 5869 says distinct `info` under a PRF gives computationally independent outputs; that is the whole argument for the three shared-secret leaves, the same pattern as a TLS 1.3 key schedule. BIP-352 is precedent only for binding R and an index k into the tweak; it derives one value from S, not three. `k` is in every account address so several accounts per handshake can be added later; v1 uses `k = 0`.
 
 `derive_confidential_keys_from_ikm(ikm: &[u8]) -> Result<(ElGamalKeypair, AeKey), ElGamalError>` in solana-zk-sdk 7.0.1 runs a second HKDF-SHA512 (salt `solana-conf-bal/v1`, info `ae` and `elgamal`), unchanged in 8.0.0 (verification: V28). Feeding it `ct_ikm` rather than raw S keeps the stages separate.
 
@@ -42,7 +42,7 @@ The payer knows S and every leaf of PRK. `d` is derived from `b_spend`, which ne
 
 P is a real Ed25519 public key and the recipient holds its scalar p, so the recipient signs the sweep as P and pays the fee from P's system account, funded by the payer. The runtime verifies the signature algebraically (verification: V25); Token-2022 checks that P, the account's owner, signed; no program of ours checks P.
 
-Raw-scalar signing follows RFC 8032 by hand in `crates/stealth-keygen/src/signing.rs`; the equivalent ed25519-dalek hazmat interface is the one implicated in RUSTSEC-2022-0093. The nonce is `r = H(prefix || M)` with `prefix` derived from p alone (verification: V41). It must never come from S: the payer knows S, and since `s = r + c·p` with `c` public, a payer who can compute `r` recovers p from any one signature, including that of a failed transaction, which stays on chain. Never a caller-supplied value either: two signatures with the same R over different messages leak p to anyone watching, and a retried sweep after a dropped transaction is exactly two different messages. One signing function for every code path, and a regression test that two messages signed by the same p produce different R.
+Raw-scalar signing follows RFC 8032 by hand in `crates/stealth-keygen/src/signing.rs`; the equivalent ed25519-dalek hazmat interface is the one implicated in RUSTSEC-2022-0093. The nonce is `r_sig = H(prefix || M) mod ℓ` with `prefix` derived from p alone (verification: V41). It must never come from S: the payer knows S, and since `s = r_sig + c·p` with `c` public, a payer who can compute `r_sig` recovers p from any one signature, including that of a failed transaction, which stays on chain. Never a caller-supplied value either: two signatures with the same `R_sig` over different messages leak p to anyone watching, and a retried sweep after a dropped transaction is exactly two different messages. One signing function for every code path, and a regression test that two messages signed by the same p produce different `R_sig`. Here `R_sig = r_sig·G` is the Ed25519 nonce point, distinct from the ephemeral X25519 public key `R`.
 
 ## Balance cache
 
@@ -50,7 +50,7 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 
 ## Disclosure receipt
 
-`{E, k, ct_ikm, signature}`. The verifier re-derives the ElGamal and AES keys, checks the ElGamal pubkey against the proof instructions in the referenced transaction, and decrypts the amount. A forged `ct_ikm` fails the pubkey check, not a decryption. Disclosing `ct_ikm` hands over that one account's full read access: one credit, one sweep, nothing else, because every payment has its own S and PRK. It reveals nothing about t, the tag, p, b_spend or other payments, given HKDF-Expand is a PRF [likely, pending review].
+`{R, k, ct_ikm, signature}`. The verifier re-derives the ElGamal and AES keys, checks the ElGamal pubkey against the proof instructions in the referenced transaction, and decrypts the amount. A forged `ct_ikm` fails the pubkey check, not a decryption. Disclosing `ct_ikm` hands over that one account's full read access: one credit, one sweep, nothing else, because every payment has its own S and PRK. It reveals nothing about t, the tag, p, b_spend or other payments, given HKDF-Expand is a PRF [likely, pending review].
 
 ## Known concerns
 
@@ -66,7 +66,7 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 ## Alternatives
 
 - **Registry path.** Token-2022's ConfigureAccountWithRegistry skips the proof and owner signature if a registry owned by the token account's owner exists. The recipient would have to create one per one-time key, online. Removes the payer's key knowledge; kills offline receiving. Documented, not default.
-- **One ephemeral key per run** (BIP-352 style, one E and N tags). Cuts scan work and groups every recipient of a run under one E. Deferred behind the review (Q11).
+- **One ephemeral key per run** (BIP-352 style, one R and N tags). Cuts scan work and groups every recipient of a run under one R. Deferred behind the review (Q11).
 - **Pre-published one-time keys** with pre-verified proof context accounts. Refill bursts correlate a recipient's accounts, and it needs an always-on service. Rejected.
 
 ## Reviewer checklist
@@ -80,7 +80,36 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 
 ## Implementation
 
-`crates/stealth-keygen` implements keys, ECDH with the zero check, view tag, tweak, P with small-order, mixed-order and identity rejection, and raw-scalar signing, with vectors from an independent Python generator. It does not yet follow the tree above. Converging it is Q14: HKDF leaves with E and k, a 64-byte tweak, protocol-named labels instead of `stealth-keygen-v1-*`, a `ct_ikm` export, `d`, the ephemeral key as an input, meta-address parsing, `recover_payment` checking the on-chain owner rather than the tag alone, and repo terms. The nonce-from-p construction and the vector generator stay. Until the crate and this file agree, this file is the target and the crate's vectors are the truth for what exists.
+`crates/stealth-keygen` uses HKDF-SHA256 with salt `stealth-keygen-v3`.
+Every expansion binds the exact announcement bytes,
+including encodings that X25519 maps to the same shared secret:
+
+```text
+PRK    = HKDF-SHA256-Extract("stealth-keygen-v3", S)
+t      = mod_wide(Expand(PRK, "spend-tweak" || R, 64))
+tag    = Expand(PRK, "discovery-tag" || R, 1)
+ct_ikm = Expand(PRK, "ct-ikm-v1" || R || C, 32)
+C      = chain_id || program_id || mint || token_account  (32 bytes each)
+```
+
+Payer and recipient export `ConfidentialKeyMaterial`, a zeroizing 32-byte secret
+with no `Debug`, `Clone`, or `Copy` implementation. The crypto crate has no Solana
+SDK dependency. `scope-client::confidential::derive_confidential_keys` delegates
+to `derive_confidential_keys_from_ikm` in the pinned SDK 7.0.1. It derives both
+ElGamal and AE keys from `ct_ikm` with the SDK's HKDF-SHA512 schedule. Disclosed
+material can reconstruct these keys without exposing S or the payment scalar;
+a receipt verifier still needs to authenticate the derived ElGamal public key.
+
+The changed salt and R binding make this schedule incompatible with prior key
+outputs. Both parties must use the same version. Independent Python fixtures,
+X25519 encoding-alias tests, and client encryption/proof tests cover the change.
+Nonce-from-p signing is unchanged.
+
+These are the implemented formulas, not the target tree above. Q14 remains open
+for protocol review of the outer schedule and index binding, recipient-only
+destination keys, externally supplied ephemeral material, meta-address parsing,
+and account validation. Receipt serialization and transaction verification are
+still client work; key-material export and SDK derivation are implemented.
 
 ## Open questions
 

@@ -14,7 +14,7 @@ Today `crates/client` holds address derivation, instruction and v1 transaction b
 
 **Journal.** Append-only JSONL at `runs/<run_id>/journal.jsonl`, mode 0600, one writer holding a lock. The attempt record, with signature, last valid block height, ciphertexts and the signed transaction bytes, is fsynced before every send, so no signature exists on the network that the journal lacks. It never holds a secret or a plaintext amount. Resume reads the journal, then the chain, and converges. The input file is stored with mode 0600 too: it is the payroll list.
 
-**Run secret.** `e_i = HKDF(run_secret, run_id || i)`. Stealth rows survive journal loss: resume re-derives E_i and finds the announcement at `["ann", token_account]`, which only this payer can have created ([design.md](design.md)). Refunds do not need the secret, since `reclaim` pays the stored payer; losing it costs the ability to rebuild or disclose a stealth row, not money. It is stored in an encrypted file; deriving it from one payer master secret is Q16. `pay` refuses an input file whose hash matches an earlier run unless `--again`.
+**Run secret.** `r_i = HKDF(run_secret, run_id || i)`. Stealth rows survive journal loss: resume re-derives R_i and finds the announcement at `["ann", token_account]`, which only this payer can have created ([design.md](design.md)). Refunds do not need the secret, since `reclaim` pays the stored payer; losing it costs the ability to rebuild or disclose a stealth row, not money. It is stored in an encrypted file; deriving it from one payer master secret is Q16. `pay` refuses an input file whose hash matches an earlier run unless `--again`.
 
 **Source balance.** The available balance is one 64-bit ciphertext that table lookup cannot decrypt. The engine reads the AE hint it wrote itself and confirms it against the ElGamal ciphertext ([crypto.md](crypto.md), Balance cache). Pending balance is applied only before a run, never during one, since an apply changes the ciphertext every prepared transfer is bound to.
 
@@ -30,9 +30,9 @@ Plain recipients: the payer preflights the recipient's confidential account (min
 
 ## Recipient flow (planned)
 
-Nothing on the recipient side is persisted: D_owner is derived from `b_spend` and (E, k), so a crash at any point is a retry.
+Nothing on the recipient side is persisted: D_owner is derived from `b_spend` and (R, k), so a crash at any point is a retry.
 
-`scan`: `getProgramAccounts` on our program with `dataSize = 69`, `memcmp(0, [1])`, `memcmp(2, [tag])`; per candidate one X25519, re-derive the tag, derive the token account from (payer, E, k), recompute `B_spend + t·G` and compare it with that account's owner, then derive the confidential keys and decrypt the pending balance. Expected to hold to about 100k announcements on a paid RPC [unverified, spike S6]; an indexer beyond that is out of scope.
+`scan`: `getProgramAccounts` on our program with `dataSize = 69`, `memcmp(0, [1])`, `memcmp(2, [tag])`; per candidate one X25519, re-derive the tag, derive the token account from (payer, R, k), recompute `B_spend + t·G` and compare it with that account's owner, then derive the confidential keys and decrypt the pending balance. Expected to hold to about 100k announcements on a paid RPC [unverified, spike S6]; an indexer beyond that is out of scope.
 
 `sweep`: builds the recipient transaction in [design.md](design.md), signed by P (raw scalar, fee payer) and D_owner. It reads the one-time account's public amount first and adds a Burn if it is nonzero. It simulates with `reclaim` and, if `reclaim` is what fails, drops it and resends. If P cannot cover the fee and D's rent, it stops and says by how much, because the only top-up path links the recipient ([privacy.md](privacy.md)). It refuses a destination it has seen before unless overridden, and offers `--spend-to` for a whole-balance payment straight to a counterparty.
 
@@ -44,7 +44,7 @@ Works unmodified on mints whose `auto_approve_new_accounts` is true. The client 
 
 ## Audit (planned)
 
-Disclosure receipt `{E, k, ct_ikm, payer transaction signature}`. `verify` re-derives the ElGamal and AES keys from `ct_ikm`, checks the ElGamal pubkey against the proof instructions in the referenced transaction, and decrypts the amount. It works after the accounts are closed, and needs an archival RPC and `maxSupportedTransactionVersion: 1` on `getTransaction` (verification: V22). A mint auditor key, where the issuer sets one, is the secondary path (verification: V12). Receipts for plain payments are open (Q15).
+Disclosure receipt `{R, k, ct_ikm, payer transaction signature}`. `verify` re-derives the ElGamal and AES keys from `ct_ikm`, checks the ElGamal pubkey against the proof instructions in the referenced transaction, and decrypts the amount. It works after the accounts are closed, and needs an archival RPC and `maxSupportedTransactionVersion: 1` on `getTransaction` (verification: V22). A mint auditor key, where the issuer sets one, is the secondary path (verification: V12). Receipts for plain payments are open (Q15).
 
 ## Testing
 
@@ -62,4 +62,4 @@ Program: pinocchio 0.11.2 (`no_std`, `cpi` feature) and pinocchio-system 0.6.1; 
 
 Off-chain Solana crates follow litesvm 0.16's line and move together: solana-address ~2.6.1, solana-instruction ~3.4.1, solana-message ~4.4.1, solana-transaction ~4.1.6, solana-keypair 3.1.2, solana-signer 3.0.1, solana-system-interface 3.2.0, solana-zk-sdk 7.0.1, spl-token-2022-interface 3.1.1, spl-token-confidential-transfer-proof-extraction and -generation 0.6.1, litesvm 0.16.0, solana-rpc-client 4.2.2. Exact pins are in the root `Cargo.toml`. zk-sdk is 7.0.1, not 8, because litesvm 0.16 and zk-sdk 8 cannot share a lockfile, and `derive_confidential_keys_from_ikm` is identical in both (verification: V28, V29). When litesvm moves to solana-address 2.7, the whole line moves at once.
 
-`crates/stealth-keygen` holds keys, derivations and raw-scalar signing, with no Solana dependencies; it hands `ct_ikm` to the client as bytes. Every crate is `MIT OR Apache-2.0`.
+`crates/stealth-keygen` holds keys, HKDF-SHA256 derivation and raw-scalar signing. It exports protected, account-scoped `ct_ikm`. `scope-client::confidential::derive_confidential_keys` passes that material to the pinned `solana-zk-sdk` derivation for the ElGamal and symmetric balance keys. Receipt serialization and verification remain client work; the other Q14 gaps are listed in crypto.md. Every crate is `MIT OR Apache-2.0`.

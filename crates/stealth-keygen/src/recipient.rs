@@ -8,7 +8,10 @@ use x25519_dalek::PublicKey as X25519PublicKey;
 use zeroize::Zeroizing;
 
 use crate::{
-    derivation::{DeriveError, PaymentSharedSecret, payment_public_key},
+    derivation::{
+        ConfidentialContext, ConfidentialKeyMaterial, DeriveError, PaymentSharedSecret,
+        payment_public_key,
+    },
     keys::RecipientSecretKeys,
     spender::PaymentAnnouncement,
 };
@@ -21,24 +24,25 @@ pub struct RecoveredPayment {
     pub payment_public_key: [u8; 32],
 
     payment_scalar: Zeroizing<Scalar>,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the ct_ikm export, plan Q14")
-    )]
     shared_secret: PaymentSharedSecret,
 }
 
 impl RecoveredPayment {
-    /// Internal access for the future scalar-based signing module.
+    /// Derive confidential-key material shared by the payer and recipient.
+    /// Disclosure grants this account's full read access, not spending authority.
+    pub fn derive_ct_ikm(
+        &self,
+        context: &ConfidentialContext,
+    ) -> Result<ConfidentialKeyMaterial, DeriveError> {
+        self.shared_secret().ct_ikm(context)
+    }
+
+    /// Internal access for scalar-based signing.
     pub(crate) fn payment_private_key(&self) -> &Scalar {
         &self.payment_scalar
     }
 
-    /// Internal access for the future encryption module.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the ct_ikm export, plan Q14")
-    )]
+    /// Internal access for account-scoped key derivation.
     pub(crate) fn shared_secret(&self) -> &PaymentSharedSecret {
         &self.shared_secret
     }
@@ -59,17 +63,23 @@ pub fn recover_payment(
     let ephemeral_public = X25519PublicKey::from(announcement.ephemeral_public_key);
 
     // 2. Compute S = X25519(recipient_scan_secret, R).
-    let shared_secret =
-        PaymentSharedSecret::derive_secret(recipient.scan_private_key(), &ephemeral_public)
-            .map_err(RecipientError::Derivation)?;
+    let shared_secret = PaymentSharedSecret::derive_secret(
+        recipient.scan_private_key(),
+        &ephemeral_public,
+        &announcement.ephemeral_public_key,
+    )
+    .map_err(RecipientError::Derivation)?;
 
     // 3. Reject announcements whose discovery tag does not match.
-    if shared_secret.discovery_tag() != announcement.discovery_tag {
+    let discovery_tag = shared_secret
+        .discovery_tag()
+        .map_err(RecipientError::Derivation)?;
+    if discovery_tag != announcement.discovery_tag {
         return Ok(None);
     }
 
     // 4. Derive the tweak and candidate public key P = B + t·G.
-    let tweak = shared_secret.tweak();
+    let tweak = shared_secret.tweak().map_err(RecipientError::Derivation)?;
     let public_keys = recipient.derive_public_keys();
     let payment = payment_public_key(public_keys.spend_public_key(), &tweak)
         .map_err(RecipientError::Derivation)?;
@@ -113,8 +123,8 @@ mod tests {
             sent.payment_public_key
         );
         assert_eq!(
-            recovered.shared_secret().tweak().to_bytes(),
-            sent.shared_secret().tweak().to_bytes()
+            recovered.shared_secret().tweak().unwrap().to_bytes(),
+            sent.shared_secret().tweak().unwrap().to_bytes()
         );
     }
 }

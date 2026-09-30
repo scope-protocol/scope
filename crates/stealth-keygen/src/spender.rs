@@ -8,7 +8,10 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519Secret};
 use zeroize::Zeroizing;
 
 use crate::{
-    derivation::{DeriveError, PaymentSharedSecret, payment_public_key},
+    derivation::{
+        ConfidentialContext, ConfidentialKeyMaterial, DeriveError, PaymentSharedSecret,
+        payment_public_key,
+    },
     keys::RecipientPublicKeys,
 };
 
@@ -32,19 +35,20 @@ pub struct SenderPayment {
     /// Public information needed for recipient discovery.
     pub announcement: PaymentAnnouncement,
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the ct_ikm export, plan Q14")
-    )]
     shared_secret: PaymentSharedSecret,
 }
 
 impl SenderPayment {
-    /// Internal access for the future encryption module.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the ct_ikm export, plan Q14")
-    )]
+    /// Derive confidential-key material shared by the payer and recipient.
+    /// Disclosure grants this account's full read access, not spending authority.
+    pub fn derive_ct_ikm(
+        &self,
+        context: &ConfidentialContext,
+    ) -> Result<ConfidentialKeyMaterial, DeriveError> {
+        self.shared_secret().ct_ikm(context)
+    }
+
+    /// Internal access for account-scoped key derivation.
     pub(crate) fn shared_secret(&self) -> &PaymentSharedSecret {
         &self.shared_secret
     }
@@ -56,7 +60,7 @@ pub enum SenderError<E> {
     Derivation(DeriveError),
 }
 
-/// Derive a fresh payment destination for a recipient.
+/// Derive a fresh payment destination using HKDF-SHA256.
 pub fn derive_payment<R>(
     recipient: &RecipientPublicKeys,
     rng: &mut R,
@@ -77,20 +81,25 @@ where
 
     // 3. Compute S = X25519(r, recipient_scan_public_key).
     //    derive_secret rejects an all-zero shared secret.
-    let shared_secret =
-        PaymentSharedSecret::derive_secret(&ephemeral_secret, recipient.scan_public_key())
-            .map_err(SenderError::Derivation)?;
+    let shared_secret = PaymentSharedSecret::derive_secret(
+        &ephemeral_secret,
+        recipient.scan_public_key(),
+        &ephemeral_public.to_bytes(),
+    )
+    .map_err(SenderError::Derivation)?;
 
     // 4. Derive the public discovery tag and private tweak.
-    let discovery_tag = shared_secret.discovery_tag();
-    let tweak = shared_secret.tweak();
+    let discovery_tag = shared_secret
+        .discovery_tag()
+        .map_err(SenderError::Derivation)?;
+    let tweak = shared_secret.tweak().map_err(SenderError::Derivation)?;
 
     // 5. Compute P = B + t·G.
     let payment = payment_public_key(recipient.spend_public_key(), &tweak)
         .map_err(SenderError::Derivation)?;
 
     // 6. Return public payment information and retain S privately
-    //    for the future confidential-account encryption step.
+    //    for account-scoped confidential-key derivation.
     Ok(SenderPayment {
         payment_public_key: payment.compress().to_bytes(),
         announcement: PaymentAnnouncement {
@@ -123,7 +132,7 @@ mod tests {
             vector::<1>("discovery_tag")[0]
         );
         assert_eq!(
-            payment.shared_secret().tweak().to_bytes(),
+            payment.shared_secret().tweak().unwrap().to_bytes(),
             vector::<32>("tweak")
         );
     }

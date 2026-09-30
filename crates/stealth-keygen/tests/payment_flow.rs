@@ -10,6 +10,41 @@ use stealth_keygen::{
 };
 use support::{ScriptedRng, TestRngError, identity_rng, payment_rng, vector};
 
+fn encryption_context() -> stealth_keygen::ConfidentialContext {
+    stealth_keygen::ConfidentialContext {
+        chain_id: [1; 32],
+        program_id: [2; 32],
+        mint: [3; 32],
+        token_account: [4; 32],
+    }
+}
+
+#[test]
+fn ct_ikm_agrees_and_is_deterministic_and_payment_specific() {
+    let recipient = recipient(1, 2);
+    let public = recipient.derive_public_keys();
+    let sent = derive_payment(&public, &mut payment_rng()).unwrap();
+    let recovered = recover_payment(&recipient, &sent.announcement)
+        .unwrap()
+        .unwrap();
+    let context = encryption_context();
+    let material = sent.derive_ct_ikm(&context).unwrap();
+    assert_eq!(material.as_bytes(), &vector::<32>("ct_ikm"));
+    assert_eq!(
+        material.as_bytes(),
+        recovered.derive_ct_ikm(&context).unwrap().as_bytes()
+    );
+    assert_eq!(
+        material.as_bytes(),
+        sent.derive_ct_ikm(&context).unwrap().as_bytes()
+    );
+    let other = derive_payment(&public, &mut ScriptedRng::new(vec![4; 32])).unwrap();
+    assert_ne!(
+        material.as_bytes(),
+        other.derive_ct_ikm(&context).unwrap().as_bytes()
+    );
+}
+
 fn recipient(spend: u8, scan: u8) -> RecipientSecretKeys {
     RecipientSecretKeys::generate(&mut ScriptedRng::new(
         [vec![spend; 64], vec![scan; 32]].concat(),
@@ -210,4 +245,20 @@ fn public_errors_preserve_randomness_failure() {
         result,
         Err(SenderError::Randomness(TestRngError::InjectedFailure))
     ));
+}
+
+#[test]
+fn altered_ephemeral_encoding_cannot_recover_the_original_payment() {
+    let recipient = recipient(1, 2);
+    let sent = derive_payment(&recipient.derive_public_keys(), &mut payment_rng()).unwrap();
+    let mut announcement = sent.announcement.clone();
+    announcement.ephemeral_public_key[31] ^= 0x80;
+    // Try every tag, including the original: even a tag match must produce a
+    // different destination. This test does not rely on tags being collision-free.
+    for tag in 0..=u8::MAX {
+        announcement.discovery_tag = tag;
+        if let Some(candidate) = recover_payment(&recipient, &announcement).unwrap() {
+            assert_ne!(candidate.payment_public_key, sent.payment_public_key);
+        }
+    }
 }

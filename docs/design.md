@@ -25,19 +25,26 @@ No relayer, no indexer, no second program, no on-chain registry in v1.
 
 ```
 Recipient long-term: b_spend (Ed25519), b_scan (X25519); meta-address B_spend, B_scan
-Per payment:         e derived from the run secret, E = e·X, public
-Shared secret:       S = ECDH(e, B_scan) = ECDH(b_scan, E)
+Per payment:         r derived from the run secret, R = r·X, public
+Shared secret:       S = ECDH(r, B_scan) = ECDH(b_scan, R)
 One-time key:        P = B_spend + t·G, t from S; scalar p = b_spend + t, recipient only
 View tag:            1 byte from S, public
-Confidential keys:   ElGamal + AES from S via zk-sdk, payer and recipient
-Destination owner:   D_owner from b_spend and (E, k), recipient only
+Confidential keys:   ElGamal (e, E) + AES from ct_ikm via zk-sdk, payer and recipient
+Destination owner:   D_owner from b_spend and (R, k), recipient only
 ```
+
+`(r, R)` always denotes the ephemeral X25519 keypair; `(e, E)` denotes the
+account's twisted ElGamal keypair, with `E = e⁻¹·H` using the SDK's Pedersen
+generator `H`. `(p, P)` is the one-time
+Ed25519 signing keypair. In the crate's diagram, recipient keys `(a, A)` and
+`(b, B)` correspond to `(b_spend, B_spend)` and `(b_scan, B_scan)` here.
+These symbols do not rename Rust fields or change serialized bytes.
 
 Recipe and checks: [crypto.md](crypto.md). v1 uses `k = 0`; `k` is in every address so several accounts per handshake can be added later.
 
 ## Accounts
 
-**Token account.** Owned by Token-2022, not by us. Address `create_with_seed(payer, seed, Token-2022)`, where `seed` is the lowercase hex of the first 16 bytes of `sha256("stealth-ta/v1" || E || k)`: 32 ASCII characters, the seed limit (verification: V17). The System program allocates a seed address only when the base signs, so only the payer can create this account (verification: V16). The client sizes it from the mint: 465 bytes for a mint with no account extensions, more otherwise (verification: V9, V11). No ImmutableOwner, since that blocks the handover. Owner: the payer during setup, P after. Close authority: the announcement PDA.
+**Token account.** Owned by Token-2022, not by us. Address `create_with_seed(payer, seed, Token-2022)`, where `seed` is the lowercase hex of the first 16 bytes of `sha256("stealth-ta/v1" || R || k)`: 32 ASCII characters, the seed limit (verification: V17). The System program allocates a seed address only when the base signs, so only the payer can create this account (verification: V16). The client sizes it from the mint: 465 bytes for a mint with no account extensions, more otherwise (verification: V9, V11). No ImmutableOwner, since that blocks the handover. Owner: the payer during setup, P after. Close authority: the announcement PDA.
 
 **Announcement.** Ours, PDA `["ann", token_account]` with the canonical bump, 69 bytes:
 
@@ -48,10 +55,10 @@ Recipe and checks: [crypto.md](crypto.md). v1 uses `k = 0`; `k` is in every addr
 | 2 | view_tag | 1 |
 | 3 | k | 1 |
 | 4 | bump | 1 |
-| 5 | E | 32 |
+| 5 | R | 32 |
 | 37 | payer, receives every rent refund | 32 |
 
-P and the mint are not stored: P is the token account's owner and the mint is in the token account. Scan filter: `dataSize = 69`, `memcmp(0, [1])`, `memcmp(2, [tag])`; the scanner then derives the token account from (payer, E, k).
+P and the mint are not stored: P is the token account's owner and the mint is in the token account. Scan filter: `dataSize = 69`, `memcmp(0, [1])`, `memcmp(2, [tag])`; the scanner then derives the token account from (payer, R, k).
 
 **P.** A system account with no data, funded in the payer transaction and drained to zero in the sweep (verification: V24).
 
@@ -63,13 +70,13 @@ The first data byte selects the instruction: 0 `announce`, 1 `reclaim`. Errors a
 
 ### announce
 
-Accounts: payer (signer, writable), token account, announcement (writable), System program. Data after the discriminator: E 32, k 1, view_tag 1.
+Accounts: payer (signer, writable), token account, announcement (writable), System program. Data after the discriminator: R 32, k 1, view_tag 1.
 
 Checks, in this order:
 1. Data after the discriminator is exactly 34 bytes.
 2. The payer signed.
 3. The System program account is the System program id.
-4. The token account address equals `create_with_seed(payer, seed(E, k), Token-2022)`. This binds E, k and the payer to the account.
+4. The token account address equals `create_with_seed(payer, seed(R, k), Token-2022)`. This binds R, k and the payer to the account.
 5. The token account is owned by Token-2022, parses as a token account and is initialized.
 6. Its close authority is the announcement PDA.
 7. Its owner is not the payer, so the handover happened, and it has no delegate.
@@ -82,7 +89,7 @@ Then the program transfers any rent-exemption deficit from the payer to the anno
 
 Accounts: announcement (writable), token account (writable), payer (writable), Token-2022 program. No data after the discriminator, no signer; anyone may call it.
 
-Checks, in this order: no extra data; the Token-2022 program id; the announcement is owned by our program and is 69 bytes with discriminator 1 and version 1; the token account address, recomputed from the stored payer, E and k, matches the account passed; the announcement address, derived from `["ann", token_account]` and the stored bump, matches; the payer matches the stored payer. Then CloseAccount by CPI, destination the payer, signed by the PDA; Token-2022 refuses while any balance is nonzero (verification: V4). The announcement's lamports go to the payer and the account is closed.
+Checks, in this order: no extra data; the Token-2022 program id; the announcement is owned by our program and is 69 bytes with discriminator 1 and version 1; the token account address, recomputed from the stored payer, R and k, matches the account passed; the announcement address, derived from `["ann", token_account]` and the stored bump, matches; the payer matches the stored payer. Then CloseAccount by CPI, destination the payer, signed by the PDA; Token-2022 refuses while any balance is nonzero (verification: V4). The announcement's lamports go to the payer and the account is closed.
 
 The recompute stops a decoy attack: an attacker creates its own empty token account, points its close authority at a victim's announcement and calls `reclaim` with it. Without the recompute that closes the victim's announcement, so the payment drops out of scan and its token account can never be reclaimed. Tests: verification V34.
 

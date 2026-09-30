@@ -25,7 +25,7 @@ The payer can follow the funds it paid, as on any public ledger, but reads no am
 |---|---|---|---|
 | Meta-address string, handed to the payer off chain in v1 | no | only to whoever holds it | none |
 | Payer's transfer to a plain recipient | yes | yes, fixed address | encrypted |
-| Payer's transaction: token account set up and handed to P, announcement (E, tag, k, payer), P funded, transfer in | payer identity, one-time account | no, needs S | encrypted; auditor readable |
+| Payer's transaction: token account set up and handed to P, announcement (R, tag, k, payer), P funded, transfer in | payer identity, one-time account | no, needs S | encrypted; auditor readable |
 | Recipient's transaction: D created by P, apply, transfer, empty, reclaim to the payer, P drained to D_owner | yes | no; links P, D and D_owner to each other | encrypted |
 | A later spend from D | yes | no for the public; the payer can follow it | encrypted if confidential |
 | A sweep or spend into an account another payment also reached | yes | **yes**, merges everything that touched it | encrypted |
