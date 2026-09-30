@@ -1,4 +1,5 @@
-//! Spike S1: send the stealth payer transaction as a v1 transaction to a live cluster.
+//! Spike S1: send the stealth payer transaction as a v1 transaction to a live cluster,
+//! read the announcement back, then announce a second, unpaid account and reclaim it.
 //!
 //! `cargo run -p scope-client --example s1_v1 -- [RPC_URL] [KEYPAIR]`, defaults
 //! http://127.0.0.1:8899 and `~/.config/solana/id.json`. The program must already be
@@ -247,5 +248,43 @@ fn main() -> Res<()> {
         meta.err
     );
     println!("announcement {announcement}, one-time account {token_account}");
+
+    let record =
+        scope_interface::state::Announcement::from_bytes(&c.rpc.get_account_data(&announcement)?)
+            .map_err(|e| format!("announcement record: {e:?}"))?;
+    assert_eq!(record.payer, payer.to_bytes(), "record names the payer");
+    assert_eq!(record.ephemeral, ephemeral, "record holds R");
+    println!("announcement record read back: tag {}", record.view_tag);
+
+    // Reclaim leg: announce an account with no payment, then return both rents.
+    let ephemeral2: [u8; 32] = Keypair::new().pubkey().to_bytes();
+    let ta2 = token_account_address(&payer, &ephemeral2);
+    let (ann2, _) = announcement_address(&ta2);
+    let (keys2, ae2) = (ElGamalKeypair::new_rand(), AeKey::new_rand());
+    let setup2 = stealth_setup(&StealthSetup {
+        payer,
+        mint,
+        ephemeral: ephemeral2,
+        view_tag: ephemeral2[0],
+        one_time_owner: Keypair::new().pubkey(),
+        elgamal: &keys2,
+        ae: &ae2,
+        rent_lamports: c.rpc.get_minimum_balance_for_rent_exemption(space)?,
+        space: space as u64,
+        lamports_for_owner: 1_000_000,
+    })?;
+    c.send(&setup2, &[])?;
+    let before = c.rpc.get_balance(&payer)?;
+    c.send(&[scope_client::ix::reclaim(&ann2, &ta2, &payer)], &[])?;
+    let after = c.rpc.get_balance(&payer)?;
+    let gone = c
+        .rpc
+        .get_account_with_commitment(
+            &ann2,
+            solana_commitment_config::CommitmentConfig::confirmed(),
+        )?
+        .value
+        .is_none();
+    println!("reclaim leg: payer {before} -> {after}, announcement gone: {gone}");
     Ok(())
 }
