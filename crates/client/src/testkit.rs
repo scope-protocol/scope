@@ -370,6 +370,15 @@ impl Chain for SvmChain<'_> {
 }
 
 /// Asserts a transaction failed with our custom error code.
+/// Compute units our program consumed, one entry per invocation, from the runtime log.
+pub fn program_compute_units(logs: &[String]) -> Vec<u64> {
+    let prefix = format!("Program {} consumed ", program_id());
+    logs.iter()
+        .filter_map(|line| line.strip_prefix(&prefix))
+        .filter_map(|rest| rest.split(' ').next()?.parse().ok())
+        .collect()
+}
+
 pub fn assert_scope_error(result: TransactionResult, expected: ScopeError) {
     match result {
         Err(failed) => assert!(
@@ -400,5 +409,22 @@ mod elf_guard_tests {
             .expect("mtime");
         assert_eq!(newest_mtime(&root), deep_mtime);
         std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::program_compute_units;
+
+    #[test]
+    fn reads_only_our_program_lines() {
+        let id = crate::address::program_id();
+        let logs = vec![
+            format!("Program {id} invoke [1]"),
+            format!("Program {id} consumed 12345 of 600000 compute units"),
+            "Program TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb consumed 999 of 1 compute units"
+                .into(),
+        ];
+        assert_eq!(program_compute_units(&logs), vec![12345]);
     }
 }
