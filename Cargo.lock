@@ -2959,6 +2959,7 @@ name = "scope-client"
 version = "0.1.0"
 dependencies = [
  "litesvm",
+ "rand_core 0.10.1",
  "scope-interface",
  "solana-address 2.6.1",
  "solana-commitment-config",
@@ -5265,7 +5266,6 @@ dependencies = [
  "hkdf 0.13.0",
  "rand_core 0.10.1",
  "sha2 0.11.0",
- "solana-zk-sdk 7.0.1",
  "x25519-dalek",
  "zeroize",
 ]

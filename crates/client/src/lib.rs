@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod address;
+pub mod confidential;
 pub mod ix;
 #[cfg(feature = "litesvm")]
 pub mod testkit;

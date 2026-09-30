@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-09-28
+last_verified: 2026-09-30
 ---
 
 # Cryptography
@@ -80,9 +80,36 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 
 ## Implementation
 
-`crates/stealth-keygen` now contains the standalone library's HKDF-SHA256 implementation (V48). It uses salt `stealth-keygen-v2`, labels `discovery-tag` and `spend-tweak`, and a 64-byte tweak reduced modulo the scalar order. Account keys use `elgamal-key-v1` and `balance-ae-key-v1`, each followed by the fixed-width context `chain_id || program_id || mint || token_account`. The ElGamal branch reduces 64 bytes, rejects zero, and constructs the SDK keypair from canonical scalar bytes. The balance branch supplies 16 bytes directly to `AeKey`. Both payer and recipient expose these operations. The SDK is the workspace's pinned 7.0.1; no SDK seed derivation is invoked.
+`crates/stealth-keygen` uses HKDF-SHA256 with salt `stealth-keygen-v3`. Its `R` is
+`E` in the target tree. Every expansion binds the exact announcement bytes,
+including encodings that X25519 maps to the same shared secret:
 
-These are the implemented formulas, not the target tree above. Q14 remains open for protocol review, the `ct_ikm` receipt contract, recipient-only destination keys, externally supplied ephemeral material, meta-address parsing, and account validation in the consuming client. The migration preserves the standalone library's key outputs and nonce-from-p signing. Independent fixtures and public-API tests cover the implemented contract.
+```text
+PRK    = HKDF-SHA256-Extract("stealth-keygen-v3", S)
+t      = mod_wide(Expand(PRK, "spend-tweak" || R, 64))
+tag    = Expand(PRK, "discovery-tag" || R, 1)
+ct_ikm = Expand(PRK, "ct-ikm-v1" || R || C, 32)
+C      = chain_id || program_id || mint || token_account  (32 bytes each)
+```
+
+Payer and recipient export `ConfidentialKeyMaterial`, a zeroizing 32-byte secret
+with no `Debug`, `Clone`, or `Copy` implementation. The crypto crate has no Solana
+SDK dependency. `scope-client::confidential::derive_confidential_keys` delegates
+to `derive_confidential_keys_from_ikm` in the pinned SDK 7.0.1. It derives both
+ElGamal and AE keys from `ct_ikm` with the SDK's HKDF-SHA512 schedule. Disclosed
+material can reconstruct these keys without exposing S or the payment scalar;
+a receipt verifier still needs to authenticate the derived ElGamal public key.
+
+The changed salt and R binding make this schedule incompatible with prior key
+outputs. Both parties must use the same version. Independent Python fixtures,
+X25519 encoding-alias tests, and client encryption/proof tests cover the change.
+Nonce-from-p signing is unchanged.
+
+These are the implemented formulas, not the target tree above. Q14 remains open
+for protocol review of the outer schedule and index binding, recipient-only
+destination keys, externally supplied ephemeral material, meta-address parsing,
+and account validation. Receipt serialization and transaction verification are
+still client work; key-material export and SDK derivation are implemented.
 
 ## Open questions
 
