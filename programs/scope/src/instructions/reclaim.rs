@@ -1,20 +1,43 @@
+//! `reclaim`: close an emptied one-time token account and its announcement, rent to the payer.
+
 use crate::{
-    checks::{TOKEN_2022, token_account_address},
+    address::{TOKEN_2022, announcement_address, announcement_seeds, token_account_address},
     err,
 };
 use pinocchio::{
     AccountView, Address, ProgramResult,
-    cpi::{Seed, Signer, invoke_signed},
+    cpi::{Signer, invoke_signed},
     error::ProgramError,
     instruction::{InstructionAccount, InstructionView},
 };
-use scope_interface::{
-    ScopeError, seeds::ANNOUNCEMENT_SEED, state::Announcement,
-    token_account::CLOSE_ACCOUNT_INSTRUCTION,
-};
+use scope_interface::{ScopeError, state::Announcement, token_account::CLOSE_ACCOUNT_INSTRUCTION};
 
-/// Anyone may call it. The token account must be the one the announcement's own
-/// (payer, R) derive, so a decoy account cannot close someone else's announcement.
+/// Accounts, in order: announcement (writable), token account (writable), payer
+/// (writable), Token-2022 program. No signer: anyone may call it.
+pub(crate) struct ReclaimAccounts<'a> {
+    pub(crate) announcement: &'a mut AccountView,
+    pub(crate) token_account: &'a AccountView,
+    pub(crate) payer: &'a mut AccountView,
+}
+
+impl<'a> TryFrom<&'a mut [AccountView]> for ReclaimAccounts<'a> {
+    type Error = ProgramError;
+
+    fn try_from(accounts: &'a mut [AccountView]) -> Result<Self, ProgramError> {
+        let [announcement, token_account, payer, token_program, ..] = accounts else {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        };
+        if token_program.address() != &TOKEN_2022 {
+            return Err(err(ScopeError::WrongTokenProgram));
+        }
+        Ok(Self {
+            announcement,
+            token_account,
+            payer,
+        })
+    }
+}
+
 pub(crate) fn process(
     program_id: &Address,
     accounts: &mut [AccountView],
@@ -23,12 +46,11 @@ pub(crate) fn process(
     if !data.is_empty() {
         return Err(err(ScopeError::InvalidInstructionData));
     }
-    let [announcement, token_account, payer, token_program, ..] = accounts else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-    if token_program.address() != &TOKEN_2022 {
-        return Err(err(ScopeError::WrongTokenProgram));
-    }
+    let ReclaimAccounts {
+        announcement,
+        token_account,
+        payer,
+    } = ReclaimAccounts::try_from(accounts)?;
     if !announcement.owned_by(program_id) {
         return Err(err(ScopeError::NotAnnouncement));
     }
@@ -37,12 +59,8 @@ pub(crate) fn process(
     if token_account.address() != &token_account_address(&stored_payer, &record.ephemeral)? {
         return Err(err(ScopeError::TokenAccountAddressMismatch));
     }
-    let derived = Address::derive_address(
-        &[ANNOUNCEMENT_SEED, token_account.address().as_ref()],
-        Some(record.bump),
-        program_id,
-    );
-    if announcement.address() != &derived {
+    let expected = announcement_address(token_account.address(), record.bump, program_id);
+    if announcement.address() != &expected {
         return Err(err(ScopeError::AnnouncementAddressMismatch));
     }
     if payer.address() != &stored_payer {
@@ -60,6 +78,7 @@ pub(crate) fn process(
     announcement.close()
 }
 
+/// Token-2022 CloseAccount signed by the announcement PDA; it refuses while any balance remains.
 #[inline(never)]
 fn close_token_account(
     token_account: &AccountView,
@@ -79,11 +98,7 @@ fn close_token_account(
         accounts: &metas,
     };
     let bump = [bump];
-    let seeds = [
-        Seed::from(ANNOUNCEMENT_SEED),
-        Seed::from(token_account.address().as_ref()),
-        Seed::from(&bump),
-    ];
+    let seeds = announcement_seeds(token_account.address(), &bump);
     invoke_signed(
         &ix,
         &[token_account, payer, announcement],

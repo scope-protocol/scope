@@ -3,9 +3,9 @@
 
 #![no_std]
 
-mod announce;
-mod checks;
-mod reclaim;
+mod address;
+mod instructions;
+mod setup;
 
 use pinocchio::{
     AccountView, Address, ProgramResult, error::ProgramError, no_allocator, nostd_panic_handler,
@@ -26,8 +26,8 @@ fn process_instruction(
         .split_first()
         .ok_or(err(ScopeError::InvalidInstruction))?;
     match ScopeInstruction::try_from(tag).map_err(err)? {
-        ScopeInstruction::Announce => announce::process(program_id, accounts, rest),
-        ScopeInstruction::Reclaim => reclaim::process(program_id, accounts, rest),
+        ScopeInstruction::Announce => instructions::announce::process(program_id, accounts, rest),
+        ScopeInstruction::Reclaim => instructions::reclaim::process(program_id, accounts, rest),
     }
 }
 
