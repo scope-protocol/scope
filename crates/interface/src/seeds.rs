@@ -4,10 +4,10 @@ pub const ANNOUNCEMENT_SEED: &[u8] = b"ann";
 /// Domain of the digest behind the token account's `create_with_seed` seed.
 pub const TOKEN_ACCOUNT_SEED_DOMAIN: &[u8] = b"stealth-ta/v1";
 
-/// SHA-256 input for the token account seed: domain, E, k. Each side hashes with
+/// SHA-256 input for the token account seed: domain and R. Each side hashes with
 /// its own SHA-256 (the syscall on chain, sha2 off chain).
-pub fn token_account_seed_parts<'a>(ephemeral: &'a [u8; 32], k: &'a [u8; 1]) -> [&'a [u8]; 3] {
-    [TOKEN_ACCOUNT_SEED_DOMAIN, ephemeral, k]
+pub fn token_account_seed_parts(ephemeral: &[u8; 32]) -> [&[u8]; 2] {
+    [TOKEN_ACCOUNT_SEED_DOMAIN, ephemeral]
 }
 
 /// The `create_with_seed` seed: lowercase hex of the digest's first 16 bytes, 32
@@ -40,12 +40,11 @@ mod tests {
     }
 
     #[test]
-    fn seed_parts_are_domain_e_k() {
-        let e = [5u8; 32];
-        let k = [3u8];
-        let parts = token_account_seed_parts(&e, &k);
+    fn seed_parts_are_domain_and_r() {
+        let r = [5u8; 32];
+        let parts = token_account_seed_parts(&r);
+        assert_eq!(parts.len(), 2);
         assert_eq!(parts[0], b"stealth-ta/v1");
-        assert_eq!(parts[1], &e[..]);
-        assert_eq!(parts[2], &[3u8][..]);
+        assert_eq!(parts[1], &r[..]);
     }
 }

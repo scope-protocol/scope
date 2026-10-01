@@ -20,13 +20,13 @@ impl TryFrom<u8> for ScopeInstruction {
     }
 }
 
-/// `announce` data after the discriminator: E, k, view tag.
-pub const ANNOUNCE_DATA_LEN: usize = 34;
+/// `announce` data after the discriminator: R, view tag.
+pub const ANNOUNCE_DATA_LEN: usize = 33;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnnounceData {
+    /// R, the payer's one-time public key.
     pub ephemeral: [u8; 32],
-    pub k: u8,
     pub view_tag: u8,
 }
 
@@ -36,8 +36,7 @@ impl AnnounceData {
         let mut out = [0u8; 1 + ANNOUNCE_DATA_LEN];
         out[0] = ScopeInstruction::Announce as u8;
         out[1..33].copy_from_slice(&self.ephemeral);
-        out[33] = self.k;
-        out[34] = self.view_tag;
+        out[33] = self.view_tag;
         out
     }
 
@@ -50,8 +49,7 @@ impl AnnounceData {
         ephemeral.copy_from_slice(&data[..32]);
         Ok(Self {
             ephemeral,
-            k: data[32],
-            view_tag: data[33],
+            view_tag: data[32],
         })
     }
 }
@@ -67,22 +65,23 @@ mod tests {
     fn announce_round_trips() {
         let d = AnnounceData {
             ephemeral: [3; 32],
-            k: 1,
             view_tag: 0x42,
         };
         let bytes = d.to_bytes();
+        assert_eq!(bytes.len(), 34);
         assert_eq!(bytes[0], ScopeInstruction::Announce as u8);
+        assert_eq!(bytes[33], 0x42);
         assert_eq!(AnnounceData::from_bytes(&bytes[1..]), Ok(d));
     }
 
     #[test]
     fn announce_rejects_wrong_length() {
         assert_eq!(
-            AnnounceData::from_bytes(&[0; 33]),
+            AnnounceData::from_bytes(&[0; 32]),
             Err(ScopeError::InvalidInstructionData)
         );
         assert_eq!(
-            AnnounceData::from_bytes(&[0; 35]),
+            AnnounceData::from_bytes(&[0; 34]),
             Err(ScopeError::InvalidInstructionData)
         );
     }

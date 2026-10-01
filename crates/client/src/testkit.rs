@@ -1,20 +1,31 @@
 //! LiteSVM harness shared by the program and client tests.
 
-use crate::{address::*, ix::*, tx::v1_transaction};
+use crate::{
+    address::*,
+    chain::{AccountData, Chain, ChainError, Commitment},
+    ix::*,
+    tx::v1_transaction,
+};
 use litesvm::{LiteSVM, types::TransactionResult};
 use scope_interface::ScopeError;
 use solana_address::Address;
 use solana_instruction::Instruction;
 use solana_instruction_error::InstructionError;
 use solana_keypair::Keypair;
+use solana_message::Hash;
 use solana_signer::Signer;
+use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction_error::TransactionError;
-use solana_zk_sdk::encryption::{auth_encryption::AeKey, elgamal::ElGamalKeypair};
+use solana_zk_sdk::encryption::{
+    auth_encryption::AeKey,
+    elgamal::{ElGamalKeypair, ElGamalPubkey},
+};
 use spl_token_2022_interface::{
     extension::{ExtensionType, confidential_transfer::instruction as ct},
     instruction as t22,
     state::{Account, Mint},
 };
+use std::cell::Cell;
 use std::path::PathBuf;
 
 /// The built program; panics with the build command when missing or older than its sources.
@@ -30,20 +41,30 @@ pub fn program_elf() -> PathBuf {
             )
         });
     for dir in ["programs/scope/src", "crates/interface/src"] {
-        for entry in std::fs::read_dir(root.join(dir)).expect("source dir") {
-            let modified = entry
-                .expect("entry")
-                .metadata()
-                .and_then(|m| m.modified())
-                .expect("mtime");
-            assert!(
-                modified <= built,
-                "stale {}: run `cargo build-sbf --manifest-path programs/scope/Cargo.toml`",
-                so.display()
-            );
-        }
+        assert!(
+            newest_mtime(&root.join(dir)) <= built,
+            "stale {}: run `cargo build-sbf --manifest-path programs/scope/Cargo.toml`",
+            so.display()
+        );
     }
     so
+}
+
+/// Newest modification time of any file under `dir`, subdirectories included.
+fn newest_mtime(dir: &std::path::Path) -> std::time::SystemTime {
+    std::fs::read_dir(dir)
+        .expect("source dir")
+        .map(|entry| {
+            let entry = entry.expect("entry");
+            let meta = entry.metadata().expect("metadata");
+            if meta.is_dir() {
+                newest_mtime(&entry.path())
+            } else {
+                meta.modified().expect("mtime")
+            }
+        })
+        .max()
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
 }
 
 pub struct Harness {
@@ -60,7 +81,6 @@ pub struct Harness {
 /// One set-up-but-not-yet-sent stealth payment.
 pub struct StealthCase {
     pub ephemeral: [u8; 32],
-    pub k: u8,
     pub view_tag: u8,
     pub one_time_owner: Keypair,
     pub elgamal: ElGamalKeypair,
@@ -76,6 +96,10 @@ pub const SOURCE_FUNDS: u64 = 1_000_000_000;
 
 impl Harness {
     pub fn new() -> Self {
+        Self::with_auditor(None)
+    }
+
+    pub fn with_auditor(auditor: Option<&ElGamalPubkey>) -> Self {
         let mut svm = LiteSVM::new();
         svm.add_program_from_file(program_id(), program_elf())
             .expect("load program");
@@ -92,7 +116,7 @@ impl Harness {
             source_ae: AeKey::new_rand(),
             source_balance: 0,
         };
-        h.create_mint();
+        h.create_mint(auditor);
         h.create_funded_source();
         h
     }
@@ -106,7 +130,7 @@ impl Harness {
         result
     }
 
-    fn create_mint(&mut self) {
+    fn create_mint(&mut self, auditor: Option<&ElGamalPubkey>) {
         let mint = Keypair::new();
         let t22 = token_2022();
         let space = ExtensionType::try_calculate_account_len::<Mint>(&[
@@ -126,7 +150,7 @@ impl Harness {
                 &mint.pubkey(),
                 Some(self.mint_authority.pubkey()),
                 true,
-                None,
+                auditor.map(|a| (*a).into()),
             )
             .expect("ct mint"),
             t22::initialize_mint2(
@@ -227,14 +251,14 @@ impl Harness {
     }
 
     /// Builds the payer's setup instructions for a fresh stealth payment.
-    pub fn stealth_case(&self, k: u8) -> StealthCase {
+    pub fn stealth_case(&self) -> StealthCase {
         let one_time_owner = Keypair::new();
         let elgamal = ElGamalKeypair::new_rand();
         let ae = AeKey::new_rand();
         let ephemeral: [u8; 32] = Keypair::new().pubkey().to_bytes();
         let view_tag = ephemeral[0];
         let payer = self.payer.pubkey();
-        let token_account = token_account_address(&payer, &ephemeral, k);
+        let token_account = token_account_address(&payer, &ephemeral);
         let (announcement, _) = announcement_address(&token_account);
         let space = ExtensionType::try_calculate_account_len::<Account>(&[
             ExtensionType::ConfidentialTransferAccount,
@@ -244,7 +268,6 @@ impl Harness {
             payer,
             mint: self.mint,
             ephemeral,
-            k,
             view_tag,
             one_time_owner: one_time_owner.pubkey(),
             elgamal: &elgamal,
@@ -256,7 +279,6 @@ impl Harness {
         .expect("setup");
         StealthCase {
             ephemeral,
-            k,
             view_tag,
             one_time_owner,
             elgamal,
@@ -274,6 +296,88 @@ impl Default for Harness {
     }
 }
 
+/// [`Chain`] over LiteSVM. Every call to `finalized_block_height` advances the
+/// height by `HEIGHT_STEP`, so a dropped transaction expires after a few polls.
+pub struct SvmChain<'a> {
+    pub svm: &'a mut LiteSVM,
+    height: Cell<u64>,
+    /// Sends to swallow before executing any, to model lost transactions.
+    pub drop_sends: usize,
+}
+
+const HEIGHT_STEP: u64 = 40;
+/// Blocks a blockhash stays valid for, as on a real cluster.
+const BLOCKHASH_VALIDITY: u64 = 150;
+
+impl<'a> SvmChain<'a> {
+    pub fn new(svm: &'a mut LiteSVM) -> Self {
+        Self {
+            svm,
+            height: Cell::new(0),
+            drop_sends: 0,
+        }
+    }
+}
+
+impl Chain for SvmChain<'_> {
+    fn account(&self, address: &Address, _: Commitment) -> Result<Option<AccountData>, ChainError> {
+        Ok(self
+            .svm
+            .get_account(address)
+            .filter(|a| a.lamports > 0)
+            .map(|a| AccountData {
+                owner: a.owner,
+                lamports: a.lamports,
+                data: a.data,
+            }))
+    }
+
+    fn blockhash(&self) -> Result<(Hash, u64), ChainError> {
+        Ok((
+            self.svm.latest_blockhash(),
+            self.height.get() + BLOCKHASH_VALIDITY,
+        ))
+    }
+
+    fn finalized_block_height(&self) -> Result<u64, ChainError> {
+        self.height.set(self.height.get() + HEIGHT_STEP);
+        Ok(self.height.get())
+    }
+
+    fn simulate(&self, tx: &VersionedTransaction) -> Result<Result<(), String>, ChainError> {
+        Ok(self
+            .svm
+            .simulate_transaction(tx.clone())
+            .map(|_| ())
+            .map_err(|failed| format!("{:?}\n{:#?}", failed.err, failed.meta.logs)))
+    }
+
+    fn send(&mut self, tx: &VersionedTransaction) -> Result<(), ChainError> {
+        if self.drop_sends > 0 {
+            self.drop_sends -= 1;
+            return Ok(());
+        }
+        let result = self.svm.send_transaction(tx.clone());
+        self.svm.expire_blockhash();
+        result
+            .map(|_| ())
+            .map_err(|failed| ChainError(format!("{:?}", failed.err)))
+    }
+
+    fn recent_prices(&self) -> Result<Vec<u64>, ChainError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Compute units our program consumed, one entry per invocation, from the runtime log.
+pub fn program_compute_units(logs: &[String]) -> Vec<u64> {
+    let prefix = format!("Program {} consumed ", program_id());
+    logs.iter()
+        .filter_map(|line| line.strip_prefix(&prefix))
+        .filter_map(|rest| rest.split(' ').next()?.parse().ok())
+        .collect()
+}
+
 /// Asserts a transaction failed with our custom error code.
 pub fn assert_scope_error(result: TransactionResult, expected: ScopeError) {
     match result {
@@ -284,5 +388,43 @@ pub fn assert_scope_error(result: TransactionResult, expected: ScopeError) {
             failed.meta.logs
         ),
         Ok(_) => panic!("expected {expected:?}, transaction succeeded"),
+    }
+}
+
+#[cfg(test)]
+mod elf_guard_tests {
+    use super::newest_mtime;
+
+    #[test]
+    fn newest_mtime_walks_subdirectories() {
+        let root = std::env::temp_dir().join(format!("scope-mtime-{}", std::process::id()));
+        let nested = root.join("a/b");
+        std::fs::create_dir_all(&nested).expect("dirs");
+        std::fs::write(root.join("top.rs"), "").expect("top");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let deep = nested.join("deep.rs");
+        std::fs::write(&deep, "").expect("deep");
+        let deep_mtime = std::fs::metadata(&deep)
+            .and_then(|m| m.modified())
+            .expect("mtime");
+        assert_eq!(newest_mtime(&root), deep_mtime);
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::program_compute_units;
+
+    #[test]
+    fn reads_only_our_program_lines() {
+        let id = crate::address::program_id();
+        let logs = vec![
+            format!("Program {id} invoke [1]"),
+            format!("Program {id} consumed 12345 of 600000 compute units"),
+            "Program TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb consumed 999 of 1 compute units"
+                .into(),
+        ];
+        assert_eq!(program_compute_units(&logs), vec![12345]);
     }
 }

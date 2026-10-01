@@ -9,7 +9,18 @@ yanked = "deny"
 unmaintained = "workspace"
 
 [licenses]
-allow = ["0BSD", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "MIT", "Unicode-3.0"]
+# ISC and CDLA-Permissive-2.0 arrive with TLS for the RPC client: ring, rustls-webpki
+# and untrusted are ISC, the webpki-roots CA bundle is CDLA-Permissive-2.0.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+]
 
 [licenses.private]
 ignore = true

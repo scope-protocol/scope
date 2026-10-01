@@ -22,9 +22,39 @@ pub fn v1_transaction(
     ixs: &[Instruction],
     blockhash: solana_message::Hash,
 ) -> VersionedTransaction {
-    let config = TransactionConfig::empty()
+    build(fee_payer, extra_signers, ixs, blockhash, None)
+}
+
+/// As [`v1_transaction`], with a total priority fee in lamports in the header.
+pub fn v1_transaction_with_fee(
+    fee_payer: &Keypair,
+    extra_signers: &[&Keypair],
+    ixs: &[Instruction],
+    blockhash: solana_message::Hash,
+    priority_fee_lamports: u64,
+) -> VersionedTransaction {
+    build(
+        fee_payer,
+        extra_signers,
+        ixs,
+        blockhash,
+        Some(priority_fee_lamports),
+    )
+}
+
+fn build(
+    fee_payer: &Keypair,
+    extra_signers: &[&Keypair],
+    ixs: &[Instruction],
+    blockhash: solana_message::Hash,
+    priority_fee: Option<u64>,
+) -> VersionedTransaction {
+    let mut config = TransactionConfig::empty()
         .with_compute_unit_limit(COMPUTE_UNIT_LIMIT)
         .with_loaded_accounts_data_size_limit(LOADED_ACCOUNTS_DATA_SIZE_LIMIT);
+    if let Some(fee) = priority_fee.filter(|f| *f > 0) {
+        config = config.with_priority_fee(fee);
+    }
     let message = Message::try_compile_with_config(&fee_payer.pubkey(), ixs, blockhash, config)
         .expect("instructions compile");
     let mut signers: Vec<&Keypair> = vec![fee_payer];

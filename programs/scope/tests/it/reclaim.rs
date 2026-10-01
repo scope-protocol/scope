@@ -11,7 +11,7 @@ use spl_token_2022_interface::{
 /// Announce, then have P close nothing: the token account is empty, so reclaim can run.
 fn announced() -> (Harness, StealthCase) {
     let mut h = Harness::new();
-    let case = h.stealth_case(0);
+    let case = h.stealth_case();
     h.send(&case.setup, &[]).expect("announce");
     (h, case)
 }
@@ -107,7 +107,7 @@ fn reclaim_rejects_decoy_token_account() {
     h.svm.send_transaction(tx).expect("decoy");
     h.svm.expire_blockhash();
     let ix = reclaim(&case.announcement, &decoy.pubkey(), &h.payer.pubkey());
-    assert_scope_error(h.send(&[ix], &[]), ScopeError::TokenAccountAddressMismatch);
+    assert_scope_error(h.send(&[ix], &[]), ScopeError::AnnouncementAddressMismatch);
     assert!(
         h.svm
             .get_account(&case.announcement)

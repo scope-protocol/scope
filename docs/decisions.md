@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-09-28
+last_verified: 2026-09-30
 ---
 
 # Decisions
@@ -8,9 +8,27 @@ last_verified: 2026-09-28
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
 
+## 2026-09-30 Program before devnet
+
+- **Payer as base, not a creator key from S.** Both block front-running: only a key that signs can create the account. A key A derived from S would let a recipient find the account from R alone, but adds a second signature to every payer transaction, a raw-scalar signer on the payer side, and gives up the program's check that R matches the account. Recipients know their payer in the target uses (payroll, invoices).
+- **Drop k.** v1 uses a fresh R per payment, so k was always 0. The seed is `sha256("stealth-ta/v1" || R)`, `announce` data is 33 bytes and the announcement 68, with the view tag still at offset 2. Rejected: keeping k for several accounts per R, which a fresh R covers at no cost. Supersedes the k in the 2026-09-28 `create_with_seed` line.
+- **`reclaim` binds by the announcement PDA.** Only `announce` writes an announcement, and only at `["ann", T]` for the token account T it checked, so a decoy D gives `["ann", D]` and fails. The recompute from (payer, R) proved the same fact a second time. Supersedes the 2026-09-28 line "`reclaim` recomputes the token account"; the decoy test stays (V34).
+- **One module per instruction.** Each instruction has an accounts struct that checks count, signer and program ids when it is built, and a `process` function for the rest. Rejected: a macro-generated error list, which added nothing the existing code-position test does not cover.
+- **One crypto tree in the docs.** crypto.md describes the tree the crate implements; Q14 keeps what is still missing.
+- **CU ceilings at bump 255.** `announce` searches for the canonical bump and each lower bump costs 1,500 CU, so budgets are measured at bump 255 (V55).
+
 ## 2026-09-28 Migrate the tested crypto library
 
-Import the standalone `stealth-keygen` HKDF-SHA256, ElGamal, symmetric-key, test-vector and documentation changes. Preserve its derivation constants and use SCOPE's pinned SDK 7.0.1 so returned key types match the client dependency. This migration does not resolve Q14 or replace the target protocol tree. Rejected for this change: silently rewriting the imported derivation to HKDF-SHA512 or adding a second direct SDK version. Evidence: V48.
+Import the standalone `stealth-keygen` HKDF-SHA256, ElGamal, symmetric-key, test-vector and documentation changes. Preserve its derivation constants and use SCOPE's pinned SDK 7.0.1 so returned key types match the client dependency. This migration does not resolve Q14 or replace the target protocol tree. Rejected for this change: silently rewriting the imported derivation to HKDF-SHA512 or adding a second direct SDK version. Evidence: V53.
+
+## 2026-09-28 Payer engine, plain rows first
+
+- **Plain rows before stealth rows.** `scope pay` pays plain recipients now; stealth rows need the run secret, E from it, and the `ct_ikm` export, which wait on Q14. Rejected: building stealth rows against the pre-convergence `stealth-keygen` API and rewriting them after Q14.
+- **Confidential funding only (Q3).** The engine spends the source's available balance and never deposits; the payer shields and applies before a run. A deposit inside `pay` would publish each run's total at the run's start; funding ahead of time keeps the two apart. Rejected for v1: a deposit step inside `pay`.
+- **Source keys as spl-token-cli 5.6 derives them.** Per wallet, `derive_confidential_keys(payer, b"")`, so a source set up with that CLI works and one keypair backs up everything (V50). Rejected: per-account seeds (no CLI can then fund or apply) and zk-sdk's legacy signer derivation, deprecated in 7.0.1.
+- **Send order from OS randomness until the run secret exists.** The permutation is stored in the run header, which resume needs anyway; with stealth rows it derives from the run secret as client.md says. Rejected: file order, which the chain would mirror.
+- **Simulate, journal, then send.** An attempt that fails simulation is never journaled or sent, so a bad row halts the run instead of looping through expiries. Sends skip preflight and RPC retries; the engine resends until the attempt lands or its blockhash is finalized dead.
+- **Two more permissive licenses.** The RPC client's TLS brings ISC (ring, rustls-webpki, untrusted) and CDLA-Permissive-2.0 (the webpki-roots CA bundle); `deny.toml` allows both.
 
 ## 2026-09-28 Design at the start of this repository
 

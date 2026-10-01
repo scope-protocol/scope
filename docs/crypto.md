@@ -8,25 +8,26 @@ last_verified: 2026-09-30
 TL;DR: a standard stealth-address construction on Curve25519, plus derivations from the same shared secret for the Token-2022 confidential keys and, on the recipient's side only, for the sweep destination.
 The shared-secret derivations are the new part and the source of every open concern; external review is pending (Q1).
 
-## Target derivation tree
+## Derivation tree
 
-Symbols follow [design.md](design.md), Keys.
+Symbols follow [design.md](design.md), Keys. Implemented in `crates/stealth-keygen` (verification: V53), except `d`, which is planned.
 
 ```
 S      = ECDH(r, B_scan) = ECDH(b_scan, R)              reject all-zero S
-PRK    = HKDF-SHA512-Extract(salt = "stealth-conf/v1", S)
-t      = mod_wide(Expand(PRK, "tweak"      || R || k, 64))     P = B_spend + t·G
-tag    = Expand(PRK, "view-tag"   || R || k, 1)
-ct_ikm = Expand(PRK, "ct-ikm"     || R || k, 32)  ->  zk-sdk derive_confidential_keys_from_ikm(ct_ikm)
+PRK    = HKDF-SHA256-Extract(salt = "stealth-keygen-v3", S)
+t      = mod_wide(Expand(PRK, "spend-tweak"   || R, 64))       P = B_spend + t·G
+tag    = Expand(PRK, "discovery-tag" || R, 1)
+ct_ikm = Expand(PRK, "ct-ikm-v1"     || R || C, 32)  ->  zk-sdk derive_confidential_keys_from_ikm(ct_ikm)
+C      = chain_id || program_id || mint || token_account, 32 bytes each
 
 Recipient only:
 prefix = SHA512(len(label) || label || p)[32..64]  ->  nonce prefix for raw-scalar Ed25519 signing, from p, never from S
-d      = HKDF-SHA512(salt = "stealth-dest/v1", ikm = b_spend, info = "d-owner" || R || k)  ->  D_owner keypair
+d      = HKDF-SHA512(salt = "stealth-dest/v1", ikm = b_spend, info = "d-owner" || R)  ->  D_owner keypair [planned]
 ```
 
-Why: RFC 5869 says distinct `info` under a PRF gives computationally independent outputs; that is the whole argument for the three shared-secret leaves, the same pattern as a TLS 1.3 key schedule. BIP-352 is precedent only for binding R and an index k into the tweak; it derives one value from S, not three. `k` is in every account address so several accounts per handshake can be added later; v1 uses `k = 0`.
+Why: RFC 5869 says distinct `info` under a PRF gives computationally independent outputs; that is the whole argument for the three shared-secret leaves, the same pattern as a TLS 1.3 key schedule. Every expansion carries the exact R bytes, so encodings of R that X25519 maps to the same S still give different outputs. `C` ties the confidential keys to one account on one cluster, so a repeated R on another cluster or mint does not repeat the keys. In `C`, `chain_id` is the cluster's genesis hash and `program_id` is the SCOPE program id `EwbfwDdaRdxzF6wJFBKQmqcGoh93wNFL7FMo31eK9V2H` [proposed: no client code builds `C` yet; the payer engine's stealth rows fix it].
 
-`derive_confidential_keys_from_ikm(ikm: &[u8]) -> Result<(ElGamalKeypair, AeKey), ElGamalError>` in solana-zk-sdk 7.0.1 runs a second HKDF-SHA512 (salt `solana-conf-bal/v1`, info `ae` and `elgamal`), unchanged in 8.0.0 (verification: V28). Feeding it `ct_ikm` rather than raw S keeps the stages separate.
+`derive_confidential_keys_from_ikm(ikm: &[u8]) -> Result<(ElGamalKeypair, AeKey), ElGamalError>` in solana-zk-sdk 7.0.1 runs a second HKDF-SHA512 (salt `solana-conf-bal/v1`, info `ae` and `elgamal`), unchanged in 8.0.0 (verification: V28). Feeding it `ct_ikm` rather than raw S keeps the stages separate. The crypto crate exports `ct_ikm` as `ConfidentialKeyMaterial`, a zeroizing 32-byte secret with no `Debug`, `Clone` or `Copy`, and has no Solana SDK dependency; `scope-client::confidential::derive_confidential_keys` makes the SDK call.
 
 The payer knows S and every leaf of PRK. `d` is derived from `b_spend`, which never touches S, so the payer cannot derive D_owner. [open: the reviewer confirms using the signing secret as HKDF input, or prescribes a dedicated recipient master secret]
 
@@ -50,7 +51,7 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 
 ## Disclosure receipt
 
-`{R, k, ct_ikm, signature}`. The verifier re-derives the ElGamal and AES keys, checks the ElGamal pubkey against the proof instructions in the referenced transaction, and decrypts the amount. A forged `ct_ikm` fails the pubkey check, not a decryption. Disclosing `ct_ikm` hands over that one account's full read access: one credit, one sweep, nothing else, because every payment has its own S and PRK. It reveals nothing about t, the tag, p, b_spend or other payments, given HKDF-Expand is a PRF [likely, pending review].
+`{R, ct_ikm, signature}`. The verifier re-derives the ElGamal and AES keys, checks the ElGamal pubkey against the proof instructions in the referenced transaction, and decrypts the amount. A forged `ct_ikm` fails the pubkey check, not a decryption. Disclosing `ct_ikm` hands over that one account's full read access: one credit, one sweep, nothing else, because every payment has its own S and PRK. It reveals nothing about t, the tag, p, b_spend or other payments, given HKDF-Expand is a PRF [likely, pending review].
 
 ## Known concerns
 
@@ -78,39 +79,6 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 - The client checks the AE balance hint against the ElGamal ciphertext before using it.
 - Re-verify crate versions before shipping.
 
-## Implementation
-
-`crates/stealth-keygen` uses HKDF-SHA256 with salt `stealth-keygen-v3`.
-Every expansion binds the exact announcement bytes,
-including encodings that X25519 maps to the same shared secret:
-
-```text
-PRK    = HKDF-SHA256-Extract("stealth-keygen-v3", S)
-t      = mod_wide(Expand(PRK, "spend-tweak" || R, 64))
-tag    = Expand(PRK, "discovery-tag" || R, 1)
-ct_ikm = Expand(PRK, "ct-ikm-v1" || R || C, 32)
-C      = chain_id || program_id || mint || token_account  (32 bytes each)
-```
-
-Payer and recipient export `ConfidentialKeyMaterial`, a zeroizing 32-byte secret
-with no `Debug`, `Clone`, or `Copy` implementation. The crypto crate has no Solana
-SDK dependency. `scope-client::confidential::derive_confidential_keys` delegates
-to `derive_confidential_keys_from_ikm` in the pinned SDK 7.0.1. It derives both
-ElGamal and AE keys from `ct_ikm` with the SDK's HKDF-SHA512 schedule. Disclosed
-material can reconstruct these keys without exposing S or the payment scalar;
-a receipt verifier still needs to authenticate the derived ElGamal public key.
-
-The changed salt and R binding make this schedule incompatible with prior key
-outputs. Both parties must use the same version. Independent Python fixtures,
-X25519 encoding-alias tests, and client encryption/proof tests cover the change.
-Nonce-from-p signing is unchanged.
-
-These are the implemented formulas, not the target tree above. Q14 remains open
-for protocol review of the outer schedule and index binding, recipient-only
-destination keys, externally supplied ephemeral material, meta-address parsing,
-and account validation. Receipt serialization and transaction verification are
-still client work; key-material export and SDK derivation are implemented.
-
 ## Open questions
 
-Q1 (external review of the tree, including `d`), Q11 (one ephemeral key per run), Q14 (converge the crate), Q16 (run secret from a payer master secret). Owners and recommendations: [plan.md](plan.md).
+Q1 (external review of the tree, including `d`), Q11 (one ephemeral key per run), Q14 (what the crate still lacks: `d`, externally supplied ephemeral keys, meta-address parsing, and the external review of this tree), Q16 (run secret from a payer master secret). Owners and recommendations: [plan.md](plan.md).

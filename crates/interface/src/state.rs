@@ -1,22 +1,22 @@
 use crate::ScopeError;
 
-pub const ANNOUNCEMENT_LEN: usize = 69;
+pub const ANNOUNCEMENT_LEN: usize = 68;
 pub const ANNOUNCEMENT_DISCRIMINATOR: u8 = 1;
 pub const ANNOUNCEMENT_VERSION: u8 = 1;
 /// Scan filters on this byte with `memcmp`.
 pub const VIEW_TAG_OFFSET: usize = 2;
-const K_OFFSET: usize = 3;
-const BUMP_OFFSET: usize = 4;
-const EPHEMERAL_OFFSET: usize = 5;
-const PAYER_OFFSET: usize = 37;
+const BUMP_OFFSET: usize = 3;
+const EPHEMERAL_OFFSET: usize = 4;
+const PAYER_OFFSET: usize = 36;
 
 /// The announcement account written by `announce`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Announcement {
     pub view_tag: u8,
-    pub k: u8,
     pub bump: u8,
+    /// R, the payer's one-time public key.
     pub ephemeral: [u8; 32],
+    /// Receives every rent refund.
     pub payer: [u8; 32],
 }
 
@@ -26,7 +26,6 @@ impl Announcement {
         out[0] = ANNOUNCEMENT_DISCRIMINATOR;
         out[1] = ANNOUNCEMENT_VERSION;
         out[VIEW_TAG_OFFSET] = self.view_tag;
-        out[K_OFFSET] = self.k;
         out[BUMP_OFFSET] = self.bump;
         out[EPHEMERAL_OFFSET..PAYER_OFFSET].copy_from_slice(&self.ephemeral);
         out[PAYER_OFFSET..].copy_from_slice(&self.payer);
@@ -46,7 +45,6 @@ impl Announcement {
         payer.copy_from_slice(&data[PAYER_OFFSET..]);
         Ok(Self {
             view_tag: data[VIEW_TAG_OFFSET],
-            k: data[K_OFFSET],
             bump: data[BUMP_OFFSET],
             ephemeral,
             payer,
@@ -61,7 +59,6 @@ mod tests {
     fn sample() -> Announcement {
         Announcement {
             view_tag: 0xab,
-            k: 0,
             bump: 254,
             ephemeral: [7; 32],
             payer: [9; 32],
@@ -77,21 +74,20 @@ mod tests {
     #[test]
     fn layout_matches_design() {
         let bytes = sample().to_bytes();
-        assert_eq!(bytes.len(), 69);
+        assert_eq!(bytes.len(), 68);
         assert_eq!(bytes[0], ANNOUNCEMENT_DISCRIMINATOR);
         assert_eq!(bytes[1], ANNOUNCEMENT_VERSION);
         assert_eq!(bytes[VIEW_TAG_OFFSET], 0xab);
-        assert_eq!(bytes[3], 0);
-        assert_eq!(bytes[4], 254);
-        assert_eq!(&bytes[5..37], &[7; 32]);
-        assert_eq!(&bytes[37..69], &[9; 32]);
+        assert_eq!(bytes[3], 254);
+        assert_eq!(&bytes[4..36], &[7; 32]);
+        assert_eq!(&bytes[36..68], &[9; 32]);
     }
 
     #[test]
     fn rejects_wrong_length_and_discriminator() {
         let mut bytes = sample().to_bytes();
         assert_eq!(
-            Announcement::from_bytes(&bytes[..68]),
+            Announcement::from_bytes(&bytes[..67]),
             Err(ScopeError::NotAnnouncement)
         );
         bytes[0] = 2;
