@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-09-30
+last_verified: 2026-10-03
 ---
 
 # Client
@@ -17,6 +17,8 @@ Built for plain recipients in `crates/client/src/pay.rs`; stealth rows come next
 **Journal.** Append-only JSONL at `runs/<run_id>/journal.jsonl`, mode 0600, one writer holding a file lock, and a lock on `runs/` across the duplicate check: a run header (input hash, mint, source, payer, send order), then per row an attempt (signature, last valid block height, both ciphertexts, the signed transaction) fsynced before the first send, a `landed` record, and `done`. No secret, no plaintext amount; the input copy beside it, the payroll list, is mode 0600 too. A torn last line is dropped, since its attempt was never sent. `pay --resume <run_id>` reads the journal, then the chain, and converges. `pay` refuses an input whose hash matches an earlier run unless `--again`.
 
 **Run secret (stealth rows).** `r_i = HKDF(run_secret, run_id || i)`. Stealth rows survive journal loss: resume re-derives R_i and finds the announcement at `["ann", token_account]`, which only this payer can have created ([design.md](design.md)). Refunds do not need it, since `reclaim` pays the stored payer; losing it costs rebuilding or disclosing a stealth row, not money. Storage is Q16.
+
+`stealth-keygen::derive_payment_with_ephemeral` accepts the recipient's public keys and a protected `EphemeralSecret` imported from r_i. It reconstructs P, R and the tag; the same context reconstructs `ct_ikm` (verification: V58). The client derives the token-account address from (payer, R) before building that context. Run-secret derivation and stealth-row integration remain planned.
 
 **Source.** Keys are per wallet, `derive_confidential_keys(payer, b"")`, as spl-token-cli 5.6 derives them, so a source set up with that CLI works; the engine refuses a source whose ElGamal key differs (verification: V50). The engine reads the AE hint and confirms it against the ElGamal ciphertext ([crypto.md](crypto.md), Balance cache), then proves from that verified value. It spends only the available balance; pending balance is applied before a run, with spl-token-cli 5.6 or later, never during one.
 
