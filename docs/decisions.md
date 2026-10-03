@@ -1,12 +1,16 @@
 ---
 status: decided
-last_verified: 2026-09-30
+last_verified: 2026-10-03
 ---
 
 # Decisions
 
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
+
+## 2026-10-03 Reconstruct payer payments from ephemeral secrets
+
+- **Supplied r returns the full payment.** `derive_payment_with_ephemeral` borrows a protected X25519 `EphemeralSecret` and returns `SenderPayment`, including R, P, the discovery tag and private material for later `ct_ikm` derivation. The random API generates r and delegates to it. This lets the client reconstruct a payout row without changing the existing derivation or vectors (V58). Rejected: returning only R, which leaves the client without the rest of the payment; accepting context before R, since the token-account address in that context depends on R. Run-secret derivation and storage remain Q16; the rest of Q14 stays open.
 
 ## 2026-09-30 Program before devnet
 

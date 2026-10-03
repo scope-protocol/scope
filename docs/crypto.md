@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-09-30
+last_verified: 2026-10-03
 ---
 
 # Cryptography
@@ -11,6 +11,8 @@ The shared-secret derivations are the new part and the source of every open conc
 ## Derivation tree
 
 Symbols follow [design.md](design.md), Keys. Implemented in `crates/stealth-keygen` (verification: V53), except `d`, which is planned.
+
+Payers may supply r through `EphemeralSecret::from_bytes` and `derive_payment_with_ephemeral`; the random API delegates to the same derivation. R is computed from r, and the returned payment retains S for later `ct_ikm` derivation (verification: V58). The supplied secret is cleared on drop. Use a fresh ephemeral key per distinct payment; reuse is only for reconstructing that payment.
 
 ```
 S      = ECDH(r, B_scan) = ECDH(b_scan, R)              reject all-zero S
@@ -81,4 +83,4 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 
 ## Open questions
 
-Q1 (external review of the tree, including `d`), Q11 (one ephemeral key per run), Q14 (what the crate still lacks: `d`, externally supplied ephemeral keys, meta-address parsing, and the external review of this tree), Q16 (run secret from a payer master secret). Owners and recommendations: [plan.md](plan.md).
+Q1 (external review of the tree, including `d`), Q11 (one ephemeral key per run), Q14 (remaining integration: `d`, meta-address parsing, and pinning `program_id` in the client's context), Q16 (run secret from a payer master secret). Owners and recommendations: [plan.md](plan.md).
