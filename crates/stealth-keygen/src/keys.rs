@@ -20,6 +20,17 @@ pub struct RecipientSecretKeys {
     scan: X25519Secret,
 }
 
+/// Exported recipient secrets: canonical spend scalar || raw X25519 scan secret.
+/// Cleared on drop; intentionally does not implement Debug, Clone, or Copy.
+pub struct RecipientSecretKeyMaterial(Zeroizing<[u8; 64]>);
+
+impl RecipientSecretKeyMaterial {
+    /// Borrow bytes for storage. Any copies must be protected separately.
+    pub fn as_bytes(&self) -> &[u8; 64] {
+        &self.0
+    }
+}
+
 /// Recipient public information.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecipientPublicKeys {
@@ -30,6 +41,7 @@ pub struct RecipientPublicKeys {
 /// Invalid recipient key material.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyError {
+    InvalidSpendSecretKey,
     InvalidSpendPublicKey,
     InvalidScanPublicKey,
 }
@@ -37,6 +49,9 @@ pub enum KeyError {
 impl fmt::Display for KeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::InvalidSpendSecretKey => {
+                "recipient spend secret must be a canonical nonzero scalar"
+            }
             Self::InvalidSpendPublicKey => "invalid recipient spend public key",
             Self::InvalidScanPublicKey => "invalid recipient scan public key",
         })
@@ -64,6 +79,37 @@ impl EphemeralSecret {
 }
 
 impl RecipientSecretKeys {
+    /// Import canonical spend scalar || raw scan secret, 32 bytes each.
+    /// The spend scalar is little-endian, not an Ed25519 seed. Scan bytes are
+    /// preserved; X25519 clamps them during public-key and shared-secret derivation.
+    /// Any copies made by the caller must be protected separately.
+    pub fn from_bytes(bytes: [u8; 64]) -> Result<Self, KeyError> {
+        let bytes = Zeroizing::new(bytes);
+        let mut spend_bytes = Zeroizing::new([0; 32]);
+        spend_bytes.copy_from_slice(&bytes[..32]);
+        let spend = Option::<Scalar>::from(Scalar::from_canonical_bytes(*spend_bytes))
+            .map(Zeroizing::new)
+            .ok_or(KeyError::InvalidSpendSecretKey)?;
+        if *spend == Scalar::ZERO {
+            return Err(KeyError::InvalidSpendSecretKey);
+        }
+        let mut scan_bytes = Zeroizing::new([0; 32]);
+        scan_bytes.copy_from_slice(&bytes[32..]);
+        Ok(Self {
+            spend,
+            scan: X25519Secret::from(*scan_bytes),
+        })
+    }
+
+    /// Export protected private material for backup or transport.
+    /// Storage encryption and access control belong to the caller.
+    pub fn export(&self) -> RecipientSecretKeyMaterial {
+        let mut bytes = Zeroizing::new([0; 64]);
+        bytes[..32].copy_from_slice(self.spend.as_bytes());
+        bytes[32..].copy_from_slice(self.scan.as_bytes());
+        RecipientSecretKeyMaterial(bytes)
+    }
+
     /// Generate a fresh recipient identity.
     pub fn generate<R>(rng: &mut R) -> Result<Self, R::Error>
     where
@@ -91,6 +137,7 @@ impl RecipientSecretKeys {
             scan,
         })
     }
+
     /// Derive the recipient's public spend and scan keys.
     pub fn derive_public_keys(&self) -> RecipientPublicKeys {
         RecipientPublicKeys {
@@ -162,6 +209,42 @@ mod tests {
         test_support::{ScriptedRng, TestRngError, hex, identity_rng, payment_rng, vector},
     };
     use curve25519_dalek::constants::EIGHT_TORSION;
+
+    #[test]
+    fn secret_key_import_rejects_zero_and_noncanonical_scalars() {
+        for spend in [
+            [0; 32],
+            [0xff; 32],
+            hex("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010"),
+        ] {
+            let mut bytes = [2; 64];
+            bytes[..32].copy_from_slice(&spend);
+            assert!(matches!(
+                RecipientSecretKeys::from_bytes(bytes),
+                Err(KeyError::InvalidSpendSecretKey)
+            ));
+        }
+    }
+
+    #[test]
+    fn secret_key_import_preserves_raw_scan_bytes() {
+        let mut bytes = [0; 64];
+        bytes[0] = 1;
+        for scan in [[0; 32], [0xff; 32]] {
+            bytes[32..].copy_from_slice(&scan);
+            let recipient = RecipientSecretKeys::from_bytes(bytes).unwrap();
+            assert_eq!(recipient.export().as_bytes(), &bytes);
+            let public = recipient.derive_public_keys();
+            assert_eq!(
+                public.spend_public_key_bytes(),
+                ED25519_BASEPOINT_POINT.compress().to_bytes()
+            );
+            assert_eq!(
+                public.scan_public_key_bytes(),
+                X25519PublicKey::from(&X25519Secret::from(scan)).to_bytes()
+            );
+        }
+    }
 
     #[test]
     fn public_key_import_rejects_invalid_spend_encodings_and_subgroups() {

@@ -39,6 +39,40 @@ fn imported_public_keys_reproduce_the_payment() {
 }
 
 #[test]
+fn restored_recipient_recovers_and_signs_existing_payments() {
+    let (backup, public, sent, signature, ct_ikm) = {
+        let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
+        let public = recipient.derive_public_keys();
+        let sent = derive_payment(&public, &mut payment_rng()).unwrap();
+        let recovered = recover_payment(&recipient, &sent.announcement)
+            .unwrap()
+            .unwrap();
+        (
+            recipient.export(),
+            public,
+            sent,
+            recovered.sign(b"restore"),
+            recovered.derive_ct_ikm(&encryption_context()).unwrap(),
+        )
+    };
+    let restored = RecipientSecretKeys::from_bytes(*backup.as_bytes()).unwrap();
+    assert_eq!(restored.export().as_bytes(), backup.as_bytes());
+    assert_eq!(restored.derive_public_keys(), public);
+    let recovered = recover_payment(&restored, &sent.announcement)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.payment_public_key, sent.payment_public_key);
+    assert_eq!(recovered.sign(b"restore"), signature);
+    assert_eq!(
+        recovered
+            .derive_ct_ikm(&encryption_context())
+            .unwrap()
+            .as_bytes(),
+        ct_ikm.as_bytes()
+    );
+}
+
+#[test]
 fn supplied_ephemeral_matches_random_api_and_independent_vectors() {
     let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
     let public = recipient.derive_public_keys();

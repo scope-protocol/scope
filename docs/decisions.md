@@ -10,6 +10,8 @@ Docs describe the present; this file holds the why. Design history from before t
 
 ## 2026-10-04 Recipient key interoperability
 
+- **Back up exact recipient secrets.** The raw format is a canonical nonzero little-endian spend scalar followed by the original scan secret, 32 bytes each. Imports reject invalid scalars and exports use a zeroizing wrapper without `Debug`, `Clone` or `Copy`; encrypted storage belongs to the caller. Rejected: treating the spend scalar as an Ed25519 seed, reducing invalid imports, or silently normalizing scan bytes. Evidence: V60.
+
 - **Validate public keys at import.** `RecipientPublicKeys::from_bytes` accepts canonical, nonidentity prime-order Edwards spend keys and contributory X25519 scan keys. Scan bytes retain X25519's input rules, including equivalent encodings; payment derivation still checks its actual shared secret. Rejected: unchecked imports, a handwritten scan-key blacklist, or converting scan keys to Edwards points, which would change the accepted X25519 inputs. Evidence: V59.
 
 ## 2026-10-03 Reconstruct payer payments from ephemeral secrets

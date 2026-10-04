@@ -64,6 +64,8 @@ identifier. Account creation, proofs, and receipt verification belong to the cli
 | Function or method | Purpose |
 |---|---|
 | `RecipientSecretKeys::generate(&mut rng)` | Generate the recipient's private spend and scan keys. |
+| `RecipientSecretKeys::from_bytes(bytes)` | Restore recipient secrets from the raw 64-byte format. |
+| `recipient.export()` | Export recipient secrets in a protected `RecipientSecretKeyMaterial`. |
 | `recipient.derive_public_keys()` | Obtain the public keys shared with payers. |
 | `RecipientPublicKeys::from_bytes(spend, scan)` | Import and validate the public spend and scan keys. |
 | `public_keys.spend_public_key_bytes()` | Export the public spend key as 32 bytes. |
@@ -86,6 +88,12 @@ Public-key imports require a canonical, nonidentity prime-order Edwards spend
 point and reject noncontributory X25519 scan keys. Scan encodings follow X25519's
 input rules and are preserved as supplied. Payment derivation still rejects an
 all-zero shared secret and an identity payment key.
+
+Recipient backups contain the canonical little-endian spend scalar followed by
+the original X25519 scan secret, 32 bytes each. Imports reject zero or noncanonical
+spend scalars rather than reducing them. `RecipientSecretKeyMaterial::as_bytes()`
+borrows this secret format; the wrapper clears it on drop and has no `Debug`,
+`Clone`, or `Copy`. The caller supplies encrypted storage and protects any copies.
 
 ## Dependencies
 
