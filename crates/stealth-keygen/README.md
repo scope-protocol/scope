@@ -65,6 +65,7 @@ identifier. Account creation, proofs, and receipt verification belong to the cli
 |---|---|
 | `RecipientSecretKeys::generate(&mut rng)` | Generate the recipient's private spend and scan keys. |
 | `recipient.derive_public_keys()` | Obtain the public keys shared with payers. |
+| `RecipientPublicKeys::from_bytes(spend, scan)` | Import and validate the public spend and scan keys. |
 | `public_keys.spend_public_key_bytes()` | Export the public spend key as 32 bytes. |
 | `public_keys.scan_public_key_bytes()` | Export the public scan key as 32 bytes. |
 | `derive_payment(&public_keys, &mut rng)` | Derive a one-time payment public key and discovery announcement. |
@@ -80,6 +81,11 @@ Confidential-material derivation is available on both `SenderPayment` and
 `RecoveredPayment`. Both parties must supply the same `ConfidentialContext`,
 containing the chain genesis hash, application program ID, mint, and token-account
 address as 32-byte fields.
+
+Public-key imports require a canonical, nonidentity prime-order Edwards spend
+point and reject noncontributory X25519 scan keys. Scan encodings follow X25519's
+input rules and are preserved as supplied. Payment derivation still rejects an
+all-zero shared secret and an identity payment key.
 
 ## Dependencies
 

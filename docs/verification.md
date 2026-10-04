@@ -1,6 +1,6 @@
 ---
 status: verified
-last_verified: 2026-10-03
+last_verified: 2026-10-04
 ---
 
 # Verification
@@ -68,6 +68,7 @@ Line numbers drift; when bumping a pinned version, re-check the rows that name i
 | V51 | A transfer proof's equality context ciphertext is the source's new available balance, `current - (lo + hi·2^16)` | spl-token-confidential-transfer-proof-generation 0.6.1 `src/transfer.rs` 162-178 |
 | V53 | `stealth-keygen` derives the view tag, the 64-byte tweak and `ct_ikm` with HKDF-SHA256 (salt `stealth-keygen-v3`, R in every expansion, `ct_ikm` also bound to chain, program, mint and token account); `scope-client` turns `ct_ikm` into the ElGamal and AE keys with zk-sdk's `derive_confidential_keys_from_ikm`, and payer, recipient and a disclosure holder derive the same keys | `crates/stealth-keygen/src/derivation.rs`; tests `ct_ikm_agrees_and_is_deterministic_and_payment_specific`, `payer_recipient_and_disclosure_derive_the_same_usable_keys`, `sdk_keys_match_independent_hkdf_sha512_vectors`; vectors from the independent Python generator in `crates/stealth-keygen/tests/fixtures/hkdf.txt` |
 | V58 | A supplied ephemeral X25519 secret reconstructs the same R, tag, P and account-scoped `ct_ikm` as the random API, agrees with recipient recovery and existing vectors, and reconstructs the same usable SDK keys; both APIs reject zero shared secrets, invalid spend points and an identity P | `crates/stealth-keygen/src/keys.rs` and `src/spender.rs`; tests `supplied_ephemeral_matches_random_api_and_independent_vectors`, `supplied_ephemeral_reconstructs_payment_after_drop`, `supplied_ephemeral_uses_x25519_clamping`, `supplied_ephemeral_rejects_invalid_recipient_keys`, `supplied_ephemeral_rejects_payment_identity`; `payer_recipient_and_disclosure_derive_the_same_usable_keys` in `crates/client/tests/confidential.rs`. `EphemeralSecret` wraps x25519-dalek 3.0.0 `StaticSecret`, whose `Drop` clears its bytes with the enabled default `zeroize` feature |
+| V59 | Public recipient keys import from bytes without changing payment derivation; imports reject invalid or noncanonical Edwards encodings, identity, small-order and mixed-order spend points, and low-order X25519 scan inputs and their high-bit aliases | `public_key_import_rejects_invalid_spend_encodings_and_subgroups`, `public_key_import_rejects_low_order_scan_keys`, `public_key_import_preserves_x25519_encodings` in `keys.rs`; `imported_public_keys_reproduce_the_payment` in `tests/payment_flow.rs` |
 
 ## This repo: tests and spike runs
 

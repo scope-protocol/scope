@@ -5,8 +5,11 @@
 //! `RecipientPublicKeys` contains information intended for publication.
 //! `RecipientSecretKeys` contains material that must remain private.
 
-use curve25519_dalek::{EdwardsPoint, Scalar, constants::ED25519_BASEPOINT_POINT};
+use curve25519_dalek::{
+    EdwardsPoint, Scalar, constants::ED25519_BASEPOINT_POINT, edwards::CompressedEdwardsY,
+};
 use rand_core::TryCryptoRng;
+use std::fmt;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519Secret};
 use zeroize::Zeroizing;
 
@@ -23,6 +26,24 @@ pub struct RecipientPublicKeys {
     spend: EdwardsPoint,
     scan: X25519PublicKey,
 }
+
+/// Invalid recipient key material.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyError {
+    InvalidSpendPublicKey,
+    InvalidScanPublicKey,
+}
+
+impl fmt::Display for KeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InvalidSpendPublicKey => "invalid recipient spend public key",
+            Self::InvalidScanPublicKey => "invalid recipient scan public key",
+        })
+    }
+}
+
+impl std::error::Error for KeyError {}
 
 /// Payer's ephemeral X25519 secret material for one payment.
 /// Cleared on drop; intentionally does not implement Debug, Clone, or Copy.
@@ -88,6 +109,30 @@ impl RecipientSecretKeys {
 }
 
 impl RecipientPublicKeys {
+    /// Import a canonical, nonidentity prime-order spend point and an X25519 key.
+    /// Rejects scan keys that produce an all-zero shared secret.
+    pub fn from_bytes(spend: [u8; 32], scan: [u8; 32]) -> Result<Self, KeyError> {
+        let point = CompressedEdwardsY(spend)
+            .decompress()
+            .ok_or(KeyError::InvalidSpendPublicKey)?;
+        if point.compress().to_bytes() != spend
+            || point.is_small_order()
+            || !point.is_torsion_free()
+        {
+            return Err(KeyError::InvalidSpendPublicKey);
+        }
+
+        let scan = X25519PublicKey::from(scan);
+        // A fixed clamped scalar detects noncontributory X25519 inputs.
+        if !X25519Secret::from([0; 32])
+            .diffie_hellman(&scan)
+            .was_contributory()
+        {
+            return Err(KeyError::InvalidScanPublicKey);
+        }
+        Ok(Self { spend: point, scan })
+    }
+
     /// Compressed Edwards encoding of B, exactly 32 bytes.
     pub fn spend_public_key_bytes(&self) -> [u8; 32] {
         self.spend.compress().to_bytes()
@@ -114,9 +159,71 @@ mod tests {
         DeriveError, SenderError,
         derivation::PaymentSharedSecret,
         derive_payment, derive_payment_with_ephemeral,
-        test_support::{ScriptedRng, TestRngError, identity_rng, payment_rng, vector},
+        test_support::{ScriptedRng, TestRngError, hex, identity_rng, payment_rng, vector},
     };
     use curve25519_dalek::constants::EIGHT_TORSION;
+
+    #[test]
+    fn public_key_import_rejects_invalid_spend_encodings_and_subgroups() {
+        let scan = vector::<32>("scan_public");
+        for point in EIGHT_TORSION.into_iter().chain(
+            EIGHT_TORSION
+                .iter()
+                .skip(1)
+                .map(|p| ED25519_BASEPOINT_POINT + p),
+        ) {
+            assert_eq!(
+                RecipientPublicKeys::from_bytes(point.compress().to_bytes(), scan),
+                Err(KeyError::InvalidSpendPublicKey)
+            );
+        }
+        for spend in [
+            [0xff; 32],
+            hex("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+            hex("0100000000000000000000000000000000000000000000000000000000000080"),
+        ] {
+            assert_eq!(
+                RecipientPublicKeys::from_bytes(spend, scan),
+                Err(KeyError::InvalidSpendPublicKey)
+            );
+        }
+    }
+
+    #[test]
+    fn public_key_import_rejects_low_order_scan_keys() {
+        let spend = vector::<32>("spend_public");
+        for encoding in [
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+            "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ] {
+            let scan = hex(encoding);
+            assert_eq!(
+                RecipientPublicKeys::from_bytes(spend, scan),
+                Err(KeyError::InvalidScanPublicKey)
+            );
+            let mut alias = scan;
+            alias[31] |= 0x80;
+            assert_eq!(
+                RecipientPublicKeys::from_bytes(spend, alias),
+                Err(KeyError::InvalidScanPublicKey)
+            );
+        }
+    }
+
+    #[test]
+    fn public_key_import_preserves_x25519_encodings() {
+        let spend = vector::<32>("spend_public");
+        let mut scan = vector::<32>("scan_public");
+        scan[31] |= 0x80;
+        let public = RecipientPublicKeys::from_bytes(spend, scan).unwrap();
+        assert_eq!(public.spend_public_key_bytes(), spend);
+        assert_eq!(public.scan_public_key_bytes(), scan);
+    }
 
     #[test]
     fn supplied_ephemeral_rejects_invalid_recipient_keys() {

@@ -5,8 +5,9 @@ mod support;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use stealth_keygen::{
-    DeriveError, EphemeralSecret, PaymentAnnouncement, RecipientError, RecipientSecretKeys,
-    RecoveredPayment, SenderError, derive_payment, derive_payment_with_ephemeral, recover_payment,
+    DeriveError, EphemeralSecret, PaymentAnnouncement, RecipientError, RecipientPublicKeys,
+    RecipientSecretKeys, RecoveredPayment, SenderError, derive_payment,
+    derive_payment_with_ephemeral, recover_payment,
 };
 use support::{ScriptedRng, TestRngError, identity_rng, payment_rng, vector};
 
@@ -17,6 +18,24 @@ fn encryption_context() -> stealth_keygen::ConfidentialContext {
         mint: [3; 32],
         token_account: [4; 32],
     }
+}
+
+#[test]
+fn imported_public_keys_reproduce_the_payment() {
+    let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
+    let public = recipient.derive_public_keys();
+    let imported = RecipientPublicKeys::from_bytes(
+        public.spend_public_key_bytes(),
+        public.scan_public_key_bytes(),
+    )
+    .unwrap();
+    assert_eq!(imported, public);
+    let sent = derive_payment(&imported, &mut payment_rng()).unwrap();
+    assert_eq!(sent.payment_public_key, vector::<32>("payment_public"));
+    let recovered = recover_payment(&recipient, &sent.announcement)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.payment_public_key, sent.payment_public_key);
 }
 
 #[test]

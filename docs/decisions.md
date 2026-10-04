@@ -1,12 +1,16 @@
 ---
 status: decided
-last_verified: 2026-10-03
+last_verified: 2026-10-04
 ---
 
 # Decisions
 
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
+
+## 2026-10-04 Recipient key interoperability
+
+- **Validate public keys at import.** `RecipientPublicKeys::from_bytes` accepts canonical, nonidentity prime-order Edwards spend keys and contributory X25519 scan keys. Scan bytes retain X25519's input rules, including equivalent encodings; payment derivation still checks its actual shared secret. Rejected: unchecked imports, a handwritten scan-key blacklist, or converting scan keys to Edwards points, which would change the accepted X25519 inputs. Evidence: V59.
 
 ## 2026-10-03 Reconstruct payer payments from ephemeral secrets
 
