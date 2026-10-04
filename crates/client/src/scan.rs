@@ -8,7 +8,11 @@ use crate::{
 use curve25519_dalek::scalar::Scalar;
 use scope_interface::state::Announcement;
 use solana_address::Address;
-use solana_zk_sdk::encryption::{elgamal::ElGamalCiphertext, pedersen::G};
+use solana_zk_sdk::encryption::{
+    auth_encryption::AeKey,
+    elgamal::{ElGamalCiphertext, ElGamalKeypair},
+    pedersen::G,
+};
 use spl_token_2022_interface::{
     extension::{
         BaseStateWithExtensions, StateWithExtensions,
@@ -16,7 +20,7 @@ use spl_token_2022_interface::{
     },
     state::{Account, AccountState},
 };
-use stealth_keygen::{PaymentAnnouncement, RecipientSecretKeys, recover_payment};
+use stealth_keygen::{PaymentAnnouncement, RecipientSecretKeys, RecoveredPayment, recover_payment};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentInfo {
@@ -26,6 +30,7 @@ pub struct PaymentInfo {
     pub mint: Address,
     pub ephemeral: [u8; 32],
     pub amount: u64,
+    pub public_amount: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +39,14 @@ pub enum ScanError {
     Chain(#[from] ChainError),
     #[error("payment {account}: {why}")]
     Invalid { account: Address, why: String },
+}
+
+pub(crate) struct OwnedPayment {
+    pub info: PaymentInfo,
+    pub payment: RecoveredPayment,
+    pub elgamal: ElGamalKeypair,
+    pub ae: AeKey,
+    pub extension: ConfidentialTransferAccount,
 }
 
 /// Tags depend on each announcement's R, so filter locally before account reads.
@@ -46,9 +59,9 @@ pub fn scan<C: RecipientChain>(
     let mut payments = Vec::new();
     for (address, account) in chain.announcements()? {
         if let Some(payment) = inspect(chain, recipient, genesis, address, &account)?
-            && mint.is_none_or(|m| *m == payment.mint)
+            && mint.is_none_or(|m| *m == payment.info.mint)
         {
-            payments.push(payment);
+            payments.push(payment.info);
         }
     }
     payments.sort_by_key(|p| p.announcement);
@@ -61,7 +74,7 @@ pub(crate) fn inspect<C: RecipientChain>(
     genesis: [u8; 32],
     address: Address,
     account: &AccountData,
-) -> Result<Option<PaymentInfo>, ScanError> {
+) -> Result<Option<OwnedPayment>, ScanError> {
     if account.owner != program_id() || account.lamports == 0 {
         return Ok(None);
     }
@@ -155,12 +168,19 @@ pub(crate) fn inspect<C: RecipientChain>(
         .and_then(|h| h.checked_add(lo))
         .ok_or(bad("pending balance overflow"))?;
     let amount = amount.checked_add(pending).ok_or(bad("balance overflow"))?;
-    Ok(Some(PaymentInfo {
-        announcement: address,
-        token_account,
-        payer,
-        mint: state.base.mint,
-        ephemeral: announcement.ephemeral,
-        amount,
+    Ok(Some(OwnedPayment {
+        info: PaymentInfo {
+            announcement: address,
+            token_account,
+            payer,
+            mint: state.base.mint,
+            ephemeral: announcement.ephemeral,
+            amount,
+            public_amount: state.base.amount,
+        },
+        payment,
+        elgamal,
+        ae,
+        extension: ext,
     }))
 }

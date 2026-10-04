@@ -75,7 +75,7 @@ fn recovered_payment_signs_a_solana_transaction_with_the_protocol_context() {
         sent.derive_ct_ikm(&ctx).expect("payer").as_bytes(),
         recovered.derive_ct_ikm(&ctx).expect("recipient").as_bytes()
     );
-    let signer = PaymentSigner::new(recovered);
+    let signer = PaymentSigner::new(&recovered);
     let destination = Keypair::new();
     let ix =
         solana_system_interface::instruction::transfer(&signer.pubkey(), &destination.pubkey(), 1);

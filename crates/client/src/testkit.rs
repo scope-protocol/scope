@@ -394,7 +394,13 @@ impl RecipientChain for SvmChain<'_> {
         Ok(self.svm.minimum_balance_for_rent_exemption(space))
     }
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError> {
-        Ok(u64::from(message.header().num_required_signatures) * 5_000)
+        let priority = match message {
+            solana_message::VersionedMessage::V1(m) => m.config.priority_fee.unwrap_or(0),
+            _ => 0,
+        };
+        (u64::from(message.header().num_required_signatures) * 5_000)
+            .checked_add(priority)
+            .ok_or_else(|| ChainError("fee overflow".into()))
     }
 }
 

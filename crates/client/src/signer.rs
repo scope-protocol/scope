@@ -5,15 +5,15 @@ use solana_signature::Signature;
 use solana_signer::{Signer, SignerError};
 use stealth_keygen::RecoveredPayment;
 
-pub struct PaymentSigner(RecoveredPayment);
+pub struct PaymentSigner<'a>(&'a RecoveredPayment);
 
-impl PaymentSigner {
-    pub fn new(payment: RecoveredPayment) -> Self {
+impl<'a> PaymentSigner<'a> {
+    pub fn new(payment: &'a RecoveredPayment) -> Self {
         Self(payment)
     }
 }
 
-impl Signer for PaymentSigner {
+impl Signer for PaymentSigner<'_> {
     fn try_pubkey(&self) -> Result<Address, SignerError> {
         Ok(Address::new_from_array(self.0.payment_public_key))
     }

@@ -10,6 +10,8 @@ Docs describe the present; this file holds the why. Design history from before t
 
 ## 2026-10-04 Recipient client integration
 
+- **Atomic sweep into a deterministic fresh account.** D uses D_owner as the signing base and fixed seed `scope-sweep/v1`; its confidential keys use the SDK's wallet derivation so the owner can reconstruct them. Preparation reads rent and message fees, simulates, and refuses reused token accounts. Only identical signed transactions are resent. A separately simulated version without reclaim keeps failed rent cleanup from blocking funds. Rejected: partial sweeps, guessed fees, or rebuilding while an earlier transaction may still land. Counterparty destinations remain follow-up work.
+
 - **Discovery checks tags locally.** Each tag needs its announcement's R; a fixed recipient memcmp filter would miss payments. Scan validates announcement PDAs and token authorities, then authenticates the derived ElGamal key and balance hint before reporting amounts. Rejected: trusting a tag match or the payer-writable balance hint. RPC capacity remains S6.
 
 - **One protocol context and a scalar signer adapter.** `confidential::context` pins SCOPE's program ID and binds the genesis hash, mint and account. `PaymentSigner` delegates to the crypto crate's existing nonce-safe raw-scalar signing; a fallible v1 builder accepts any Solana signer. Existing keypair builders retain their API. Rejected: treating the recovered scalar as an Ed25519 seed or duplicating signing in the client.
