@@ -75,6 +75,7 @@ identifier. Account creation, proofs, and receipt verification belong to the cli
 | `derive_payment_with_ephemeral(&public_keys, &ephemeral)` | Reconstruct a payment from supplied ephemeral secret material. |
 | `recover_payment(&secret_keys, &announcement)` | Recover a candidate payment; returns `Ok(None)` if the discovery tag does not match. |
 | `recovered.sign(message)` | Sign message bytes with the recovered payment key. |
+| `recipient.derive_sweep_destination(&R)` | Derive a protected Ed25519 seed for the per-payment sweep owner. |
 | `payment.derive_ct_ikm(&context)` | Derive protected input for the account's confidential keys. |
 | `material.as_bytes()` | Borrow secret bytes for SDK derivation or deliberate disclosure. |
 | `ConfidentialKeyMaterial::from_bytes(bytes)` | Import disclosed material for client-side verification. |
@@ -95,10 +96,17 @@ spend scalars rather than reducing them. `RecipientSecretKeyMaterial::as_bytes()
 borrows this secret format; the wrapper clears it on drop and has no `Debug`,
 `Clone`, or `Copy`. The caller supplies encrypted storage and protects any copies.
 
+The sweep owner uses a separate HKDF-SHA512 schedule: salt `stealth-dest/v1`,
+input the canonical spend scalar, and info `d-owner || R`, expanding to a 32-byte
+standard Ed25519 seed. `SweepDestinationSeed::as_bytes()` borrows that seed for a
+client keypair constructor. The recipient can reconstruct it from their backup
+and the same exact R bytes; the payer's shared secret does not derive it. The
+client creates the destination token account and its confidential keys.
+
 ## Dependencies
 
 - `curve25519-dalek`: Edwards point and scalar arithmetic for spend and payment keys.
-- `hkdf`: HKDF-SHA256 extraction and expansion for discovery tags, spending tweaks, and confidential key material.
+- `hkdf`: HKDF-SHA256 for payment keys and confidential material; HKDF-SHA512 for sweep-owner seeds.
 - `rand_core`: Cryptographic RNG traits for generating key material.
 - `sha2`: SHA-2 hashing for discovery tags, scalar tweaks, and signing.
 - `x25519-dalek`: X25519 key agreement, with the `static_secrets` feature enabled.

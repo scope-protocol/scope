@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-10-03
+last_verified: 2026-10-04
 ---
 
 # Client
@@ -35,6 +35,8 @@ Plain recipients: `recipient,amount` rows, amounts in token units. The engine pr
 ## Recipient flow (planned)
 
 Nothing on the recipient side is persisted: D_owner is derived from `b_spend` and R, so a crash at any point is a retry.
+
+`RecipientSecretKeys::derive_sweep_destination(&R)` supplies a protected standard Ed25519 seed. The client builds D_owner with `Keypair::new_from_array(*seed.as_bytes())`; this SDK conversion and reconstruction after a recipient backup are tested (verification: V61). Creating D and building the sweep remain planned.
 
 `scan`: `getProgramAccounts` on our program with `dataSize = 68`, `memcmp(0, [1])`, `memcmp(2, [tag])`; per candidate one X25519, re-derive the tag, derive the token account from (payer, R), recompute `B_spend + t·G` and compare it with that account's owner, then derive the confidential keys and decrypt the pending balance. Expected to hold to about 100k announcements on a paid RPC [unverified, spike S6]; an indexer beyond that is out of scope.
 

@@ -3,7 +3,7 @@
 #[path = "../src/test_support.rs"]
 mod support;
 
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use stealth_keygen::{
     DeriveError, EphemeralSecret, PaymentAnnouncement, RecipientError, RecipientPublicKeys,
     RecipientSecretKeys, RecoveredPayment, SenderError, derive_payment,
@@ -70,6 +70,70 @@ fn restored_recipient_recovers_and_signs_existing_payments() {
             .as_bytes(),
         ct_ikm.as_bytes()
     );
+}
+
+#[test]
+fn sweep_destination_matches_independent_seed_key_and_signature_vectors() {
+    let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
+    let seed = recipient
+        .derive_sweep_destination(&vector("ephemeral_public"))
+        .unwrap();
+    assert_eq!(seed.as_bytes(), &vector::<32>("sweep_seed"));
+    let signer = SigningKey::from_bytes(seed.as_bytes());
+    assert_eq!(
+        signer.verifying_key().to_bytes(),
+        vector::<32>("sweep_public")
+    );
+    let message = b"stealth-keygen test vector";
+    let signature = signer.sign(message);
+    assert_eq!(signature.to_bytes(), vector::<64>("sweep_signature"));
+    signer
+        .verifying_key()
+        .verify_strict(message, &signature)
+        .unwrap();
+}
+
+#[test]
+fn sweep_destination_is_recoverable_and_binds_spend_secret_and_exact_r() {
+    let original = recipient(1, 2);
+    let r = vector::<32>("ephemeral_public");
+    let seed = original.derive_sweep_destination(&r).unwrap();
+    assert_eq!(
+        seed.as_bytes(),
+        original.derive_sweep_destination(&r).unwrap().as_bytes()
+    );
+    let backup = original.export();
+    drop(original);
+    let restored = RecipientSecretKeys::from_bytes(*backup.as_bytes()).unwrap();
+    assert_eq!(
+        seed.as_bytes(),
+        restored.derive_sweep_destination(&r).unwrap().as_bytes()
+    );
+    assert_eq!(
+        seed.as_bytes(),
+        recipient(1, 9)
+            .derive_sweep_destination(&r)
+            .unwrap()
+            .as_bytes()
+    );
+    assert_ne!(
+        seed.as_bytes(),
+        recipient(9, 2)
+            .derive_sweep_destination(&r)
+            .unwrap()
+            .as_bytes()
+    );
+    for byte in [0, 31] {
+        let mut changed_r = r;
+        changed_r[byte] ^= 0x80;
+        assert_ne!(
+            seed.as_bytes(),
+            restored
+                .derive_sweep_destination(&changed_r)
+                .unwrap()
+                .as_bytes()
+        );
+    }
 }
 
 #[test]
