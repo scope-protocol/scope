@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-09-30
+last_verified: 2026-10-04
 ---
 
 # Design
@@ -160,7 +160,7 @@ The program holds no authority over tokens: the announcement PDA is only a close
 
 ## Registry
 
-Deferred to P4 ([plan.md](plan.md), Q12). v1 passes an encoded meta-address string (`B_spend || B_scan` with a version and checksum). Until a registry exists, the small-order and mixed-order rejection in `stealth-keygen` is the only check on B_spend (verification: V42), and the CLI does not let a user skip it.
+Deferred to P4 ([plan.md](plan.md), Q12). v1 passes `scope:` followed by Base58Check of `0x01 || B_spend || B_scan`; version 1 identifies the key layout and current payment schedule, and the checksum is four bytes of double-SHA256. `RecipientPublicKeys::to_meta_address` and `from_meta_address` implement this format and validate the decoded keys (verification: V59, V62). The CLI's register and stealth-row parsing remain planned. Until a registry exists, the small-order and mixed-order rejection in `stealth-keygen` is the only check on B_spend (verification: V42).
 
 ## Fallback
 

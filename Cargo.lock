@@ -686,6 +686,7 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
 dependencies = [
+ "sha2 0.10.9",
  "tinyvec",
 ]
 
@@ -5298,6 +5299,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "stealth-keygen"
 version = "0.1.0"
 dependencies = [
+ "bs58",
  "curve25519-dalek 5.0.0",
  "ed25519-dalek",
  "hkdf 0.13.0",

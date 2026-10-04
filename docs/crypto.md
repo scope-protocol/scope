@@ -85,4 +85,4 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 
 ## Open questions
 
-Q1 (external review of the tree, including `d`), Q11 (one ephemeral key per run), Q14 (remaining integration: meta-address parsing and pinning `program_id` in the client's context), Q16 (run secret from a payer master secret). Owners and recommendations: [plan.md](plan.md).
+Q1 (external review of the tree, including `d`), Q11 (one ephemeral key per run), Q14 (remaining integration: pinning `program_id` in the client's context; meta-address parsing is implemented, V62), Q16 (run secret from a payer master secret). Owners and recommendations: [plan.md](plan.md).

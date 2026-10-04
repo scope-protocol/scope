@@ -39,6 +39,33 @@ fn imported_public_keys_reproduce_the_payment() {
 }
 
 #[test]
+fn shared_meta_address_supports_payment_recovery_and_sweep_derivation() {
+    let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
+    let address = recipient.derive_public_keys().to_meta_address();
+    let public = RecipientPublicKeys::from_meta_address(&address).unwrap();
+    let sent = derive_payment(&public, &mut payment_rng()).unwrap();
+    assert_eq!(sent.payment_public_key, vector::<32>("payment_public"));
+    let restored = RecipientSecretKeys::from_bytes(*recipient.export().as_bytes()).unwrap();
+    let recovered = recover_payment(&restored, &sent.announcement)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.payment_public_key, sent.payment_public_key);
+    assert_eq!(
+        recovered
+            .derive_ct_ikm(&encryption_context())
+            .unwrap()
+            .as_bytes(),
+        sent.derive_ct_ikm(&encryption_context())
+            .unwrap()
+            .as_bytes()
+    );
+    let seed = restored
+        .derive_sweep_destination(&sent.announcement.ephemeral_public_key)
+        .unwrap();
+    assert_eq!(seed.as_bytes(), &vector::<32>("sweep_seed"));
+}
+
+#[test]
 fn restored_recipient_recovers_and_signs_existing_payments() {
     let (backup, public, sent, signature, ct_ikm) = {
         let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();

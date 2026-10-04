@@ -70,6 +70,8 @@ identifier. Account creation, proofs, and receipt verification belong to the cli
 | `RecipientPublicKeys::from_bytes(spend, scan)` | Import and validate the public spend and scan keys. |
 | `public_keys.spend_public_key_bytes()` | Export the public spend key as 32 bytes. |
 | `public_keys.scan_public_key_bytes()` | Export the public scan key as 32 bytes. |
+| `public_keys.to_meta_address()` | Encode a shareable, versioned public receiving address. |
+| `RecipientPublicKeys::from_meta_address(address)` | Decode its checksum and version, then validate the keys. |
 | `derive_payment(&public_keys, &mut rng)` | Derive a one-time payment public key and discovery announcement. |
 | `EphemeralSecret::from_bytes(bytes)` | Import protected X25519 secret material for one payment. |
 | `derive_payment_with_ephemeral(&public_keys, &ephemeral)` | Reconstruct a payment from supplied ephemeral secret material. |
@@ -103,8 +105,17 @@ client keypair constructor. The recipient can reconstruct it from their backup
 and the same exact R bytes; the payer's shared secret does not derive it. The
 client creates the destination token account and its confidential keys.
 
+Meta-addresses use `scope:` followed by Base58Check with the Bitcoin alphabet.
+The payload is `0x01 || B_spend || B_scan` (65 bytes); the checksum is the first
+four bytes of `SHA256(SHA256(payload))`. Version 1 identifies this key layout and
+the current `stealth-keygen-v3` payment schedule. Payers decode the shared string
+into `RecipientPublicKeys` before deriving a payment. Decoding checks the exact
+payload length, checksum, version, and both keys with a fixed-size buffer. The
+checksum detects accidental corruption; it does not authenticate the recipient.
+
 ## Dependencies
 
+- `bs58`: Base58Check meta-address encoding and decoding.
 - `curve25519-dalek`: Edwards point and scalar arithmetic for spend and payment keys.
 - `hkdf`: HKDF-SHA256 for payment keys and confidential material; HKDF-SHA512 for sweep-owner seeds.
 - `rand_core`: Cryptographic RNG traits for generating key material.
