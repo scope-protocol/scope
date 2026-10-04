@@ -6,7 +6,7 @@ last_verified: 2026-10-04
 # Client
 
 TL;DR: one Rust CLI, `scope`, for both sides. The payer engine resends a signed transfer freely and rebuilds it only once the previous attempt is provably dead; the recipient scans by view tag and sweeps with plain Token-2022 instructions signed by the one-time key.
-Today `crates/client` holds address derivation, builders, the LiteSVM test kit, spike binaries and the payer engine for plain recipients (`scope pay`); stealth rows, scan, sweep and receipts are designed, not built.
+Today `crates/client` holds address derivation, builders, the LiteSVM test kit, spike binaries, the payer engine for plain recipients, and recipient scan and sweep. The CLI exposes `pay`, `register`, `scan` and `sweep`; payer stealth rows and receipts remain planned.
 
 ## Payer engine
 
@@ -24,7 +24,7 @@ Built for plain recipients in `crates/client/src/pay.rs`; stealth rows come next
 
 **Privacy.** Send order is a random permutation recorded in the run header, so it does not mirror the file order; with stealth rows it will derive from the run secret. Meta-addresses come from the input file in v1; once a registry exists, they are fetched in one query and picked locally.
 
-The library supplies `RecipientPublicKeys::to_meta_address()` and `from_meta_address(&str)`: a `scope:` Base58Check string containing a version and both public keys. The parser validates the checksum, version and keys before the payer derives a payment (verification: V62). Register output and stealth-row input wiring remain client work.
+The library supplies `RecipientPublicKeys::to_meta_address()` and `from_meta_address(&str)`: a `scope:` Base58Check string containing a version and both public keys. The parser validates the checksum, version and keys before the payer derives a payment (verification: V62). Register output is available in the CLI; payer stealth-row input wiring remains planned.
 
 **Fees.** Each attempt samples the per-CU price landed non-vote transactions actually paid in the latest confirmed block: ComputeBudget price for legacy and v0, header `priority_fee` over its compute unit limit for v1. It takes p75; above `--max-price` the run stops, resumable. `getRecentPrioritizationFees` is not used: unfiltered it returns each slot's minimum and reads near zero (verification: V39). The header carries the fee as total lamports (verification: V20). Until S5 measures both transactions, `tx::COMPUTE_UNIT_LIMIT` is a fixed 600,000 and the loaded-accounts limit 4 MiB.
 
@@ -34,17 +34,43 @@ The library supplies `RecipientPublicKeys::to_meta_address()` and `from_meta_add
 
 Plain recipients: `recipient,amount` rows, amounts in token units. The engine preflights each recipient's account (Token-2022, mint, not frozen, approved, confidential credits on, credit counter below the cap) and refuses non-transferable, transfer-fee and transfer-hook mints, all before anything is sent. Stealth recipients add the setup, handover and `announce` in [design.md](design.md). `pay --status`, planned, lists announcements still open per run and can call `reclaim` as a backstop.
 
-## Recipient flow (planned)
+## Recipient flow
 
-Nothing on the recipient side is persisted: D_owner is derived from `b_spend` and R, so a crash at any point is a retry.
+The recipient keeps one private-key backup. D_owner is derived from `b_spend` and R, so transaction retries need no sweep journal. Preserve the public R printed by sweep: after reclaim closes the announcement, it is needed to reconstruct D_owner and its confidential keys, or must be recovered from the historical payer transaction.
 
-`RecipientSecretKeys::derive_sweep_destination(&R)` supplies a protected standard Ed25519 seed. The client builds D_owner with `Keypair::new_from_array(*seed.as_bytes())`; this SDK conversion and reconstruction after a recipient backup are tested (verification: V61). Creating D and building the sweep remain planned.
+`RecipientSecretKeys::derive_sweep_destination(&R)` supplies a protected standard Ed25519 seed. The client builds D_owner with `Keypair::new_from_array(*seed.as_bytes())`; this SDK conversion and reconstruction after a recipient backup are tested (verification: V61). The source is signed through the raw-scalar `PaymentSigner` adapter (V63).
 
 `scope_client::scan::scan` fetches program-owned accounts, validates the announcement layout and canonical PDA, and checks each tag locally. The tag depends on R and cannot be known before reading the announcement. Per candidate it recovers P, compares the token account's authority, derives the account-scoped confidential keys, verifies the ElGamal key and AE balance hint, and decrypts the pending balance. An optional mint filter restricts the results. Wrong-key candidates and malformed announcements are ignored; invalid owned payments fail with their account and reason. RPC capacity remains unverified (S6).
 
 `scope_client::sweep::sweep` creates a fresh account at `create_with_seed(D_owner, "scope-sweep/v1", Token-2022)`, derives its confidential keys using the standard SDK wallet schedule, and builds the full recipient transaction. It verifies mint policy, refuses an existing token destination, handles System-owned prefunds, burns public dust, empties the source, refunds rent with `reclaim`, and drains P to D_owner. It computes rent and fees from the chain and reports an exact funding shortage. Both signatures are verified during simulation; if the full transaction fails but the version without reclaim simulates successfully, funds are swept and the report marks rent as unreclaimed. Dry runs send nothing. Submission resends only the same signed transaction, waits for finalized source state and destination creation, and stops at expiry or timeout; retry re-reads the chain. Counterparty destinations and destination-reuse overrides remain follow-up work.
 
 Any wallet that signs Token-2022 confidential instructions with an imported key can sweep without this CLI.
+
+## Recipient commands
+
+Register once and back up the resulting private file. Stdout is the public meta-address shared with payers; an existing backup is never overwritten. Raw files contain the library's 64-byte format and must be regular, nonsymlinked files with owner-only permissions. New files use mode 0600 and new directories mode 0700. Secret buffers are cleared on drop.
+
+```sh
+scope register --recipient-key ./recipient.key
+scope scan --recipient-key ./recipient.key --url http://127.0.0.1:8899
+scope sweep --recipient-key ./recipient.key --url http://127.0.0.1:8899 \
+  --announcement <address-from-scan> --dry-run
+scope sweep --recipient-key ./recipient.key --url http://127.0.0.1:8899 \
+  --announcement <address-from-scan>
+```
+
+Scan prints announcement, token account, mint, confidential amount and public amount in base units. `--mint` restricts discovery. Sweep moves the whole confidential balance and burns any public balance so the source can close; dry-run output reports both. `--max-price` caps priority prices, and `--timeout` bounds the wait for finalization. A timeout or missing announcement does not authorize an extra payment: retry reads chain state and fresh destination creation prevents duplicates. If reclaim is omitted after simulation, the output explicitly says rent was not reclaimed.
+
+For encrypted backups, install [age](https://github.com/FiloSottile/age) and supply its public recipient at registration and owner-only private identity when loading. Encryption and decryption stream through the age process; plaintext keys are never written to a temporary file.
+
+```sh
+scope register --recipient-key ./recipient.age --encrypt-to <age-public-recipient>
+scope scan --recipient-key ./recipient.age --identity ./identity.txt --url <rpc-url>
+scope sweep --recipient-key ./recipient.age --identity ./identity.txt \
+  --url <rpc-url> --announcement <announcement-address> --dry-run
+```
+
+The default backup path is `~/.config/scope/recipient.key`, and the default RPC is localhost. Live-cluster recipient validation, counterparty destinations, destination-reuse overrides, and receipts remain planned. CLI and encrypted-backup checks are V66; on-chain recipient tests are V64 and V65.
 
 ## Mints
 
@@ -71,4 +97,4 @@ Program: pinocchio 0.11.2 (`no_std`, `cpi` feature) and pinocchio-system 0.6.1; 
 
 Off-chain Solana crates follow litesvm 0.16's line and move together: solana-address ~2.6.1, solana-instruction ~3.4.1, solana-message ~4.4.1, solana-transaction ~4.1.6, solana-keypair 3.1.2, solana-signer 3.0.1, solana-system-interface 3.2.0, solana-zk-sdk 7.0.1, spl-token-2022-interface 3.1.1, spl-token-confidential-transfer-proof-extraction and -generation 0.6.1, litesvm 0.16.0, solana-rpc-client 4.2.2. Exact pins are in the root `Cargo.toml`. zk-sdk is 7.0.1, not 8, because litesvm 0.16 and zk-sdk 8 cannot share a lockfile, and `derive_confidential_keys_from_ikm` is identical in both (verification: V28, V29). When litesvm moves to solana-address 2.7, the whole line moves at once.
 
-`crates/stealth-keygen` holds keys, HKDF-SHA256 derivation and raw-scalar signing. It exports protected, account-scoped `ct_ikm`. `scope-client::confidential::derive_confidential_keys` passes that material to the pinned `solana-zk-sdk` derivation for the ElGamal and symmetric balance keys. Receipt serialization and verification remain client work; the other Q14 gaps are listed in crypto.md. Every crate is `MIT OR Apache-2.0`.
+`crates/stealth-keygen` holds keys, HKDF-SHA256 derivation and raw-scalar signing. It exports protected, account-scoped `ct_ikm`. `scope-client::confidential::derive_confidential_keys` passes that material to the pinned `solana-zk-sdk` derivation for the ElGamal and symmetric balance keys. Receipt serialization and verification remain client work; Q14 implementation is complete and external review remains Q1. Every crate is `MIT OR Apache-2.0`.

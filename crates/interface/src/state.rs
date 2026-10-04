@@ -3,7 +3,7 @@ use crate::ScopeError;
 pub const ANNOUNCEMENT_LEN: usize = 68;
 pub const ANNOUNCEMENT_DISCRIMINATOR: u8 = 1;
 pub const ANNOUNCEMENT_VERSION: u8 = 1;
-/// Scan filters on this byte with `memcmp`.
+/// The scanner checks this tag locally after reading the announcement's R.
 pub const VIEW_TAG_OFFSET: usize = 2;
 const BUMP_OFFSET: usize = 3;
 const EPHEMERAL_OFFSET: usize = 4;

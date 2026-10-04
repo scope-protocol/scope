@@ -346,8 +346,10 @@ fn sweep_burns_public_dust_and_handles_a_prefunded_destination() {
         &[&authority],
     )
     .expect("dust and prefund");
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.finalized_missing_until_send = Some(account);
     let report = sweep::sweep(
-        &mut SvmChain::new(&mut h.svm),
+        &mut chain,
         &alice,
         &announcement,
         &SweepOptions {

@@ -5,7 +5,7 @@ last_verified: 2026-10-04
 
 # Plan
 
-TL;DR: six phases, each closed by a gate that is a running command or a passing test, not a date. P0 and P1 are done except the devnet leg of S1, the multi-day S4 run, the rest of Q14 and the Q1 review request. The plain payer engine runs on Surfpool; the program's attack tests, CU ceilings and S5 are in; devnet runs are next.
+TL;DR: six phases, each closed by a gate that is a running command or a passing test, not a date. P0 and P1 are done except the devnet leg of S1, the multi-day S4 run and the Q1 review request; Q14 code is implemented and awaiting review. The plain payer engine runs on Surfpool; the program's attack tests, CU ceilings and S5 are in; devnet runs are next.
 Three owners split by area; open questions have owners, and the cut order applies as soon as a gate stalls.
 
 ## Owners
@@ -23,7 +23,7 @@ The areas meet at two contracts: `crates/interface` (announcement layout, instru
 | Phase | Work | Gate | Status |
 |---|---|---|---|
 | P0 Foundation | workspace, CI, lints, cargo-deny; interface crate with the Token-2022 account reader cross-checked against spl-token-2022-interface; devnet wallets funded | CI green on every crate; the reader agrees with spl-token-2022-interface 3.1.1 on every field `announce` reads | done, except funded devnet wallets |
-| P1 Prove the design | S1; S3, which builds `announce` and `reclaim` with the decoy test; S4 starts; Q14, then the Q1 request | S1 and S3 green, or the fallback chosen and logged in decisions.md; Q1 request sent | S3 green; S1 green in LiteSVM and on Surfpool, devnet pending; S4 sampler built and first sample taken, multi-day run pending; Q14 and Q1 open |
+| P1 Prove the design | S1; S3, which builds `announce` and `reclaim` with the decoy test; S4 starts; Q14, then the Q1 request | S1 and S3 green, or the fallback chosen and logged in decisions.md; Q1 request sent | S3 green; S1 green in LiteSVM and on Surfpool, devnet pending; S4 sampler built and first sample taken, multi-day run pending; Q14 code implemented, review pending; Q1 open |
 | P2 First payments | payer engine pays 10 plain recipients on devnet; `announce` on devnet; scan against Surfpool; S6; adversarial tests for `announce` | plain run on devnet; 10 stealth payments announced and found by scan | `scope pay` pays plain recipients, 10 on Surfpool with a kill and resume (V49); devnet run pending; attack tests for `announce` done (V54); stealth rows are the next engine work, on the `ct_ikm` export (V53) |
 | P3 Stealth end to end | `reclaim` on devnet; journal and resume; sweep with plain instructions, refusing reused destinations; disclose | one stealth payment end to end on devnet, one transaction per side, rent back with the payer; a run resumes after a kill at three steps; a receipt exists for it | |
 | P4 Hardening | chaos harness; rest of the adversarial suite; CU assertions in CI; verify; S5; Q1 findings; registry decision (Q12) and, if built, its on-chain torsion check (S7) | attacks rejected; the harness converges from every kill point of a 20-recipient run; verify accepts the P3 receipt and rejects a forged `ct_ikm` | program attack suite, CU ceilings in CI and S5 done early (V54 to V56) |
@@ -43,7 +43,7 @@ Spikes are tests or example binaries in the crate they exercise and stay as regr
 | S3 | payer-owned setup, handover and announce, then the recipient's apply, transfer, empty and reclaim, in LiteSVM | test passes | Valentyn | green; payer 254,600 to 257,600 CU, recipient 257,484 CU (V36) |
 | S4 | per-CU priority fee paid by landed non-vote transactions, over several days | p50, p75, p95 in a table | Valentyn | sampler in `crates/client/examples/s4_fees.rs`; first samples in V40 and V52; multi-day run started 2026-09-28 |
 | S5 | measured bytes and CU of both full transactions | numbers in design.md | Valentyn | LiteSVM at bump 255: payer 2,998 bytes, 254,565 CU; recipient 2,759 bytes, 256,800 CU (V56). Devnet numbers with S1 |
-| S6 | `getProgramAccounts` with the view-tag filter against 1,000 seeded accounts on our RPC provider | allowed, latency measured | Abhineet | P2 |
+| S6 | `getProgramAccounts` and local per-announcement tag checks against 1,000 seeded accounts on our RPC provider | allowed, latency measured | Abhineet | P2; fixed recipient tag filtering is not possible because tags depend on R |
 | S7 | curve25519 syscalls (validate, multiply by L) from a `no_std` Pinocchio program in LiteSVM | rejects a small-order point, accepts a valid one, CU measured | Jmkoy | only if the registry is built (P4) |
 
 ## Cut order

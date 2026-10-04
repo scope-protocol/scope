@@ -8,3 +8,5 @@
 *keypair*.json
 id.json
 .env
+*.key
+*.age

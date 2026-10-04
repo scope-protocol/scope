@@ -1,10 +1,13 @@
 #![forbid(unsafe_code)]
 
+mod recipient_keys;
+
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
 use scope_client::{
     chain::RpcChain,
     pay::{self, PayOptions, SourceKeys},
+    scan, sweep,
 };
 use solana_address::Address;
 use solana_keypair::read_keypair_file;
@@ -22,19 +25,138 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Publish a meta-address so payers can reach you with one-time accounts.
-    Register,
+    Register(RegisterArgs),
     /// Pay a batch of plain and stealth recipients.
     Pay(PayArgs),
     /// Find payments addressed to you.
-    Scan,
+    Scan(ScanArgs),
     /// Move a found payment into a fresh account of your own.
-    Sweep,
+    Sweep(SweepArgs),
     /// Produce a receipt that proves one payment's amount.
     Disclose,
     /// Check a receipt against the chain.
     Verify,
     /// Measure bytes, compute and cost per transaction.
     Bench,
+}
+
+#[derive(Debug, Args)]
+struct RecipientKeys {
+    /// Recipient backup created by `scope register`.
+    #[arg(long, default_value = "~/.config/scope/recipient.key")]
+    recipient_key: String,
+    /// Owner-only age identity file for an encrypted backup.
+    #[arg(long)]
+    identity: Option<String>,
+}
+
+impl RecipientKeys {
+    fn load(&self) -> anyhow::Result<stealth_keygen::RecipientSecretKeys> {
+        let path = expand_home(&self.recipient_key)?;
+        let identity = self.identity.as_deref().map(expand_home).transpose()?;
+        recipient_keys::load(&path, identity.as_deref())
+    }
+}
+
+#[derive(Debug, Args)]
+struct RegisterArgs {
+    #[arg(long, default_value = "~/.config/scope/recipient.key")]
+    recipient_key: String,
+    /// Encrypt the new backup to this age public recipient (requires age).
+    #[arg(long)]
+    encrypt_to: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ScanArgs {
+    #[command(flatten)]
+    keys: RecipientKeys,
+    #[arg(long, default_value = "http://127.0.0.1:8899")]
+    url: String,
+    /// Show payments for only this mint.
+    #[arg(long)]
+    mint: Option<Address>,
+}
+
+#[derive(Debug, Args)]
+struct SweepArgs {
+    #[command(flatten)]
+    keys: RecipientKeys,
+    /// Announcement address reported by `scope scan`.
+    #[arg(long)]
+    announcement: Address,
+    #[arg(long, default_value = "http://127.0.0.1:8899")]
+    url: String,
+    #[arg(long, default_value_t = 1_000_000)]
+    max_price: u64,
+    /// Maximum wait for finalization, in seconds.
+    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
+    timeout: u64,
+    /// Build and simulate the sweep without sending it.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+fn recipient_chain(url: String) -> RpcChain {
+    RpcChain(RpcClient::new_with_commitment(
+        url,
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    ))
+}
+
+fn run_scan(args: ScanArgs) -> anyhow::Result<()> {
+    let recipient = args.keys.load()?;
+    let payments = scan::scan(&recipient_chain(args.url), &recipient, args.mint.as_ref())?;
+    println!("announcement\ttoken_account\tmint\tamount_base_units\tpublic_amount_base_units");
+    for p in payments {
+        println!(
+            "{}\t{}\t{}\t{}\t{}",
+            p.announcement, p.token_account, p.mint, p.amount, p.public_amount
+        );
+    }
+    Ok(())
+}
+
+fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
+    let recipient = args.keys.load()?;
+    let report = sweep::sweep(
+        &mut recipient_chain(args.url),
+        &recipient,
+        &args.announcement,
+        &sweep::SweepOptions {
+            max_price_per_cu: args.max_price,
+            timeout: Duration::from_secs(args.timeout),
+            dry_run: args.dry_run,
+            ..Default::default()
+        },
+    )?;
+    println!(
+        "{}: {} base units to {}",
+        if report.dry_run { "simulated" } else { "swept" },
+        report.amount,
+        report.destination
+    );
+    println!(
+        "owner\t{}\nephemeral\t{}\nsignature\t{}",
+        report.destination_owner,
+        Address::new_from_array(report.ephemeral),
+        report.signature
+    );
+    if report.burned_public_amount > 0 {
+        println!(
+            "public balance {}: {} base units",
+            if report.dry_run { "to burn" } else { "burned" },
+            report.burned_public_amount
+        );
+    }
+    let rent_status = match (report.reclaimed, report.dry_run) {
+        (true, true) => "reclaim simulated",
+        (true, false) => "reclaimed",
+        (false, true) => "reclaim unavailable; simulated sweep omits cleanup",
+        (false, false) => "not reclaimed; funds swept without cleanup",
+    };
+    println!("rent {rent_status}");
+    Ok(())
 }
 
 #[derive(Debug, Args)]
@@ -116,6 +238,62 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Pay(args) => run_pay(args),
+        Command::Register(args) => {
+            let path = expand_home(&args.recipient_key)?;
+            let address = recipient_keys::create(&path, args.encrypt_to.as_deref())?;
+            println!("{address}");
+            eprintln!("recipient backup: {}", path.display());
+            Ok(())
+        }
+        Command::Scan(args) => run_scan(args),
+        Command::Sweep(args) => run_sweep(args),
         other => bail!("{other:?} is not implemented yet"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recipient_commands_parse_and_sweep_requires_an_announcement() {
+        assert!(matches!(
+            Cli::try_parse_from(["scope", "register", "--encrypt-to", "age1example"])
+                .expect("register")
+                .command,
+            Command::Register(_)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "scope",
+                "scan",
+                "--recipient-key",
+                "recipient.age",
+                "--identity",
+                "identity.txt"
+            ])
+            .expect("scan")
+            .command,
+            Command::Scan(_)
+        ));
+        assert!(Cli::try_parse_from(["scope", "sweep"]).is_err());
+        let address = Address::default().to_string();
+        assert!(matches!(
+            Cli::try_parse_from(["scope", "sweep", "--announcement", &address, "--dry-run"])
+                .expect("sweep")
+                .command,
+            Command::Sweep(SweepArgs { dry_run: true, .. })
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "scope",
+                "sweep",
+                "--announcement",
+                &address,
+                "--timeout",
+                "0"
+            ])
+            .is_err()
+        );
     }
 }

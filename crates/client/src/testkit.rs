@@ -303,6 +303,8 @@ pub struct SvmChain<'a> {
     height: Cell<u64>,
     /// Sends to swallow before executing any, to model lost transactions.
     pub drop_sends: usize,
+    /// Model a source that has not appeared in finalized reads yet.
+    pub finalized_missing_until_send: Option<Address>,
 }
 
 const HEIGHT_STEP: u64 = 40;
@@ -315,12 +317,22 @@ impl<'a> SvmChain<'a> {
             svm,
             height: Cell::new(0),
             drop_sends: 0,
+            finalized_missing_until_send: None,
         }
     }
 }
 
 impl Chain for SvmChain<'_> {
-    fn account(&self, address: &Address, _: Commitment) -> Result<Option<AccountData>, ChainError> {
+    fn account(
+        &self,
+        address: &Address,
+        commitment: Commitment,
+    ) -> Result<Option<AccountData>, ChainError> {
+        if commitment == Commitment::Finalized
+            && self.finalized_missing_until_send == Some(*address)
+        {
+            return Ok(None);
+        }
         Ok(self
             .svm
             .get_account(address)
@@ -358,6 +370,9 @@ impl Chain for SvmChain<'_> {
             return Ok(());
         }
         let result = self.svm.send_transaction(tx.clone());
+        if result.is_ok() {
+            self.finalized_missing_until_send = None;
+        }
         self.svm.expire_blockhash();
         result
             .map(|_| ())

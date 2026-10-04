@@ -10,6 +10,8 @@ Docs describe the present; this file holds the why. Design history from before t
 
 ## 2026-10-04 Recipient client integration
 
+- **CLI backup files have explicit protection.** Register creates an owner-only 64-byte raw backup, or streams it into age encryption; scan and sweep optionally stream age decryption into protected memory. Existing files are never overwritten and symlinked or group/world-readable key files are rejected. The CLI delegates discovery and transaction logic to the client. Rejected: secret arguments, plaintext temporary files, or a new encryption scheme. Sweep prints public R for later owner reconstruction after the announcement is closed.
+
 - **Atomic sweep into a deterministic fresh account.** D uses D_owner as the signing base and fixed seed `scope-sweep/v1`; its confidential keys use the SDK's wallet derivation so the owner can reconstruct them. Preparation reads rent and message fees, simulates, and refuses reused token accounts. Only identical signed transactions are resent. A separately simulated version without reclaim keeps failed rent cleanup from blocking funds. Rejected: partial sweeps, guessed fees, or rebuilding while an earlier transaction may still land. Counterparty destinations remain follow-up work.
 
 - **Discovery checks tags locally.** Each tag needs its announcement's R; a fixed recipient memcmp filter would miss payments. Scan validates announcement PDAs and token authorities, then authenticates the derived ElGamal key and balance hint before reporting amounts. Rejected: trusting a tag match or the payer-writable balance hint. RPC capacity remains S6.

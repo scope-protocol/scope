@@ -144,7 +144,7 @@ fn destination<C: RecipientChain>(
         .map_err(invalid)?;
     if !bool::from(confidential.auto_approve_new_accounts) || mint.get_extension::<spl_token_2022_interface::extension::default_account_state::DefaultAccountState>().is_ok_and(|s| s.state == spl_token_2022_interface::state::AccountState::Frozen as u8) {
         return Err(invalid(
-            "mint requires approval or can freeze new destinations",
+            "mint requires approval or freezes new destinations by default",
         ));
     }
     let auditor = confidential
@@ -346,6 +346,7 @@ pub fn sweep<C: RecipientChain>(
         chain.genesis_hash()?,
         *announcement,
         &account,
+        None,
     )?
     .ok_or_else(|| invalid("announcement is not an authenticated payment for this recipient"))?;
     if payment.info.amount == 0 {
@@ -446,7 +447,7 @@ pub fn sweep<C: RecipientChain>(
             }
         }
     };
-    let report = SweepReport {
+    let mut report = SweepReport {
         destination: destination.address,
         destination_owner: destination.owner.pubkey(),
         ephemeral: payment.info.ephemeral,
@@ -474,11 +475,23 @@ pub fn sweep<C: RecipientChain>(
                     && ext.pending_balance_hi.0 == [0; 64]
             }
         };
-        if empty
-            && chain
-                .account(&destination.address, Commitment::Finalized)?
-                .is_some()
-        {
+        let destination_ready = match chain.account(&destination.address, Commitment::Finalized)? {
+            Some(account) if account.owner == token_2022() => {
+                let state =
+                    StateWithExtensions::<Account>::unpack(&account.data).map_err(invalid)?;
+                let ext = state
+                    .get_extension::<ConfidentialTransferAccount>()
+                    .map_err(invalid)?;
+                state.base.owner == destination.owner.pubkey()
+                    && state.base.mint == payment.info.mint
+                    && ext.elgamal_pubkey == (*destination.keys.pubkey()).into()
+            }
+            _ => false,
+        };
+        if empty && destination_ready {
+            report.reclaimed = chain
+                .account(announcement, Commitment::Finalized)?
+                .is_none();
             return Ok(report);
         }
         if started.elapsed() >= opts.timeout || chain.finalized_block_height()? > valid_until {

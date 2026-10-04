@@ -58,9 +58,7 @@ pub fn scan<C: RecipientChain>(
     let genesis = chain.genesis_hash()?;
     let mut payments = Vec::new();
     for (address, account) in chain.announcements()? {
-        if let Some(payment) = inspect(chain, recipient, genesis, address, &account)?
-            && mint.is_none_or(|m| *m == payment.info.mint)
-        {
+        if let Some(payment) = inspect(chain, recipient, genesis, address, &account, mint)? {
             payments.push(payment.info);
         }
     }
@@ -74,6 +72,7 @@ pub(crate) fn inspect<C: RecipientChain>(
     genesis: [u8; 32],
     address: Address,
     account: &AccountData,
+    mint: Option<&Address>,
 ) -> Result<Option<OwnedPayment>, ScanError> {
     if account.owner != program_id() || account.lamports == 0 {
         return Ok(None);
@@ -102,6 +101,9 @@ pub(crate) fn inspect<C: RecipientChain>(
     let Ok(state) = StateWithExtensions::<Account>::unpack(&source.data) else {
         return Ok(None);
     };
+    if mint.is_some_and(|m| *m != state.base.mint) {
+        return Ok(None);
+    }
     if state.base.owner.to_bytes() != payment.payment_public_key {
         return Ok(None);
     }

@@ -2976,10 +2976,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "getrandom 0.4.3",
+ "libc",
  "scope-client",
  "solana-address 2.6.1",
+ "solana-commitment-config",
  "solana-keypair",
  "solana-rpc-client",
+ "stealth-keygen",
+ "zeroize",
 ]
 
 [[package]]
