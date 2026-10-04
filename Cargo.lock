@@ -3003,6 +3003,7 @@ dependencies = [
  "solana-message",
  "solana-rpc-client",
  "solana-sha256-hasher",
+ "solana-signature",
  "solana-signer",
  "solana-system-interface 3.2.0",
  "solana-transaction",

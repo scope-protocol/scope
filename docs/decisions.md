@@ -8,6 +8,10 @@ last_verified: 2026-10-04
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
 
+## 2026-10-04 Recipient client integration
+
+- **One protocol context and a scalar signer adapter.** `confidential::context` pins SCOPE's program ID and binds the genesis hash, mint and account. `PaymentSigner` delegates to the crypto crate's existing nonce-safe raw-scalar signing; a fallible v1 builder accepts any Solana signer. Existing keypair builders retain their API. Rejected: treating the recovered scalar as an Ed25519 seed or duplicating signing in the client.
+
 ## 2026-10-04 Recipient key interoperability
 
 - **Meta-address version 1 uses Base58Check.** The shareable format is `scope:` followed by Base58Check of `0x01 || B_spend || B_scan`, with four bytes of double-SHA256. Version 1 fixes the key layout and current payment schedule. The library uses the existing `bs58` package's checksum support and bounds decoding to 69 bytes and 95 encoded characters before validating both keys. Rejected: unversioned concatenation or handwritten production encoding and checksum code. CLI wiring remains client work. Evidence: V62.
