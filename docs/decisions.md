@@ -10,6 +10,8 @@ Docs describe the present; this file holds the why. Design history from before t
 
 ## 2026-10-04 Recipient client integration
 
+- **Discovery checks tags locally.** Each tag needs its announcement's R; a fixed recipient memcmp filter would miss payments. Scan validates announcement PDAs and token authorities, then authenticates the derived ElGamal key and balance hint before reporting amounts. Rejected: trusting a tag match or the payer-writable balance hint. RPC capacity remains S6.
+
 - **One protocol context and a scalar signer adapter.** `confidential::context` pins SCOPE's program ID and binds the genesis hash, mint and account. `PaymentSigner` delegates to the crypto crate's existing nonce-safe raw-scalar signing; a fallible v1 builder accepts any Solana signer. Existing keypair builders retain their API. Rejected: treating the recovered scalar as an Ed25519 seed or duplicating signing in the client.
 
 ## 2026-10-04 Recipient key interoperability

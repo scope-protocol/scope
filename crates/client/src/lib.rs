@@ -11,6 +11,7 @@ pub mod input;
 pub mod ix;
 pub mod journal;
 pub mod pay;
+pub mod scan;
 pub mod signer;
 #[cfg(feature = "litesvm")]
 pub mod testkit;

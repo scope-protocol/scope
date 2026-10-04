@@ -51,6 +51,14 @@ pub trait Chain {
     fn recent_prices(&self) -> Result<Vec<u64>, ChainError>;
 }
 
+/// Cluster reads needed by recipient discovery and sweeping.
+pub trait RecipientChain: Chain {
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError>;
+    fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError>;
+    fn rent(&self, space: usize) -> Result<u64, ChainError>;
+    fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError>;
+}
+
 fn rpc_err<E: core::fmt::Display>(e: E) -> ChainError {
     ChainError(e.to_string())
 }
@@ -146,5 +154,53 @@ impl Chain for RpcChain {
             )
             .map_err(rpc_err)?;
         Ok(fees::block_prices(block.transactions.unwrap_or_default()))
+    }
+}
+
+impl RecipientChain for RpcChain {
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        self.0
+            .get_genesis_hash()
+            .map(|h| h.to_bytes())
+            .map_err(rpc_err)
+    }
+
+    fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        self.0
+            .get_program_accounts(&crate::address::program_id())
+            .map(|accounts| {
+                accounts
+                    .into_iter()
+                    .map(|(address, a)| {
+                        (
+                            address,
+                            AccountData {
+                                owner: a.owner,
+                                lamports: a.lamports,
+                                data: a.data,
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .map_err(rpc_err)
+    }
+
+    fn rent(&self, space: usize) -> Result<u64, ChainError> {
+        self.0
+            .get_minimum_balance_for_rent_exemption(space)
+            .map_err(rpc_err)
+    }
+
+    fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError> {
+        struct WireMessage<'a>(&'a solana_message::VersionedMessage);
+        impl solana_rpc_client::rpc_client::SerializableMessage for WireMessage<'_> {
+            fn serialize(&self) -> Vec<u8> {
+                self.0.serialize()
+            }
+        }
+        self.0
+            .get_fee_for_message(&WireMessage(message))
+            .map_err(rpc_err)
     }
 }

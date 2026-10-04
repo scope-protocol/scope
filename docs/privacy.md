@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-09-30
+last_verified: 2026-10-04
 ---
 
 # Privacy
@@ -17,7 +17,7 @@ The payer can follow the funds it paid, as on any public ledger, but reads no am
 | Recipient | all its secrets | may leak by merging accounts |
 | Auditor | mint key or disclosed receipts | read amounts (intended) |
 | Mint authority | ApproveAccount policy, freeze authority, MintTo | gate or freeze accounts (a property of the mint, not of the rail) |
-| RPC provider | sees every query | learn which view tags a scanner asks for, from which IP |
+| RPC provider | sees every query | observe the scanner's IP and follow-up account reads |
 
 ## Artifacts per payment
 
@@ -42,7 +42,7 @@ The payer can follow the funds it paid, as on any public ledger, but reads no am
 - **Headcount and timing.** A run's transactions land close together from one payer: an observer counts recipients per run with certainty. Spreading sends over time helps; not solved.
 - **Send order.** A payroll file sorted by name, plus a public roster, would link the k-th one-time account to the k-th employee. The engine shuffles send order with a permutation derived from the run secret; this hides order, not headcount.
 - **A payer can skip `announce`.** The payment is real and can be disclosed, but the recipient's scan never finds it, and the recipient then depends on the payer to learn of it.
-- **Scanning.** A view-tag filter reveals the tags a scanner asks for to the RPC provider, together with the IP. Run your own RPC or accept it, as BIP-352 and Zcash light clients do.
+- **Scanning.** Tags are checked locally after fetching announcements. Follow-up token-account reads can reveal candidates to the RPC provider together with the scanner's IP. Run your own RPC or accept this query leak.
 - **Program fingerprint.** Calling this program, or confidential-transfer instructions at all, marks a wallet as privacy-seeking while usage is low. Applies to every privacy tool on Solana.
 - **Mint authority.** On approval-required mints the issuer sees and gates every account; a freeze authority can freeze a one-time account and block its sweep; MintTo can put public dust in it, which the sweep burns (verification: V6).
 - **View tag.** One byte of the shared-secret hash is public. Standard.

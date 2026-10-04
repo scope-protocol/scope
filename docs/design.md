@@ -57,7 +57,7 @@ Recipe and checks: [crypto.md](crypto.md). Each payment has its own R, so one R 
 | 4 | R | 32 |
 | 36 | payer, receives every rent refund | 32 |
 
-P and the mint are not stored: P is the token account's owner and the mint is in the token account. Scan filter: `dataSize = 68`, `memcmp(0, [1])`, `memcmp(2, [tag])`; the scanner then derives the token account from (payer, R).
+P and the mint are not stored: P is the token account's owner and the mint is in the token account. The scanner fetches program-owned announcements and checks tags locally after reading R; there is no fixed recipient tag for an RPC filter. It derives the token account from (payer, R) and verifies both the authority and confidential keys.
 
 **P.** A system account with no data, funded in the payer transaction and drained to zero in the sweep (verification: V24).
 

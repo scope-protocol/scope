@@ -2,7 +2,7 @@
 
 use crate::{
     address::*,
-    chain::{AccountData, Chain, ChainError, Commitment},
+    chain::{AccountData, Chain, ChainError, Commitment, RecipientChain},
     ix::*,
     tx::v1_transaction,
 };
@@ -366,6 +366,35 @@ impl Chain for SvmChain<'_> {
 
     fn recent_prices(&self) -> Result<Vec<u64>, ChainError> {
         Ok(Vec::new())
+    }
+}
+
+impl RecipientChain for SvmChain<'_> {
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        Ok([42; 32])
+    }
+    fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        Ok(self
+            .svm
+            .get_program_accounts(&program_id())
+            .into_iter()
+            .map(|(address, a)| {
+                (
+                    address,
+                    AccountData {
+                        owner: a.owner,
+                        lamports: a.lamports,
+                        data: a.data,
+                    },
+                )
+            })
+            .collect())
+    }
+    fn rent(&self, space: usize) -> Result<u64, ChainError> {
+        Ok(self.svm.minimum_balance_for_rent_exemption(space))
+    }
+    fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError> {
+        Ok(u64::from(message.header().num_required_signatures) * 5_000)
     }
 }
 
