@@ -4,7 +4,7 @@ use crate::{
     address::token_2022,
     chain::{AccountData, ChainError, Commitment, FinalizedStatus, RecipientChain},
     fees, ix,
-    scan::{self, OwnedPayment, ScanError},
+    scan::{self, OwnedPayment, PaymentInfo, ScanError},
     signer::PaymentSigner,
     tx::{COMPUTE_UNIT_LIMIT, signed_v1_transaction, v1_wire_size},
 };
@@ -43,6 +43,7 @@ use std::{
 use stealth_keygen::{RecipientSecretKeys, RecoveredPayment};
 
 const DESTINATION_SEED: &str = "scope-sweep/v1";
+const MAX_RETRIES: usize = 2;
 
 pub struct SweepOptions {
     pub max_price_per_cu: u64,
@@ -88,7 +89,11 @@ impl fmt::Display for SweepReport {
             self.payment_authority,
             Address::new_from_array(self.ephemeral),
             self.attempt_signature
-        )
+        )?;
+        if let Some(signature) = &self.finalized_signature {
+            write!(f, "\nfinalized_signature\t{signature}")?;
+        }
+        Ok(())
     }
 }
 
@@ -101,6 +106,7 @@ pub struct PreparedSweep {
     elgamal: ElGamalPubkey,
     valid_until: u64,
     retry: Option<SweepPlan>,
+    retries_left: usize,
 }
 
 impl fmt::Debug for PreparedSweep {
@@ -140,7 +146,7 @@ pub enum SweepError {
     },
     #[error("sweep completion has not been observed; check chain state before retrying\n{report}")]
     Pending { report: Box<SweepReport> },
-    #[error("sweep status is unavailable: {source}\n{report}")]
+    #[error("could not complete sweep reporting: {source}\n{report}")]
     Interrupted {
         report: Box<SweepReport>,
         #[source]
@@ -178,11 +184,19 @@ fn destination<C: RecipientChain>(
         .derive_sweep_destination(&payment.info.ephemeral)
         .map_err(|e| invalid(format!("sweep key derivation: {e:?}")))?;
     let owner = Keypair::new_from_array(*seed.as_bytes());
-    let (keys, ae) = derive_confidential_keys(&owner, b"").map_err(invalid)?;
-    let address = destination_address(&owner.pubkey());
     let mint_account = chain
         .account(&payment.info.mint, Commitment::Confirmed)?
         .ok_or_else(|| invalid("mint not found"))?;
+    destination_from_mint(owner, payment, mint_account)
+}
+
+fn destination_from_mint(
+    owner: Keypair,
+    payment: &OwnedPayment,
+    mint_account: AccountData,
+) -> Result<Destination, SweepError> {
+    let (keys, ae) = derive_confidential_keys(&owner, b"").map_err(invalid)?;
+    let address = destination_address(&owner.pubkey());
     if mint_account.owner != token_2022() {
         return Err(invalid("mint is not owned by Token-2022"));
     }
@@ -202,7 +216,10 @@ fn destination<C: RecipientChain>(
     let confidential = mint
         .get_extension::<ConfidentialTransferMint>()
         .map_err(invalid)?;
-    if !bool::from(confidential.auto_approve_new_accounts) || mint.get_extension::<spl_token_2022_interface::extension::default_account_state::DefaultAccountState>().is_ok_and(|s| s.state == spl_token_2022_interface::state::AccountState::Frozen as u8) {
+    let freezes_destinations = mint
+        .get_extension::<spl_token_2022_interface::extension::default_account_state::DefaultAccountState>()
+        .is_ok_and(|s| s.state == spl_token_2022_interface::state::AccountState::Frozen as u8);
+    if !bool::from(confidential.auto_approve_new_accounts) || freezes_destinations {
         return Err(invalid(
             "mint requires approval or freezes new destinations by default",
         ));
@@ -380,6 +397,8 @@ fn instructions(
 }
 
 struct SweepPlan {
+    info: PaymentInfo,
+    genesis: [u8; 32],
     payment: RecoveredPayment,
     owner: Keypair,
     space: usize,
@@ -389,6 +408,27 @@ struct SweepPlan {
 }
 
 impl SweepPlan {
+    fn new(
+        payment: OwnedPayment,
+        destination: Destination,
+        genesis: [u8; 32],
+        priority: u64,
+    ) -> Result<Self, SweepError> {
+        check_amount(payment.info.amount)?;
+        let authority = Address::new_from_array(payment.payment.payment_public_key);
+        let base = instructions(&payment, &destination, &authority)?;
+        Ok(Self {
+            info: payment.info,
+            genesis,
+            payment: payment.payment,
+            owner: destination.owner,
+            space: destination.space,
+            setup: destination.setup,
+            instructions: base,
+            priority,
+        })
+    }
+
     fn build<C: RecipientChain>(
         &self,
         chain: &C,
@@ -470,6 +510,16 @@ impl SweepPlan {
     }
 }
 
+fn check_amount(amount: u64) -> Result<(), SweepError> {
+    if amount == 0 {
+        return Err(invalid("payment has no confidential balance to sweep"));
+    }
+    if amount > spl_token_2022_interface::extension::confidential_transfer::MAXIMUM_DEPOSIT_TRANSFER_AMOUNT {
+        return Err(invalid("confidential balance exceeds Token-2022's single-transfer limit"));
+    }
+    Ok(())
+}
+
 /// Sweep to a fresh deterministic destination, optionally simulating without sending.
 pub fn sweep<C: RecipientChain>(
     chain: &mut C,
@@ -490,21 +540,14 @@ pub fn prepare<C: RecipientChain>(
     let account = chain
         .account(announcement, Commitment::Confirmed)?
         .ok_or_else(|| invalid("announcement not found; it may already have been reclaimed"))?;
-    let payment = scan::inspect(
-        chain,
-        recipient,
-        chain.genesis_hash()?,
-        *announcement,
-        &account,
-        None,
-    )?
-    .ok_or_else(|| invalid("announcement is not an authenticated payment for this recipient"))?;
-    if payment.info.amount == 0 {
-        return Err(invalid("payment has no confidential balance to sweep"));
-    }
+    let genesis = chain.genesis_hash()?;
+    let payment = scan::inspect(chain, recipient, genesis, *announcement, &account, None)?
+        .ok_or_else(|| {
+            invalid("announcement is not an authenticated payment for this recipient")
+        })?;
+    check_amount(payment.info.amount)?;
     let signer = PaymentSigner::new(&payment.payment);
     let destination = destination(chain, recipient, &payment)?;
-    let base = instructions(&payment, &destination, &signer.pubkey())?;
     let mut prices = chain.recent_prices()?;
     prices.sort_unstable();
     let price = if prices.is_empty() {
@@ -519,9 +562,12 @@ pub fn prepare<C: RecipientChain>(
         )));
     }
     let priority = fees::priority_fee_lamports(price, COMPUTE_UNIT_LIMIT);
-    let mut full = base.clone();
+    let info = payment.info.clone();
+    let elgamal = *destination.keys.pubkey();
+    let address = destination.address;
+    let mut cleanup = Vec::new();
     if payment.info.public_amount > 0 {
-        full.push(
+        cleanup.push(
             t22::burn(
                 &token_2022(),
                 &payment.info.token_account,
@@ -533,19 +579,14 @@ pub fn prepare<C: RecipientChain>(
             .map_err(invalid)?,
         );
     }
-    full.push(ix::reclaim(
+    cleanup.push(ix::reclaim(
         announcement,
         &payment.info.token_account,
         &payment.info.payer,
     ));
-    let plan = SweepPlan {
-        payment: payment.payment,
-        owner: destination.owner,
-        space: destination.space,
-        setup: destination.setup,
-        instructions: base,
-        priority,
-    };
+    let plan = SweepPlan::new(payment, destination, genesis, priority)?;
+    let mut full = plan.instructions.clone();
+    full.extend(cleanup);
     let full = plan.build(chain, full)?;
     let ((tx, retained_lamports, valid_until), reclaimed) = match chain.simulate(&full.0)? {
         Ok(()) => (full, true),
@@ -558,22 +599,14 @@ pub fn prepare<C: RecipientChain>(
         }
     };
     let report = SweepReport {
-        destination: destination.address,
+        destination: address,
         destination_owner: plan.owner.pubkey(),
         payment_authority: Address::new_from_array(plan.payment.payment_public_key),
         retained_lamports,
-        ephemeral: payment.info.ephemeral,
-        amount: payment.info.amount,
-        burned_public_amount: Some(if reclaimed {
-            payment.info.public_amount
-        } else {
-            0
-        }),
-        public_amount_remaining: if reclaimed {
-            0
-        } else {
-            payment.info.public_amount
-        },
+        ephemeral: info.ephemeral,
+        amount: info.amount,
+        burned_public_amount: Some(if reclaimed { info.public_amount } else { 0 }),
+        public_amount_remaining: if reclaimed { 0 } else { info.public_amount },
         attempt_signature: tx.signatures[0].to_string(),
         finalized_signature: None,
         reclaimed,
@@ -583,18 +616,23 @@ pub fn prepare<C: RecipientChain>(
         report,
         transaction: tx,
         announcement: *announcement,
-        source: payment.info.token_account,
-        mint: payment.info.mint,
-        elgamal: *destination.keys.pubkey(),
+        source: info.token_account,
+        mint: info.mint,
+        elgamal,
         valid_until,
-        retry: reclaimed.then_some(plan),
+        retry: Some(plan),
+        retries_left: MAX_RETRIES,
     })
 }
 
 fn completed_public_balance<C: RecipientChain>(
     chain: &C,
     prepared: &PreparedSweep,
+    verified: bool,
 ) -> Result<Option<u64>, SweepError> {
+    if verified && prepared.report.reclaimed {
+        return Ok(Some(0));
+    }
     let source = chain.account(&prepared.source, Commitment::Finalized)?;
     let (empty, public_amount) = match source {
         None => (true, 0),
@@ -609,6 +647,9 @@ fn completed_public_balance<C: RecipientChain>(
             {
                 return Err(invalid("sweep source identity changed"));
             }
+            if verified {
+                return Ok(Some(state.base.amount));
+            }
             let ext = state
                 .get_extension::<ConfidentialTransferAccount>()
                 .map_err(invalid)?;
@@ -620,6 +661,9 @@ fn completed_public_balance<C: RecipientChain>(
             )
         }
     };
+    if verified {
+        return Ok(Some(public_amount));
+    }
     if !empty {
         return Ok(None);
     }
@@ -643,32 +687,67 @@ fn completed_public_balance<C: RecipientChain>(
 fn retry_without_cleanup<C: RecipientChain>(
     chain: &C,
     prepared: &mut PreparedSweep,
+    deadline: Instant,
 ) -> Result<bool, SweepError> {
+    if prepared.retries_left == 0 {
+        return Ok(false);
+    }
     let Some(plan) = prepared.retry.take() else {
         return Ok(false);
     };
     if chain
         .account(&prepared.report.destination, Commitment::Confirmed)?
-        .is_some_and(|a| a.owner != Address::default() || !a.data.is_empty())
+        .is_some_and(|a| !system_placeholder(&a))
     {
         return Ok(false);
     }
+    let source = chain
+        .account(&prepared.source, Commitment::Confirmed)?
+        .ok_or_else(|| invalid("sweep source is unavailable"))?;
+    let mint = chain
+        .account(&prepared.mint, Commitment::Confirmed)?
+        .ok_or_else(|| invalid("mint not found"))?;
+    if Instant::now() >= deadline {
+        return Err(invalid("sweep deadline exceeded"));
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("scope-sweep-retry".into())
+        .spawn(move || {
+            let result = (|| {
+                let expected_mint = plan.info.mint;
+                let payment = scan::decode_source(
+                    plan.info,
+                    plan.payment,
+                    plan.genesis,
+                    source,
+                    Some(&expected_mint),
+                )?
+                .ok_or_else(|| invalid("sweep source identity changed"))?;
+                let destination = destination_from_mint(plan.owner, &payment, mint)?;
+                SweepPlan::new(payment, destination, plan.genesis, plan.priority)
+            })();
+            let _ = sender.send(result);
+        })
+        .map_err(invalid)?;
+    let plan = receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(invalid)??;
     let (transaction, retained_lamports, valid_until) =
         plan.build(chain, plan.instructions.clone())?;
     chain
         .simulate(&transaction)?
         .map_err(SweepError::Simulation)?;
-    let source = chain
-        .account(&prepared.source, Commitment::Confirmed)?
-        .ok_or_else(|| invalid("sweep source is unavailable"))?;
-    let state = StateWithExtensions::<Account>::unpack(&source.data).map_err(invalid)?;
     prepared.report.reclaimed = false;
     prepared.report.burned_public_amount = Some(0);
-    prepared.report.public_amount_remaining = state.base.amount;
+    prepared.report.public_amount_remaining = plan.info.public_amount;
+    prepared.report.amount = plan.info.amount;
     prepared.report.retained_lamports = retained_lamports;
     prepared.report.attempt_signature = transaction.signatures[0].to_string();
     prepared.transaction = transaction;
     prepared.valid_until = valid_until;
+    prepared.retry = Some(plan);
+    prepared.retries_left -= 1;
     Ok(true)
 }
 
@@ -729,25 +808,38 @@ fn submit_until<C: RecipientChain>(
                 report: Box::new(prepared.report),
             });
         }
-        if let Some(public_amount) = completed_public_balance(chain, &prepared)
-            .map_err(|e| status_error(&prepared.report, e, deadline))?
-        {
-            let reclaimed = chain
-                .account(&prepared.announcement, Commitment::Finalized)
+        let status = if prepared.report.finalized_signature.is_some() {
+            FinalizedStatus::Succeeded
+        } else {
+            chain
+                .finalized_status(&prepared.transaction.signatures[0])
                 .map_err(|e| status_error(&prepared.report, e.into(), deadline))?
-                .as_ref()
-                .is_none_or(system_placeholder);
+        };
+        if status == FinalizedStatus::Succeeded {
+            prepared.report.finalized_signature = Some(prepared.report.attempt_signature.clone());
+            prepared.retry = None;
+        }
+        if let Some(public_amount) =
+            completed_public_balance(chain, &prepared, status == FinalizedStatus::Succeeded)
+                .map_err(|e| status_error(&prepared.report, e, deadline))?
+        {
+            let reclaimed = if status == FinalizedStatus::Succeeded && prepared.report.reclaimed {
+                true
+            } else {
+                chain
+                    .account(&prepared.announcement, Commitment::Finalized)
+                    .map_err(|e| status_error(&prepared.report, e.into(), deadline))?
+                    .as_ref()
+                    .is_none_or(system_placeholder)
+            };
             let retained_lamports = chain
                 .account(&prepared.report.payment_authority, Commitment::Finalized)
                 .map_err(|e| status_error(&prepared.report, e.into(), deadline))?
                 .map_or(0, |a| a.lamports);
-            let finalized = chain
-                .finalized_status(&prepared.transaction.signatures[0])
-                .map_err(|e| status_error(&prepared.report, e.into(), deadline))?;
             prepared.report.reclaimed = reclaimed;
             prepared.report.retained_lamports = retained_lamports;
             prepared.report.public_amount_remaining = public_amount;
-            if finalized == FinalizedStatus::Succeeded {
+            if status == FinalizedStatus::Succeeded {
                 prepared.report.finalized_signature =
                     Some(prepared.report.attempt_signature.clone());
             } else if prepared.report.finalized_signature.is_none() {
@@ -765,13 +857,6 @@ fn submit_until<C: RecipientChain>(
                 report: Box::new(prepared.report),
             });
         }
-        let status = chain
-            .finalized_status(&prepared.transaction.signatures[0])
-            .map_err(|e| status_error(&prepared.report, e.into(), deadline))?;
-        if status == FinalizedStatus::Succeeded {
-            prepared.report.finalized_signature = Some(prepared.report.attempt_signature.clone());
-            prepared.retry = None;
-        }
         let expired = chain
             .finalized_block_height()
             .map_err(|e| status_error(&prepared.report, e.into(), deadline))?
@@ -782,7 +867,7 @@ fn submit_until<C: RecipientChain>(
             });
         }
         if status == FinalizedStatus::Failed || (status == FinalizedStatus::Unknown && expired) {
-            if retry_without_cleanup(chain, &mut prepared)
+            if retry_without_cleanup(chain, &mut prepared, deadline)
                 .map_err(|source| status_error(&prepared.report, source, deadline))?
             {
                 before_broadcast(&prepared.report).map_err(|source| {

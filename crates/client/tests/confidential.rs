@@ -157,3 +157,15 @@ fn payer_recipient_and_disclosure_derive_the_same_usable_keys() {
         assert_eq!(payer_ae.decrypt(&parsed), None);
     }
 }
+
+#[test]
+fn sdk_decryption_covers_pending_component_boundaries() {
+    let keys = solana_zk_sdk::encryption::elgamal::ElGamalKeypair::new_rand();
+    for amount in [65_535, 65_536, 131_071, 131_072, u64::from(u32::MAX)] {
+        assert_eq!(
+            keys.secret()
+                .decrypt_u32(&keys.pubkey().encrypt_u64(amount)),
+            Some(amount)
+        );
+    }
+}

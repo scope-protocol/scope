@@ -110,24 +110,32 @@ fn recipient_chain(url: String) -> RpcChain {
 
 fn run_scan(args: ScanArgs) -> anyhow::Result<()> {
     let recipient = args.keys.load()?;
-    let report = scan::scan(&recipient_chain(args.url), &recipient, args.mint.as_ref())?;
-    for error in report.skipped {
-        eprintln!("skipped {error}");
-    }
-    println!(
+    let mut output = io::stdout().lock();
+    writeln!(
+        output,
         "announcement\ttoken_account\tmint\tamount_base_units\tpublic_amount_base_units\tephemeral"
-    );
-    for p in report.payments {
-        println!(
-            "{}\t{}\t{}\t{}\t{}\t{}",
-            p.announcement,
-            p.token_account,
-            p.mint,
-            p.amount,
-            p.public_amount,
-            Address::new_from_array(p.ephemeral)
-        );
-    }
+    )?;
+    scan::scan_with_results(
+        &recipient_chain(args.url),
+        &recipient,
+        args.mint.as_ref(),
+        |result| match result {
+            Ok(p) => {
+                writeln!(
+                    output,
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    p.announcement,
+                    p.token_account,
+                    p.mint,
+                    p.amount,
+                    p.public_amount,
+                    Address::new_from_array(p.ephemeral)
+                )?;
+                output.flush()
+            }
+            Err(error) => writeln!(io::stderr().lock(), "skipped {error}"),
+        },
+    )?;
     Ok(())
 }
 
@@ -146,7 +154,13 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
     })?;
     println!(
         "{}: {} base units to {}",
-        if report.dry_run { "simulated" } else { "swept" },
+        if report.dry_run {
+            "simulated"
+        } else if report.finalized_signature.is_some() {
+            "swept"
+        } else {
+            "prepared amount"
+        },
         report.amount,
         report.destination
     );

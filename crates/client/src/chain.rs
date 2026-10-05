@@ -6,7 +6,13 @@ use solana_address::Address;
 use solana_commitment_config::CommitmentConfig;
 use solana_message::Hash;
 use solana_rpc_client::{
-    api::config::{RpcBlockConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig},
+    api::{
+        config::{
+            RpcAccountInfoConfig, RpcBlockConfig, RpcProgramAccountsConfig,
+            RpcSendTransactionConfig, RpcSimulateTransactionConfig, UiAccountEncoding,
+        },
+        filter::{Memcmp, RpcFilterType},
+    },
     rpc_client::RpcClient,
 };
 use solana_signature::Signature;
@@ -234,25 +240,42 @@ impl RecipientChain for RpcChain {
     }
 
     fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
-        self.call(
-            self.rpc()
-                .get_program_accounts(&crate::address::program_id()),
-        )
-        .map(|accounts| {
-            accounts
-                .into_iter()
-                .map(|(address, a)| {
-                    (
-                        address,
-                        AccountData {
-                            owner: a.owner,
-                            lamports: a.lamports,
-                            data: a.data,
-                        },
-                    )
-                })
-                .collect()
-        })
+        use scope_interface::state::{
+            ANNOUNCEMENT_DISCRIMINATOR, ANNOUNCEMENT_LEN, ANNOUNCEMENT_VERSION,
+        };
+        let accounts = self.call(self.rpc().get_program_ui_accounts_with_config(
+            &crate::address::program_id(),
+            RpcProgramAccountsConfig {
+                filters: Some(vec![
+                    RpcFilterType::DataSize(ANNOUNCEMENT_LEN as u64),
+                    RpcFilterType::Memcmp(Memcmp::new_base58_encoded(
+                        0,
+                        &[ANNOUNCEMENT_DISCRIMINATOR, ANNOUNCEMENT_VERSION],
+                    )),
+                ]),
+                account_config: RpcAccountInfoConfig {
+                    encoding: Some(UiAccountEncoding::Base64),
+                    commitment: Some(CommitmentConfig::confirmed()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))?;
+        accounts
+            .into_iter()
+            .map(|(address, a)| {
+                Ok((
+                    address,
+                    AccountData {
+                        owner: a.owner.parse().map_err(rpc_err)?,
+                        lamports: a.lamports,
+                        data: a.data.decode().ok_or_else(|| {
+                            ChainError(format!("invalid RPC account encoding for {address}"))
+                        })?,
+                    },
+                ))
+            })
+            .collect()
     }
 
     fn rent(&self, space: usize) -> Result<u64, ChainError> {
@@ -322,5 +345,28 @@ mod tests {
         };
         chain.call(request).expect_err("expired");
         assert!(!called.get());
+    }
+    #[test]
+    fn malformed_rpc_account_encoding_returns_an_error() {
+        use solana_rpc_client::api::request::RpcRequest;
+        let mocks = std::collections::HashMap::from([(
+            RpcRequest::GetProgramAccounts,
+            serde_json::json!([
+                {
+                    "pubkey": Address::default().to_string(),
+                    "account": {
+                        "owner": crate::address::program_id().to_string(),
+                        "lamports": 10_000_000,
+                        "data": ["not base64!", "base64"],
+                        "executable": false,
+                        "rentEpoch": 0,
+                        "space": 68
+                    }
+                }
+            ]),
+        )]);
+        let chain = RpcChain::from(RpcClient::new_mock_with_mocks("succeeds", mocks));
+        let error = chain.announcements().expect_err("malformed transport data");
+        assert!(error.0.contains("invalid RPC account encoding"));
     }
 }

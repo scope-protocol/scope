@@ -316,11 +316,14 @@ impl Default for Harness {
     }
 }
 
+pub type SendHook = Box<dyn FnMut(&mut LiteSVM, &VersionedTransaction)>;
+
 /// [`Chain`] over LiteSVM. Every call to `finalized_block_height` advances the
 /// height by `HEIGHT_STEP`, so a dropped transaction expires after a few polls.
 pub struct SvmChain<'a> {
     pub svm: &'a mut LiteSVM,
     height: Cell<u64>,
+    pub account_reads: Cell<usize>,
     /// Sends to swallow before executing any, to model lost transactions.
     pub drop_sends: usize,
     /// Model a source that has not appeared in finalized reads yet.
@@ -329,6 +332,7 @@ pub struct SvmChain<'a> {
     pub lag_finalized_reads: bool,
     pub lag_finalized_status: bool,
     pub before_send: Option<VersionedTransaction>,
+    pub before_send_hook: Option<SendHook>,
     pub after_send: Option<VersionedTransaction>,
     pub sent_signatures: Vec<solana_signature::Signature>,
     pub failed_status_lag: Cell<usize>,
@@ -345,12 +349,14 @@ impl<'a> SvmChain<'a> {
         Self {
             svm,
             height: Cell::new(0),
+            account_reads: Cell::new(0),
             drop_sends: 0,
             finalized_missing_until_send: None,
             fail_finalized_after_send: false,
             lag_finalized_reads: false,
             lag_finalized_status: false,
             before_send: None,
+            before_send_hook: None,
             after_send: None,
             sent_signatures: Vec::new(),
             failed_status_lag: Cell::new(0),
@@ -366,6 +372,7 @@ impl Chain for SvmChain<'_> {
         address: &Address,
         commitment: Commitment,
     ) -> Result<Option<AccountData>, ChainError> {
+        self.account_reads.set(self.account_reads.get() + 1);
         if commitment == Commitment::Finalized {
             if self.fail_finalized_after_send && self.sent {
                 return Err(ChainError("RPC disconnected after send".into()));
@@ -421,6 +428,9 @@ impl Chain for SvmChain<'_> {
             self.svm
                 .send_transaction(before)
                 .map_err(|failed| ChainError(format!("{:?}", failed.err)))?;
+        }
+        if let Some(hook) = &mut self.before_send_hook {
+            hook(self.svm, tx);
         }
         let result = self.svm.send_transaction(tx.clone());
         if result.is_ok() {

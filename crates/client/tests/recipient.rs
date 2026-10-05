@@ -40,6 +40,32 @@ fn offset(n: i8) -> NonZeroI8 {
 }
 
 fn fund(h: &mut Harness, recipient: &RecipientSecretKeys, r: u8) -> (Address, Address, AeKey) {
+    fund_amount(h, recipient, r, AMOUNT)
+}
+
+fn fund_amount(
+    h: &mut Harness,
+    recipient: &RecipientSecretKeys,
+    r: u8,
+    amount: u64,
+) -> (Address, Address, AeKey) {
+    let (ixs, announcement, account, ae) = payment_instructions(h, recipient, r, amount);
+    h.send(&ixs, &[]).expect("payer transaction");
+    h.source_balance -= amount;
+    (announcement, account, ae)
+}
+
+fn payment_instructions(
+    h: &Harness,
+    recipient: &RecipientSecretKeys,
+    r: u8,
+    amount: u64,
+) -> (
+    Vec<solana_instruction::Instruction>,
+    Address,
+    Address,
+    AeKey,
+) {
     let sent = derive_payment_with_ephemeral(
         &recipient.derive_public_keys(),
         &EphemeralSecret::from_bytes([r; 32]),
@@ -70,10 +96,8 @@ fn fund(h: &mut Harness, recipient: &RecipientSecretKeys, r: u8) -> (Address, Ad
         lamports_for_owner: 8_000_000,
     })
     .expect("setup");
-    ixs.extend(transfer(h, account, keys.pubkey(), AMOUNT));
-    h.send(&ixs, &[]).expect("payer transaction");
-    h.source_balance -= AMOUNT;
-    (announcement, account, ae)
+    ixs.extend(transfer(h, account, keys.pubkey(), amount));
+    (ixs, announcement, account, ae)
 }
 
 fn transfer(
@@ -1035,8 +1059,8 @@ fn sweep_deadline_prevents_late_sends_and_caps_poll_sleeps() {
 }
 
 #[test]
-fn finalized_sweep_waits_for_account_reads_without_resending_or_rebuilding() {
-    use scope_client::sweep::{self, SweepError, SweepOptions};
+fn finalized_sweep_proves_completion_despite_lagging_account_reads() {
+    use scope_client::sweep::{self, SweepOptions};
     let mut h = Harness::new();
     let alice = recipient(1);
     let (announcement, _, _) = fund(&mut h, &alice, 3);
@@ -1049,10 +1073,8 @@ fn finalized_sweep_waits_for_account_reads_without_resending_or_rebuilding() {
     };
     let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("prepare");
     let signature = prepared.transaction().signatures[0];
-    let error = sweep::submit(&mut chain, prepared, &opts).expect_err("account state unavailable");
-    let SweepError::Pending { report } = error else {
-        panic!("recovery missing")
-    };
+    let report = sweep::submit(&mut chain, prepared, &opts)
+        .expect("finalized transaction proves completion");
     assert_eq!(chain.sent_signatures, [signature]);
     assert_eq!(report.attempt_signature, signature.to_string());
     assert_eq!(report.finalized_signature, Some(signature.to_string()));
@@ -1254,4 +1276,453 @@ fn recovery_is_checkpointed_for_each_attempt_and_flush_failure_stops_sends() {
             assert_eq!(sent.to_string(), *checkpoint);
         }
     }
+}
+
+#[test]
+fn scan_and_sweep_support_large_pending_balances() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let maximum =
+        spl_token_2022_interface::extension::confidential_transfer::MAXIMUM_DEPOSIT_TRANSFER_AMOUNT;
+    let issuer = h.mint_authority.insecure_clone();
+    let new_balance = h.source_balance + maximum;
+    let mint = spl_token_2022_interface::instruction::mint_to(
+        &token_2022(),
+        &h.mint,
+        &h.source,
+        &issuer.pubkey(),
+        &[],
+        maximum,
+    )
+    .expect("mint");
+    let deposit = ct::deposit(
+        &token_2022(),
+        &h.source,
+        &h.mint,
+        maximum,
+        6,
+        &h.payer.pubkey(),
+        &[],
+    )
+    .expect("deposit");
+    let apply = ct::apply_pending_balance(
+        &token_2022(),
+        &h.source,
+        1,
+        &h.source_ae.encrypt(new_balance).into(),
+        &h.payer.pubkey(),
+        &[],
+    )
+    .expect("apply");
+    h.send(&[mint, deposit, apply], &[&issuer])
+        .expect("fund large balance");
+    h.source_balance = new_balance;
+    for (r, amount) in [(3, (1 << 32) + 65_535), (4, maximum - (1 << 32) - 65_535)] {
+        let (announcement, _, _) = fund_amount(&mut h, &alice, r, amount);
+        let mut chain = SvmChain::new(&mut h.svm);
+        let found = scan::scan(&chain, &alice, None).expect("scan").payments;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].amount, amount);
+        let report = sweep::sweep(
+            &mut chain,
+            &alice,
+            &announcement,
+            &SweepOptions {
+                poll: std::time::Duration::ZERO,
+                ..Default::default()
+            },
+        )
+        .expect("large sweep");
+        assert_eq!(report.amount, amount);
+        assert!(report.reclaimed);
+        let seed = alice
+            .derive_sweep_destination(&report.ephemeral)
+            .expect("seed");
+        let owner = solana_keypair::Keypair::new_from_array(*seed.as_bytes());
+        let (keys, _) =
+            solana_zk_sdk::encryption::derivation::derive_confidential_keys(&owner, b"")
+                .expect("keys");
+        let account = chain
+            .svm
+            .get_account(&report.destination)
+            .expect("destination");
+        let state = StateWithExtensions::<Account>::unpack(&account.data).expect("state");
+        let ext = state
+            .get_extension::<ConfidentialTransferAccount>()
+            .expect("ct");
+        let lo: ElGamalCiphertext = ext.pending_balance_lo.try_into().expect("low");
+        let hi: ElGamalCiphertext = ext.pending_balance_hi.try_into().expect("high");
+        assert_eq!(
+            keys.secret().decrypt_u32(&lo).expect("low")
+                + (keys.secret().decrypt_u32(&hi).expect("high") << 16),
+            amount
+        );
+    }
+}
+
+#[test]
+fn scan_streams_valid_payments_and_skipped_candidates_before_the_next_read() {
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (first, source, ae) = fund(&mut h, &alice, 3);
+    let (second, _, _) = fund(&mut h, &alice, 4);
+    edit_source(&mut h, source, |ext| {
+        ext.decryptable_available_balance = ae.encrypt(42).into()
+    });
+    let chain = SvmChain::new(&mut h.svm);
+    let mut valid = Vec::new();
+    let mut skipped = Vec::new();
+    let report = scan::scan_with_results(&chain, &alice, None, |result| {
+        assert_eq!(chain.account_reads.get(), valid.len() + skipped.len() + 1);
+        match result {
+            Ok(payment) => valid.push(payment.announcement),
+            Err(ScanError::Invalid { account, .. }) => skipped.push(*account),
+            Err(other) => panic!("unexpected event: {other}"),
+        }
+        Ok(())
+    })
+    .expect("scan");
+    assert_eq!(valid, [second]);
+    assert_eq!(skipped, [source]);
+    assert_eq!(report.payments.len(), 1);
+    assert_eq!(report.skipped.len(), 1);
+    assert_ne!(first, second);
+    chain.account_reads.set(0);
+    let error = scan::scan_with_results(&chain, &alice, None, |_| {
+        Err(std::io::Error::other("output closed"))
+    })
+    .expect_err("stop on output error");
+    assert!(matches!(error, ScanError::Output(_)));
+    assert_eq!(chain.account_reads.get(), 1);
+}
+
+#[test]
+fn scan_handles_empty_retired_sources_without_changing_their_balances() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::with_permissioned_burn();
+    let alice = recipient(1);
+    let (announcement, source, _) = fund(&mut h, &alice, 3);
+    h.send(
+        &[mint_dust(&h, source, 17)],
+        &[&h.mint_authority.insecure_clone()],
+    )
+    .expect("dust");
+    let mut chain = SvmChain::new(&mut h.svm);
+    sweep::sweep(
+        &mut chain,
+        &alice,
+        &announcement,
+        &SweepOptions {
+            poll: std::time::Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect("fallback");
+    let before = chain.svm.get_account(&source).expect("source");
+    let report = scan::scan(&chain, &alice, None).expect("retired source");
+    assert_eq!(report.payments.len(), 1);
+    assert_eq!(report.payments[0].amount, 0);
+    assert_eq!(report.payments[0].public_amount, 17);
+    assert_eq!(
+        chain.svm.get_account(&source).expect("unchanged").data,
+        before.data
+    );
+}
+
+fn fund_applied(h: &mut Harness, recipient: &RecipientSecretKeys) -> (Address, Address) {
+    use spl_token_2022_interface::instruction::{AuthorityType, TokenInstruction};
+    let (mut setup, announcement, source, ae) = payment_instructions(h, recipient, 3, AMOUNT);
+    let transfer_start = setup.len() - 4;
+    let transfer = setup.split_off(transfer_start);
+    let handover = setup
+        .iter()
+        .position(|ix| {
+            ix.program_id == token_2022()
+                && matches!(
+                    TokenInstruction::unpack(&ix.data),
+                    Ok(TokenInstruction::SetAuthority {
+                        authority_type: AuthorityType::AccountOwner,
+                        ..
+                    })
+                )
+        })
+        .expect("handover");
+    let tail = setup.split_off(handover);
+    setup.extend(transfer);
+    setup.push(
+        ct::apply_pending_balance(
+            &token_2022(),
+            &source,
+            1,
+            &ae.encrypt(AMOUNT).into(),
+            &h.payer.pubkey(),
+            &[],
+        )
+        .expect("apply before handover"),
+    );
+    setup.extend(tail);
+    h.send(&setup, &[]).expect("applied payment");
+    h.source_balance -= AMOUNT;
+    (announcement, source)
+}
+
+#[test]
+fn sweep_retry_refreshes_applied_balances_when_a_new_credit_arrives() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, source) = fund_applied(&mut h, &alice);
+    let account = h.svm.get_account(&source).expect("source");
+    let state = StateWithExtensions::<Account>::unpack(&account.data).expect("state");
+    let ext = state
+        .get_extension::<ConfidentialTransferAccount>()
+        .expect("ct");
+    assert_eq!(u64::from(ext.pending_balance_credit_counter), 0);
+    let key = ext.elgamal_pubkey.try_into().expect("key");
+    let extra_credit = scope_client::tx::v1_transaction(
+        &h.payer,
+        &[],
+        &transfer(&h, source, &key, 42),
+        h.svm.latest_blockhash(),
+    );
+    let opts = SweepOptions {
+        poll: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let mut chain = SvmChain::new(&mut h.svm);
+    let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("prepare");
+    chain.before_send = Some(extra_credit);
+    let report = sweep::submit(&mut chain, prepared, &opts).expect("refreshed source proofs");
+    assert_eq!(report.amount, AMOUNT + 42);
+    assert_eq!(chain.sent_signatures.len(), 2);
+    assert!(!report.reclaimed);
+    assert_eq!(
+        report.finalized_signature.as_ref(),
+        Some(&report.attempt_signature)
+    );
+    let account = chain.svm.get_account(&source).expect("retired source");
+    let state = StateWithExtensions::<Account>::unpack(&account.data).expect("state");
+    let ext = state
+        .get_extension::<ConfidentialTransferAccount>()
+        .expect("ct");
+    assert!(!bool::from(ext.allow_confidential_credits));
+    assert_eq!(ext.available_balance.0, [0; 64]);
+    assert_eq!(ext.pending_balance_lo.0, [0; 64]);
+    assert_eq!(ext.pending_balance_hi.0, [0; 64]);
+}
+
+#[test]
+fn sweep_retry_refreshes_a_changed_mint_auditor() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, _, _) = fund(&mut h, &alice, 3);
+    let auditor = ElGamalKeypair::new_rand();
+    let update = ct::update_mint(
+        &token_2022(),
+        &h.mint,
+        &h.mint_authority.pubkey(),
+        &[],
+        true,
+        Some((*auditor.pubkey()).into()),
+    )
+    .expect("update auditor");
+    let update = scope_client::tx::v1_transaction(
+        &h.payer,
+        &[&h.mint_authority],
+        &[update],
+        h.svm.latest_blockhash(),
+    );
+    let opts = SweepOptions {
+        poll: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let mut chain = SvmChain::new(&mut h.svm);
+    let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("prepare");
+    chain.before_send = Some(update);
+    let report = sweep::submit(&mut chain, prepared, &opts).expect("fresh auditor proofs");
+    assert_eq!(report.amount, AMOUNT);
+    assert_eq!(chain.sent_signatures.len(), 2);
+    assert_eq!(
+        report.finalized_signature.as_ref(),
+        Some(&report.attempt_signature)
+    );
+}
+
+#[test]
+fn retry_decryption_respects_the_submission_deadline() {
+    use scope_client::sweep::{self, SweepError, SweepOptions};
+    use std::time::{Duration, Instant};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, source, _) = fund(&mut h, &alice, 3);
+    let opts = SweepOptions {
+        timeout: Duration::from_millis(100),
+        poll: Duration::ZERO,
+        ..Default::default()
+    };
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.drop_sends = 3;
+    let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("prepare");
+    let signature = prepared.report().attempt_signature.clone();
+    let start = Instant::now();
+    let error =
+        sweep::submit(&mut chain, prepared, &opts).expect_err("retry CPU work exceeds budget");
+    assert!(start.elapsed() < Duration::from_secs(1));
+    let SweepError::Pending { report } = error else {
+        panic!("missing recovery")
+    };
+    assert_eq!(report.attempt_signature, signature);
+    assert_eq!(chain.sent_signatures.len(), 3);
+    assert!(chain.svm.get_account(&source).is_some());
+    assert!(chain.svm.get_account(&report.destination).is_none());
+}
+
+#[test]
+fn bounded_retries_cover_cleanup_and_subsequent_credit_races() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, source) = fund_applied(&mut h, &alice);
+    let account = h.svm.get_account(&source).expect("source");
+    let state = StateWithExtensions::<Account>::unpack(&account.data).expect("state");
+    let key = state
+        .get_extension::<ConfidentialTransferAccount>()
+        .expect("ct")
+        .elgamal_pubkey
+        .try_into()
+        .expect("key");
+    let credit = transfer(&h, source, &key, 42);
+    let dust = mint_dust(&h, source, 17);
+    let donor = h.payer.insecure_clone();
+    let issuer = h.mint_authority.insecure_clone();
+    let mut calls = 0;
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.before_send_hook = Some(Box::new(move |svm, _| {
+        calls += 1;
+        let tx = match calls {
+            1 => scope_client::tx::v1_transaction(
+                &donor,
+                &[&issuer],
+                std::slice::from_ref(&dust),
+                svm.latest_blockhash(),
+            ),
+            2 => scope_client::tx::v1_transaction(&donor, &[], &credit, svm.latest_blockhash()),
+            _ => return,
+        };
+        svm.send_transaction(tx).expect("racing transaction");
+    }));
+    let report = sweep::sweep(
+        &mut chain,
+        &alice,
+        &announcement,
+        &SweepOptions {
+            poll: std::time::Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect("both races resolved");
+    assert_eq!(chain.sent_signatures.len(), 3);
+    assert_eq!(report.amount, AMOUNT + 42);
+    assert_eq!(report.public_amount_remaining, 17);
+    assert_eq!(
+        report.finalized_signature.as_ref(),
+        Some(&report.attempt_signature)
+    );
+    assert!(!report.reclaimed);
+}
+
+#[test]
+fn completed_sweep_remains_successful_if_the_payer_recreates_the_source() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, source, _) = fund(&mut h, &alice, 3);
+    let (replay, replay_announcement, replay_source, _) = payment_instructions(&h, &alice, 3, 42);
+    assert_eq!((replay_announcement, replay_source), (announcement, source));
+    let replay = scope_client::tx::v1_transaction(&h.payer, &[], &replay, h.svm.latest_blockhash());
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.after_send = Some(replay);
+    let report = sweep::sweep(
+        &mut chain,
+        &alice,
+        &announcement,
+        &SweepOptions {
+            poll: std::time::Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect("immutable finalized proof");
+    assert_eq!(report.amount, AMOUNT);
+    assert!(report.reclaimed);
+    assert_eq!(
+        report.finalized_signature.as_ref(),
+        Some(&report.attempt_signature)
+    );
+    let payments = scan::scan(&chain, &alice, None)
+        .expect("recreated payment")
+        .payments;
+    assert_eq!(payments[0].amount, 42);
+    assert!(chain.svm.get_account(&announcement).is_some());
+    assert!(chain.svm.get_account(&report.destination).is_some());
+}
+
+#[test]
+fn sweep_refuses_a_mint_that_now_requires_destination_approval() {
+    use scope_client::sweep::{self, SweepError, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, _, _) = fund(&mut h, &alice, 3);
+    let issuer = h.mint_authority.insecure_clone();
+    let update = ct::update_mint(&token_2022(), &h.mint, &issuer.pubkey(), &[], false, None)
+        .expect("update policy");
+    h.send(&[update], &[&issuer]).expect("require approval");
+    let mut chain = SvmChain::new(&mut h.svm);
+    let error = sweep::sweep(&mut chain, &alice, &announcement, &SweepOptions::default())
+        .expect_err("unsupported mint");
+    assert!(matches!(error, SweepError::Invalid(why) if why.contains("requires approval")));
+    assert!(chain.sent_signatures.is_empty());
+}
+
+#[test]
+fn full_recipient_transaction_fits_the_v1_wire_and_compute_budgets() {
+    use scope_client::{
+        sweep::{self, SweepOptions},
+        tx::{COMPUTE_UNIT_LIMIT, v1_wire_size},
+    };
+    let auditor = ElGamalKeypair::new_rand();
+    let mut h = Harness::with_auditor(Some(auditor.pubkey()));
+    let alice = recipient(1);
+    let (announcement, source, _) = fund(&mut h, &alice, 3);
+    h.send(
+        &[mint_dust(&h, source, 17)],
+        &[&h.mint_authority.insecure_clone()],
+    )
+    .expect("dust");
+    let chain = SvmChain::new(&mut h.svm);
+    let prepared =
+        sweep::prepare(&chain, &alice, &announcement, &SweepOptions::default()).expect("prepare");
+    assert!(prepared.report().reclaimed);
+    let transaction = prepared.transaction();
+    let bytes = wincode::serialize(transaction).expect("wire encoding");
+    assert_eq!(bytes.len(), v1_wire_size(transaction));
+    assert!(bytes.len() <= 4_096);
+    for (signature, key) in transaction
+        .signatures
+        .iter()
+        .zip(transaction.message.static_account_keys())
+    {
+        assert!(signature.verify(key.as_ref(), &transaction.message.serialize()));
+    }
+    let simulation = chain
+        .svm
+        .simulate_transaction(transaction.clone())
+        .expect("simulate");
+    assert!(simulation.meta.compute_units_consumed <= u64::from(COMPUTE_UNIT_LIMIT));
+    println!(
+        "full sweep with auditor and dust: {} bytes, {} CU",
+        bytes.len(),
+        simulation.meta.compute_units_consumed
+    );
 }

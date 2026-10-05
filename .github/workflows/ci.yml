@@ -32,6 +32,11 @@ jobs:
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - run: cargo build-sbf --manifest-path programs/scope/Cargo.toml -- --locked
       - run: cargo test --workspace --locked
+      - name: Verify encrypted recipient backups
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes age
+          cargo test -p scope-cli encrypted_backup_round_trips_with_age --locked -- --ignored
 
   deny:
     runs-on: ubuntu-latest
