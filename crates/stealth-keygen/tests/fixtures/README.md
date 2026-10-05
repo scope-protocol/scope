@@ -29,3 +29,12 @@ order, and label `ae` for a 16-byte symmetric key.
 The generator computes both stages independently with Python HMAC. The crypto
 crate checks `ct_ikm`; `scope-client` checks the resulting ElGamal scalar and
 balance key, encryption, key-validity proofs, and disclosure reconstruction.
+
+Sweep fixtures derive a 32-byte Ed25519 seed with HKDF-SHA512, salt
+`stealth-dest/v1`, the canonical spend scalar as input, and `d-owner || R` as info.
+The generator independently expands that seed using RFC 8032 to produce the
+destination owner's public key and signature over the existing fixture message.
+
+`meta_address.txt` fixes the public receiving address. The generator prepends
+version 1 to the spend and scan public keys, appends four bytes of double-SHA256,
+and independently Base58-encodes the result with the `scope:` prefix.

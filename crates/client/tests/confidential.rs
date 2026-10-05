@@ -2,6 +2,8 @@
 
 use rand_core::{TryCryptoRng, TryRng};
 use scope_client::confidential::derive_confidential_keys;
+use solana_keypair::Keypair;
+use solana_signer::Signer;
 use solana_zk_sdk::{
     encryption::auth_encryption::AeCiphertext,
     zk_elgamal_proof_program::{VerifyZkProof, build_pubkey_validity_proof_data},
@@ -33,6 +35,28 @@ impl TryRng for TestRng {
 }
 
 impl TryCryptoRng for TestRng {}
+
+#[test]
+fn sweep_destination_seed_builds_a_solana_signer() {
+    let recipient = RecipientSecretKeys::generate(&mut TestRng(1)).expect("recipient");
+    let sent = derive_payment(&recipient.derive_public_keys(), &mut TestRng(3)).expect("payment");
+    let seed = recipient
+        .derive_sweep_destination(&sent.announcement.ephemeral_public_key)
+        .expect("sweep seed");
+    let owner = Keypair::new_from_array(*seed.as_bytes());
+    let restored =
+        RecipientSecretKeys::from_bytes(*recipient.export().as_bytes()).expect("restore");
+    let rebuilt_seed = restored
+        .derive_sweep_destination(&sent.announcement.ephemeral_public_key)
+        .expect("rebuilt sweep seed");
+    let rebuilt = Keypair::new_from_array(*rebuilt_seed.as_bytes());
+    assert_eq!(owner.pubkey(), rebuilt.pubkey());
+    assert_ne!(owner.pubkey().to_bytes(), sent.payment_public_key);
+    let message = b"sweep transaction message";
+    let signature = owner.sign_message(message);
+    assert_eq!(signature, rebuilt.sign_message(message));
+    assert!(signature.verify(owner.pubkey().as_ref(), message));
+}
 
 #[test]
 fn payer_recipient_and_disclosure_derive_the_same_usable_keys() {

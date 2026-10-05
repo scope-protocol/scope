@@ -3,10 +3,11 @@
 #[path = "../src/test_support.rs"]
 mod support;
 
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use stealth_keygen::{
-    DeriveError, EphemeralSecret, PaymentAnnouncement, RecipientError, RecipientSecretKeys,
-    RecoveredPayment, SenderError, derive_payment, derive_payment_with_ephemeral, recover_payment,
+    DeriveError, EphemeralSecret, PaymentAnnouncement, RecipientError, RecipientPublicKeys,
+    RecipientSecretKeys, RecoveredPayment, SenderError, derive_payment,
+    derive_payment_with_ephemeral, recover_payment,
 };
 use support::{ScriptedRng, TestRngError, identity_rng, payment_rng, vector};
 
@@ -16,6 +17,149 @@ fn encryption_context() -> stealth_keygen::ConfidentialContext {
         program_id: [2; 32],
         mint: [3; 32],
         token_account: [4; 32],
+    }
+}
+
+#[test]
+fn imported_public_keys_reproduce_the_payment() {
+    let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
+    let public = recipient.derive_public_keys();
+    let imported = RecipientPublicKeys::from_bytes(
+        public.spend_public_key_bytes(),
+        public.scan_public_key_bytes(),
+    )
+    .unwrap();
+    assert_eq!(imported, public);
+    let sent = derive_payment(&imported, &mut payment_rng()).unwrap();
+    assert_eq!(sent.payment_public_key, vector::<32>("payment_public"));
+    let recovered = recover_payment(&recipient, &sent.announcement)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.payment_public_key, sent.payment_public_key);
+}
+
+#[test]
+fn shared_meta_address_supports_payment_recovery_and_sweep_derivation() {
+    let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
+    let address = recipient.derive_public_keys().to_meta_address();
+    let public = RecipientPublicKeys::from_meta_address(&address).unwrap();
+    let sent = derive_payment(&public, &mut payment_rng()).unwrap();
+    assert_eq!(sent.payment_public_key, vector::<32>("payment_public"));
+    let restored = RecipientSecretKeys::from_bytes(*recipient.export().as_bytes()).unwrap();
+    let recovered = recover_payment(&restored, &sent.announcement)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.payment_public_key, sent.payment_public_key);
+    assert_eq!(
+        recovered
+            .derive_ct_ikm(&encryption_context())
+            .unwrap()
+            .as_bytes(),
+        sent.derive_ct_ikm(&encryption_context())
+            .unwrap()
+            .as_bytes()
+    );
+    let seed = restored
+        .derive_sweep_destination(&sent.announcement.ephemeral_public_key)
+        .unwrap();
+    assert_eq!(seed.as_bytes(), &vector::<32>("sweep_seed"));
+}
+
+#[test]
+fn restored_recipient_recovers_and_signs_existing_payments() {
+    let (backup, public, sent, signature, ct_ikm) = {
+        let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
+        let public = recipient.derive_public_keys();
+        let sent = derive_payment(&public, &mut payment_rng()).unwrap();
+        let recovered = recover_payment(&recipient, &sent.announcement)
+            .unwrap()
+            .unwrap();
+        (
+            recipient.export(),
+            public,
+            sent,
+            recovered.sign(b"restore"),
+            recovered.derive_ct_ikm(&encryption_context()).unwrap(),
+        )
+    };
+    let restored = RecipientSecretKeys::from_bytes(*backup.as_bytes()).unwrap();
+    assert_eq!(restored.export().as_bytes(), backup.as_bytes());
+    assert_eq!(restored.derive_public_keys(), public);
+    let recovered = recover_payment(&restored, &sent.announcement)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.payment_public_key, sent.payment_public_key);
+    assert_eq!(recovered.sign(b"restore"), signature);
+    assert_eq!(
+        recovered
+            .derive_ct_ikm(&encryption_context())
+            .unwrap()
+            .as_bytes(),
+        ct_ikm.as_bytes()
+    );
+}
+
+#[test]
+fn sweep_destination_matches_independent_seed_key_and_signature_vectors() {
+    let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
+    let seed = recipient
+        .derive_sweep_destination(&vector("ephemeral_public"))
+        .unwrap();
+    assert_eq!(seed.as_bytes(), &vector::<32>("sweep_seed"));
+    let signer = SigningKey::from_bytes(seed.as_bytes());
+    assert_eq!(
+        signer.verifying_key().to_bytes(),
+        vector::<32>("sweep_public")
+    );
+    let message = b"stealth-keygen test vector";
+    let signature = signer.sign(message);
+    assert_eq!(signature.to_bytes(), vector::<64>("sweep_signature"));
+    signer
+        .verifying_key()
+        .verify_strict(message, &signature)
+        .unwrap();
+}
+
+#[test]
+fn sweep_destination_is_recoverable_and_binds_spend_secret_and_exact_r() {
+    let original = recipient(1, 2);
+    let r = vector::<32>("ephemeral_public");
+    let seed = original.derive_sweep_destination(&r).unwrap();
+    assert_eq!(
+        seed.as_bytes(),
+        original.derive_sweep_destination(&r).unwrap().as_bytes()
+    );
+    let backup = original.export();
+    drop(original);
+    let restored = RecipientSecretKeys::from_bytes(*backup.as_bytes()).unwrap();
+    assert_eq!(
+        seed.as_bytes(),
+        restored.derive_sweep_destination(&r).unwrap().as_bytes()
+    );
+    assert_eq!(
+        seed.as_bytes(),
+        recipient(1, 9)
+            .derive_sweep_destination(&r)
+            .unwrap()
+            .as_bytes()
+    );
+    assert_ne!(
+        seed.as_bytes(),
+        recipient(9, 2)
+            .derive_sweep_destination(&r)
+            .unwrap()
+            .as_bytes()
+    );
+    for byte in [0, 31] {
+        let mut changed_r = r;
+        changed_r[byte] ^= 0x80;
+        assert_ne!(
+            seed.as_bytes(),
+            restored
+                .derive_sweep_destination(&changed_r)
+                .unwrap()
+                .as_bytes()
+        );
     }
 }
 

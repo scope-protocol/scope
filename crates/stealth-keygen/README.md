@@ -64,14 +64,20 @@ identifier. Account creation, proofs, and receipt verification belong to the cli
 | Function or method | Purpose |
 |---|---|
 | `RecipientSecretKeys::generate(&mut rng)` | Generate the recipient's private spend and scan keys. |
+| `RecipientSecretKeys::from_bytes(bytes)` | Restore recipient secrets from the raw 64-byte format. |
+| `recipient.export()` | Export recipient secrets in a protected `RecipientSecretKeyMaterial`. |
 | `recipient.derive_public_keys()` | Obtain the public keys shared with payers. |
+| `RecipientPublicKeys::from_bytes(spend, scan)` | Import and validate the public spend and scan keys. |
 | `public_keys.spend_public_key_bytes()` | Export the public spend key as 32 bytes. |
 | `public_keys.scan_public_key_bytes()` | Export the public scan key as 32 bytes. |
+| `public_keys.to_meta_address()` | Encode a shareable, versioned public receiving address. |
+| `RecipientPublicKeys::from_meta_address(address)` | Decode its checksum and version, then validate the keys. |
 | `derive_payment(&public_keys, &mut rng)` | Derive a one-time payment public key and discovery announcement. |
 | `EphemeralSecret::from_bytes(bytes)` | Import protected X25519 secret material for one payment. |
 | `derive_payment_with_ephemeral(&public_keys, &ephemeral)` | Reconstruct a payment from supplied ephemeral secret material. |
 | `recover_payment(&secret_keys, &announcement)` | Recover a candidate payment; returns `Ok(None)` if the discovery tag does not match. |
 | `recovered.sign(message)` | Sign message bytes with the recovered payment key. |
+| `recipient.derive_sweep_destination(&R)` | Derive a protected Ed25519 seed for the per-payment sweep owner. |
 | `payment.derive_ct_ikm(&context)` | Derive protected input for the account's confidential keys. |
 | `material.as_bytes()` | Borrow secret bytes for SDK derivation or deliberate disclosure. |
 | `ConfidentialKeyMaterial::from_bytes(bytes)` | Import disclosed material for client-side verification. |
@@ -81,10 +87,37 @@ Confidential-material derivation is available on both `SenderPayment` and
 containing the chain genesis hash, application program ID, mint, and token-account
 address as 32-byte fields.
 
+Public-key imports require a canonical, nonidentity prime-order Edwards spend
+point and reject noncontributory X25519 scan keys. Scan encodings follow X25519's
+input rules and are preserved as supplied. Payment derivation still rejects an
+all-zero shared secret and an identity payment key.
+
+Recipient backups contain the canonical little-endian spend scalar followed by
+the original X25519 scan secret, 32 bytes each. Imports reject zero or noncanonical
+spend scalars rather than reducing them. `RecipientSecretKeyMaterial::as_bytes()`
+borrows this secret format; the wrapper clears it on drop and has no `Debug`,
+`Clone`, or `Copy`. The caller supplies encrypted storage and protects any copies.
+
+The sweep owner uses a separate HKDF-SHA512 schedule: salt `stealth-dest/v1`,
+input the canonical spend scalar, and info `d-owner || R`, expanding to a 32-byte
+standard Ed25519 seed. `SweepDestinationSeed::as_bytes()` borrows that seed for a
+client keypair constructor. The recipient can reconstruct it from their backup
+and the same exact R bytes; the payer's shared secret does not derive it. The
+client creates the destination token account and its confidential keys.
+
+Meta-addresses use `scope:` followed by Base58Check with the Bitcoin alphabet.
+The payload is `0x01 || B_spend || B_scan` (65 bytes); the checksum is the first
+four bytes of `SHA256(SHA256(payload))`. Version 1 identifies this key layout and
+the current `stealth-keygen-v3` payment schedule. Payers decode the shared string
+into `RecipientPublicKeys` before deriving a payment. Decoding checks the exact
+payload length, checksum, version, and both keys with a fixed-size buffer. The
+checksum detects accidental corruption; it does not authenticate the recipient.
+
 ## Dependencies
 
+- `bs58`: Base58Check meta-address encoding and decoding.
 - `curve25519-dalek`: Edwards point and scalar arithmetic for spend and payment keys.
-- `hkdf`: HKDF-SHA256 extraction and expansion for discovery tags, spending tweaks, and confidential key material.
+- `hkdf`: HKDF-SHA256 for payment keys and confidential material; HKDF-SHA512 for sweep-owner seeds.
 - `rand_core`: Cryptographic RNG traits for generating key material.
 - `sha2`: SHA-2 hashing for discovery tags, scalar tweaks, and signing.
 - `x25519-dalek`: X25519 key agreement, with the `static_secrets` feature enabled.

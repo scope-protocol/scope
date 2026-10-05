@@ -1,12 +1,22 @@
 ---
 status: decided
-last_verified: 2026-10-03
+last_verified: 2026-10-04
 ---
 
 # Decisions
 
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
+
+## 2026-10-04 Recipient key interoperability
+
+- **Meta-address version 1 uses Base58Check.** The shareable format is `scope:` followed by Base58Check of `0x01 || B_spend || B_scan`, with four bytes of double-SHA256. Version 1 fixes the key layout and current payment schedule. The library uses the existing `bs58` package's checksum support and bounds decoding to 69 bytes and 95 encoded characters before validating both keys. Rejected: unversioned concatenation or handwritten production encoding and checksum code. CLI wiring remains client work. Evidence: V62.
+
+- **Sweep derivation returns a standard seed.** `derive_sweep_destination` expands the documented recipient-only HKDF-SHA512 schedule to a protected 32-byte Ed25519 seed from the canonical spend scalar and exact R. The client constructs D_owner's SDK keypair and creates D. Rejected: deriving from S, returning a raw signing scalar for this standard key, or adding Solana key types to the crypto crate. Independent seed, public-key and signature vectors and SDK reconstruction are V61; external review remains Q1.
+
+- **Back up exact recipient secrets.** The raw format is a canonical nonzero little-endian spend scalar followed by the original scan secret, 32 bytes each. Imports reject invalid scalars and exports use a zeroizing wrapper without `Debug`, `Clone` or `Copy`; encrypted storage belongs to the caller. Rejected: treating the spend scalar as an Ed25519 seed, reducing invalid imports, or silently normalizing scan bytes. Evidence: V60.
+
+- **Validate public keys at import.** `RecipientPublicKeys::from_bytes` accepts canonical, nonidentity prime-order Edwards spend keys and contributory X25519 scan keys. Scan bytes retain X25519's input rules, including equivalent encodings; payment derivation still checks its actual shared secret. Rejected: unchecked imports, a handwritten scan-key blacklist, or converting scan keys to Edwards points, which would change the accepted X25519 inputs. Evidence: V59.
 
 ## 2026-10-03 Reconstruct payer payments from ephemeral secrets
 

@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-10-03
+last_verified: 2026-10-04
 ---
 
 # Client
@@ -24,6 +24,8 @@ Built for plain recipients in `crates/client/src/pay.rs`; stealth rows come next
 
 **Privacy.** Send order is a random permutation recorded in the run header, so it does not mirror the file order; with stealth rows it will derive from the run secret. Meta-addresses come from the input file in v1; once a registry exists, they are fetched in one query and picked locally.
 
+The library supplies `RecipientPublicKeys::to_meta_address()` and `from_meta_address(&str)`: a `scope:` Base58Check string containing a version and both public keys. The parser validates the checksum, version and keys before the payer derives a payment (verification: V62). Register output and stealth-row input wiring remain client work.
+
 **Fees.** Each attempt samples the per-CU price landed non-vote transactions actually paid in the latest confirmed block: ComputeBudget price for legacy and v0, header `priority_fee` over its compute unit limit for v1. It takes p75; above `--max-price` the run stops, resumable. `getRecentPrioritizationFees` is not used: unfiltered it returns each slot's minimum and reads near zero (verification: V39). The header carries the fee as total lamports (verification: V20). Until S5 measures both transactions, `tx::COMPUTE_UNIT_LIMIT` is a fixed 600,000 and the loaded-accounts limit 4 MiB.
 
 `lamports_for_P` uses a fixed high price, not the sample, because the recipient may sweep weeks later: D's rent, two signatures and 450,000 CU at 1,000,000 micro-lamports per CU, about 0.0035 SOL at today's rent [likely]. P must hold zero or at least 650,240 lamports at every step (verification: V23).
@@ -35,6 +37,8 @@ Plain recipients: `recipient,amount` rows, amounts in token units. The engine pr
 ## Recipient flow (planned)
 
 Nothing on the recipient side is persisted: D_owner is derived from `b_spend` and R, so a crash at any point is a retry.
+
+`RecipientSecretKeys::derive_sweep_destination(&R)` supplies a protected standard Ed25519 seed. The client builds D_owner with `Keypair::new_from_array(*seed.as_bytes())`; this SDK conversion and reconstruction after a recipient backup are tested (verification: V61). Creating D and building the sweep remain planned.
 
 `scan`: `getProgramAccounts` on our program with `dataSize = 68`, `memcmp(0, [1])`, `memcmp(2, [tag])`; per candidate one X25519, re-derive the tag, derive the token account from (payer, R), recompute `B_spend + t·G` and compare it with that account's owner, then derive the confidential keys and decrypt the pending balance. Expected to hold to about 100k announcements on a paid RPC [unverified, spike S6]; an indexer beyond that is out of scope.
 

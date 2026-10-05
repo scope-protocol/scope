@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-03
+last_verified: 2026-10-04
 ---
 
 # Plan
@@ -83,6 +83,6 @@ Ids are stable; gaps are questions already closed.
 | Q10 | Rent refund depends on the recipient | Valentyn | after v1 | two cases: P never empties the account, or P enables CpiGuard, which blocks reclaim's CPI close. State both as limitations; a timeout reclaim needs a different custody model and is not planned |
 | Q11 | One ephemeral key per run (scan cost against grouping) | Valentyn | after Q1 | defer until the review has seen the tree |
 | Q12 | On-chain registry: build our own in P4, or reuse sRFC-42's | Jmkoy | P4 | if lookup matters, reuse or match sRFC-42's seeds rather than a private layout |
-| Q14 | Finish `crates/stealth-keygen` on the crypto.md tree: `d`, externally supplied ephemeral keys, meta-address parsing; pin `program_id` in `C` | Abhineet, reviewed by Valentyn | before Q1 goes out | supplied ephemeral keys implemented (V58); `d`, meta-address parsing and the client context remain; keep the nonce-from-p construction and the vector generator |
+| Q14 | Finish `crates/stealth-keygen` on the crypto.md tree: `d`, externally supplied ephemeral keys, meta-address parsing; pin `program_id` in `C` | Abhineet, reviewed by Valentyn | before Q1 goes out | library APIs implemented: supplied ephemeral keys (V58), public imports (V59), recipient backups (V60), `d` (V61) and meta-addresses (V62); the client context remains; keep the nonce-from-p construction and the vector generator |
 | Q15 | Receipts for plain payments: the format needs `ct_ikm`, which only stealth payments have | Jmkoy | P3 | stealth receipts in v1; check whether the payer can disclose the opening of the amount commitment; otherwise plain payments rely on the mint auditor key |
 | Q16 | Run secret derived from a payer master secret | Abhineet | P3 | one master secret in an age file or the OS keychain, `run_secret = HKDF(master, "run" \|\| run_id)`: one backup instead of one per run |

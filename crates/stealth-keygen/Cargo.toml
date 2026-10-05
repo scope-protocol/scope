@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+bs58 = { version = "0.5.1", features = ["check"] }
 curve25519-dalek = "5.0.0"
 hkdf = "0.13.0"
 rand_core = "0.10.1"

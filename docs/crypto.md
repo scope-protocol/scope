@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-03
+last_verified: 2026-10-04
 ---
 
 # Cryptography
@@ -10,7 +10,7 @@ The shared-secret derivations are the new part and the source of every open conc
 
 ## Derivation tree
 
-Symbols follow [design.md](design.md), Keys. Implemented in `crates/stealth-keygen` (verification: V53), except `d`, which is planned.
+Symbols follow [design.md](design.md), Keys. Implemented in `crates/stealth-keygen` (verification: V53, V61).
 
 Payers may supply r through `EphemeralSecret::from_bytes` and `derive_payment_with_ephemeral`; the random API delegates to the same derivation. R is computed from r, and the returned payment retains S for later `ct_ikm` derivation (verification: V58). The supplied secret is cleared on drop. Use a fresh ephemeral key per distinct payment; reuse is only for reconstructing that payment.
 
@@ -24,7 +24,7 @@ C      = chain_id || program_id || mint || token_account, 32 bytes each
 
 Recipient only:
 prefix = SHA512(len(label) || label || p)[32..64]  ->  nonce prefix for raw-scalar Ed25519 signing, from p, never from S
-d      = HKDF-SHA512(salt = "stealth-dest/v1", ikm = b_spend, info = "d-owner" || R)  ->  D_owner keypair [planned]
+d      = HKDF-SHA512(salt = "stealth-dest/v1", ikm = canonical_bytes(b_spend), info = "d-owner" || R, len = 32)  ->  Ed25519 seed for D_owner
 ```
 
 Why: RFC 5869 says distinct `info` under a PRF gives computationally independent outputs; that is the whole argument for the three shared-secret leaves, the same pattern as a TLS 1.3 key schedule. Every expansion carries the exact R bytes, so encodings of R that X25519 maps to the same S still give different outputs. `C` ties the confidential keys to one account on one cluster, so a repeated R on another cluster or mint does not repeat the keys. In `C`, `chain_id` is the cluster's genesis hash and `program_id` is the SCOPE program id `EwbfwDdaRdxzF6wJFBKQmqcGoh93wNFL7FMo31eK9V2H` [proposed: no client code builds `C` yet; the payer engine's stealth rows fix it].
@@ -32,6 +32,8 @@ Why: RFC 5869 says distinct `info` under a PRF gives computationally independent
 `derive_confidential_keys_from_ikm(ikm: &[u8]) -> Result<(ElGamalKeypair, AeKey), ElGamalError>` in solana-zk-sdk 7.0.1 runs a second HKDF-SHA512 (salt `solana-conf-bal/v1`, info `ae` and `elgamal`), unchanged in 8.0.0 (verification: V28). Feeding it `ct_ikm` rather than raw S keeps the stages separate. The crypto crate exports `ct_ikm` as `ConfidentialKeyMaterial`, a zeroizing 32-byte secret with no `Debug`, `Clone` or `Copy`, and has no Solana SDK dependency; `scope-client::confidential::derive_confidential_keys` makes the SDK call.
 
 The payer knows S and every leaf of PRK. `d` is derived from `b_spend`, which never touches S, so the payer cannot derive D_owner. [open: the reviewer confirms using the signing secret as HKDF input, or prescribes a dedicated recipient master secret]
+
+`RecipientSecretKeys::derive_sweep_destination(&R)` returns a protected `SweepDestinationSeed`. The client constructs a standard Ed25519 keypair from its 32 bytes and creates D. The exact canonical spend scalar and R reconstruct the same owner after a crash; scan-key changes do not change it. This adds no Solana SDK dependency to the crypto crate (verification: V61).
 
 ## Curve25519 checks
 
@@ -83,4 +85,4 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 
 ## Open questions
 
-Q1 (external review of the tree, including `d`), Q11 (one ephemeral key per run), Q14 (remaining integration: `d`, meta-address parsing, and pinning `program_id` in the client's context), Q16 (run secret from a payer master secret). Owners and recommendations: [plan.md](plan.md).
+Q1 (external review of the tree, including `d`), Q11 (one ephemeral key per run), Q14 (remaining integration: pinning `program_id` in the client's context; meta-address parsing is implemented, V62), Q16 (run secret from a payer master secret). Owners and recommendations: [plan.md](plan.md).
