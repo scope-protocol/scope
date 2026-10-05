@@ -10,6 +10,8 @@ Docs describe the present; this file holds the why. Design history from before t
 
 ## 2026-10-05 Recipient sweep reliability
 
+- **Backup filenames are synchronized.** Registration syncs both the file and its parent directory, using the current directory for a bare filename. Rejected: treating an empty parent path as a reason to skip directory synchronization.
+
 - **Cleanup is optional and signatures are explicit.** The fallback omits both public dust burning and reclaim, including for permissioned-burn mints. It reports the public balance left behind. Completion from account state does not prove a specific transaction landed; the report separates the attempt signature from its verified finalized signature. Rejected: letting cleanup prevent a valid confidential transfer or reporting an unexecuted signature as successful.
 
 - **P retains a rent reserve.** Sweep quotes fees, destination rent and P's reserve exactly. Incoming SOL cannot turn a zero drain into a rent-paying balance. Small surplus stays in P unless D_owner can receive it without becoming rent-paying. The recipient retains control of this SOL. Rejected: draining P to an exact zero based on a stale balance snapshot.

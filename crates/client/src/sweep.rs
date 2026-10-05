@@ -70,7 +70,7 @@ pub struct SweepReport {
     pub retained_lamports: u64,
     pub ephemeral: [u8; 32],
     pub amount: u64,
-    pub burned_public_amount: u64,
+    pub burned_public_amount: Option<u64>,
     pub public_amount_remaining: u64,
     pub attempt_signature: String,
     pub finalized_signature: Option<String>,
@@ -521,11 +521,11 @@ pub fn prepare<C: RecipientChain>(
         retained_lamports,
         ephemeral: payment.info.ephemeral,
         amount: payment.info.amount,
-        burned_public_amount: if reclaimed {
+        burned_public_amount: Some(if reclaimed {
             payment.info.public_amount
         } else {
             0
-        },
+        }),
         public_amount_remaining: if reclaimed {
             0
         } else {
@@ -592,7 +592,8 @@ pub fn submit<C: RecipientChain>(
     mut prepared: PreparedSweep,
     opts: &SweepOptions,
 ) -> Result<SweepReport, SweepError> {
-    if prepared.report.dry_run {
+    if prepared.report.dry_run || opts.dry_run {
+        prepared.report.dry_run = true;
         return Ok(prepared.report);
     }
     let started = Instant::now();
@@ -621,6 +622,8 @@ pub fn submit<C: RecipientChain>(
             if finalized {
                 prepared.report.finalized_signature =
                     Some(prepared.report.attempt_signature.clone());
+            } else {
+                prepared.report.burned_public_amount = None;
             }
             return Ok(prepared.report);
         }

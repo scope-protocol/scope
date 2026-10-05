@@ -66,12 +66,14 @@ pub(super) fn create(path: &Path, encrypt_to: Option<&str>) -> anyhow::Result<St
     let recipient = RecipientSecretKeys::generate(&mut getrandom::SysRng)
         .context("generating recipient secrets")?;
     let material = recipient.export();
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)?;
-    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -110,9 +112,7 @@ pub(super) fn create(path: &Path, encrypt_to: Option<&str>) -> anyhow::Result<St
             file.write_all(material.as_bytes())?;
         }
         file.sync_all()?;
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            File::open(parent)?.sync_all()?;
-        }
+        File::open(parent)?.sync_all()?;
         Ok(())
     })();
     if let Err(error) = write {

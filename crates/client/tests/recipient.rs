@@ -380,6 +380,17 @@ fn sweep_dry_run_and_underfunding_leave_the_payment_untouched() {
     assert!(report.dry_run);
     assert!(h.svm.get_account(&report.destination).is_none());
     assert!(h.svm.get_account(&account).is_some());
+    let prepared = sweep::prepare(
+        &SvmChain::new(&mut h.svm),
+        &alice,
+        &announcement,
+        &SweepOptions::default(),
+    )
+    .expect("prepare without sending");
+    let report = sweep::submit(&mut SvmChain::new(&mut h.svm), prepared, &opts)
+        .expect("submission honors dry run");
+    assert!(report.dry_run);
+    assert!(h.svm.get_account(&report.destination).is_none());
     let public = scan::scan(&SvmChain::new(&mut h.svm), &alice, None)
         .expect("scan")
         .payments;
@@ -745,7 +756,7 @@ fn sweep_moves_confidential_funds_when_permissioned_burning_blocks_cleanup() {
     )
     .expect("transfer-only fallback");
     assert!(!report.reclaimed);
-    assert_eq!(report.burned_public_amount, 0);
+    assert_eq!(report.burned_public_amount, Some(0));
     assert_eq!(report.public_amount_remaining, 17);
     assert_eq!(
         report.finalized_signature.as_ref(),
@@ -802,6 +813,7 @@ fn concurrent_sweep_completion_does_not_claim_an_unexecuted_signature() {
     assert!(report.reclaimed);
     assert_eq!(report.attempt_signature, attempted);
     assert_eq!(report.finalized_signature, None);
+    assert_eq!(report.burned_public_amount, None);
     assert!(
         chain
             .svm

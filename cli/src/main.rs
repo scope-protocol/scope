@@ -159,11 +159,11 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
             None => println!("payment completed; this attempt's success was not verified"),
         }
     }
-    if report.burned_public_amount > 0 && (report.dry_run || report.finalized_signature.is_some()) {
+    if let Some(amount) = report.burned_public_amount.filter(|amount| *amount > 0) {
         println!(
             "public balance {}: {} base units",
             if report.dry_run { "to burn" } else { "burned" },
-            report.burned_public_amount
+            amount
         );
     }
     if report.public_amount_remaining > 0 {
@@ -313,7 +313,7 @@ mod tests {
             retained_lamports: 0,
             ephemeral: [7; 32],
             amount: 1,
-            burned_public_amount: 0,
+            burned_public_amount: Some(0),
             public_amount_remaining: 0,
             attempt_signature: "attempt".into(),
             finalized_signature: None,
