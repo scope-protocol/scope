@@ -70,6 +70,18 @@ fn fund(h: &mut Harness, recipient: &RecipientSecretKeys, r: u8) -> (Address, Ad
         lamports_for_owner: 8_000_000,
     })
     .expect("setup");
+    ixs.extend(transfer(h, account, keys.pubkey(), AMOUNT));
+    h.send(&ixs, &[]).expect("payer transaction");
+    h.source_balance -= AMOUNT;
+    (announcement, account, ae)
+}
+
+fn transfer(
+    h: &Harness,
+    destination: Address,
+    elgamal: &solana_zk_sdk::encryption::elgamal::ElGamalPubkey,
+    amount: u64,
+) -> Vec<solana_instruction::Instruction> {
     let source = h.svm.get_account(&h.source).expect("source");
     let state = StateWithExtensions::<Account>::unpack(&source.data).expect("unpack");
     let ext = state
@@ -82,42 +94,37 @@ fn fund(h: &mut Harness, recipient: &RecipientSecretKeys, r: u8) -> (Address, Ad
     let proofs = transfer_split_proof_data(
         &available,
         &ext.decryptable_available_balance.try_into().expect("hint"),
-        AMOUNT,
+        amount,
         &h.source_elgamal,
         &h.source_ae,
-        keys.pubkey(),
+        elgamal,
         auditor.as_ref(),
     )
     .expect("proofs");
-    ixs.extend(
-        ct::transfer(
-            &token_2022(),
-            &h.source,
-            &h.mint,
-            &account,
-            &h.source_ae.encrypt(h.source_balance - AMOUNT).into(),
+    ct::transfer(
+        &token_2022(),
+        &h.source,
+        &h.mint,
+        &destination,
+        &h.source_ae.encrypt(h.source_balance - amount).into(),
+        &proofs
+            .ciphertext_validity_proof_data_with_ciphertext
+            .ciphertext_lo,
+        &proofs
+            .ciphertext_validity_proof_data_with_ciphertext
+            .ciphertext_hi,
+        &h.payer.pubkey(),
+        &[],
+        ProofLocation::InstructionOffset(offset(1), &proofs.equality_proof_data),
+        ProofLocation::InstructionOffset(
+            offset(2),
             &proofs
                 .ciphertext_validity_proof_data_with_ciphertext
-                .ciphertext_lo,
-            &proofs
-                .ciphertext_validity_proof_data_with_ciphertext
-                .ciphertext_hi,
-            &payer,
-            &[],
-            ProofLocation::InstructionOffset(offset(1), &proofs.equality_proof_data),
-            ProofLocation::InstructionOffset(
-                offset(2),
-                &proofs
-                    .ciphertext_validity_proof_data_with_ciphertext
-                    .proof_data,
-            ),
-            ProofLocation::InstructionOffset(offset(3), &proofs.range_proof_data),
-        )
-        .expect("transfer"),
-    );
-    h.send(&ixs, &[]).expect("payer transaction");
-    h.source_balance -= AMOUNT;
-    (announcement, account, ae)
+                .proof_data,
+        ),
+        ProofLocation::InstructionOffset(offset(3), &proofs.range_proof_data),
+    )
+    .expect("transfer")
 }
 
 fn edit_source(
@@ -762,8 +769,8 @@ fn sweep_moves_confidential_funds_when_permissioned_burning_blocks_cleanup() {
         report.finalized_signature.as_ref(),
         Some(&report.attempt_signature)
     );
-    let source = h.svm.get_account(&source).expect("source remains");
-    let state = StateWithExtensions::<Account>::unpack(&source.data).expect("source state");
+    let source_account = h.svm.get_account(&source).expect("source remains");
+    let state = StateWithExtensions::<Account>::unpack(&source_account.data).expect("source state");
     assert_eq!(state.base.amount, 17);
     let ext = state
         .get_extension::<ConfidentialTransferAccount>()
@@ -771,6 +778,18 @@ fn sweep_moves_confidential_funds_when_permissioned_burning_blocks_cleanup() {
     assert_eq!(ext.available_balance.0, [0; 64]);
     assert_eq!(ext.pending_balance_lo.0, [0; 64]);
     assert_eq!(ext.pending_balance_hi.0, [0; 64]);
+    assert!(!bool::from(ext.allow_confidential_credits));
+    let elgamal = ext.elgamal_pubkey.try_into().expect("key");
+    let second_credit = transfer(&h, source, &elgamal, 42);
+    let failed = h
+        .send(&second_credit, &[])
+        .expect_err("retired source rejects credits");
+    assert!(matches!(
+        failed.err,
+        solana_transaction_error::TransactionError::InstructionError(
+            _, solana_instruction_error::InstructionError::Custom(code)
+        ) if code == spl_token_2022_interface::error::TokenError::ConfidentialTransferDepositsAndTransfersDisabled as u32
+    ));
     let seed = alice
         .derive_sweep_destination(&report.ephemeral)
         .expect("seed");

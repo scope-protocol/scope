@@ -315,6 +315,10 @@ fn instructions(
     let t22 = token_2022();
     let mut ixs = destination.setup.clone();
     ixs.push(
+        ct::disable_confidential_credits(&t22, &payment.info.token_account, authority, &[])
+            .map_err(invalid)?,
+    );
+    ixs.push(
         ct::apply_pending_balance(
             &t22,
             &payment.info.token_account,
