@@ -66,6 +66,8 @@ impl Default for SweepOptions {
 pub struct SweepReport {
     pub destination: Address,
     pub destination_owner: Address,
+    pub payment_authority: Address,
+    pub retained_lamports: u64,
     pub ephemeral: [u8; 32],
     pub amount: u64,
     pub burned_public_amount: u64,
@@ -78,9 +80,10 @@ impl fmt::Display for SweepReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "destination\t{}\nowner\t{}\nephemeral\t{}\nattempt_signature\t{}",
+            "destination\t{}\nowner\t{}\npayment_authority\t{}\nephemeral\t{}\nattempt_signature\t{}",
             self.destination,
             self.destination_owner,
+            self.payment_authority,
             Address::new_from_array(self.ephemeral),
             self.signature
         )
@@ -429,7 +432,13 @@ pub fn prepare<C: RecipientChain>(
         return Err(invalid("payment authority is not an empty system account"));
     }
     let minimum = chain.rent(0)?;
-    let build = |reclaim: bool| -> Result<VersionedTransaction, SweepError> {
+    let owner_account = chain.account(&destination.owner.pubkey(), Commitment::Confirmed)?;
+    let owner_balance = owner_account.as_ref().map_or(0, |a| a.lamports);
+    let owner_rent = match &owner_account {
+        Some(a) if !a.data.is_empty() => chain.rent(a.data.len())?,
+        _ => minimum,
+    };
+    let build = |reclaim: bool| -> Result<(VersionedTransaction, u64), SweepError> {
         let mut ixs = base.clone();
         if reclaim {
             ixs.push(ix::reclaim(
@@ -455,24 +464,28 @@ pub fn prepare<C: RecipientChain>(
         let cost = fee
             .checked_add(destination.rent)
             .ok_or_else(|| invalid("fee and rent overflow"))?;
-        let remainder = balance.lamports.checked_sub(cost);
-        if remainder.is_none_or(|r| r > 0 && r < minimum) {
-            let need = cost
-                .checked_add(minimum)
-                .ok_or_else(|| invalid("funding floor overflow"))?;
-            return Err(SweepError::Underfunded {
+        let need = cost
+            .checked_add(minimum)
+            .ok_or_else(|| invalid("funding floor overflow"))?;
+        let remainder = balance
+            .lamports
+            .checked_sub(need)
+            .ok_or(SweepError::Underfunded {
                 have: balance.lamports,
                 need,
                 short: need.saturating_sub(balance.lamports),
-            });
-        }
-        let remainder = remainder.expect("checked balance");
+            })?;
+        let transfer = if remainder >= owner_rent.saturating_sub(owner_balance) {
+            remainder
+        } else {
+            0
+        };
         ixs.pop();
-        if remainder > 0 {
+        if transfer > 0 {
             ixs.push(solana_system_interface::instruction::transfer(
                 &signer.pubkey(),
                 &destination.owner.pubkey(),
-                remainder,
+                transfer,
             ));
         }
         let tx = signed_v1_transaction(
@@ -486,15 +499,15 @@ pub fn prepare<C: RecipientChain>(
         if v1_wire_size(&tx) > 4096 {
             return Err(invalid("sweep exceeds the v1 transaction size limit"));
         }
-        Ok(tx)
+        Ok((tx, balance.lamports - cost - transfer))
     };
     let full = build(true)?;
-    let (tx, reclaimed) = match chain.simulate(&full)? {
-        Ok(()) => (full, true),
+    let (tx, retained_lamports, reclaimed) = match chain.simulate(&full.0)? {
+        Ok(()) => (full.0, full.1, true),
         Err(full_logs) => {
             let fallback = build(false)?;
-            match chain.simulate(&fallback)? {
-                Ok(()) => (fallback, false),
+            match chain.simulate(&fallback.0)? {
+                Ok(()) => (fallback.0, fallback.1, false),
                 Err(_) => return Err(SweepError::Simulation(full_logs)),
             }
         }
@@ -502,6 +515,8 @@ pub fn prepare<C: RecipientChain>(
     let report = SweepReport {
         destination: destination.address,
         destination_owner: destination.owner.pubkey(),
+        payment_authority: signer.pubkey(),
+        retained_lamports,
         ephemeral: payment.info.ephemeral,
         amount: payment.info.amount,
         burned_public_amount: payment.info.public_amount,
@@ -569,10 +584,16 @@ pub fn submit<C: RecipientChain>(
             source: Box::new(source),
         };
         if completed(chain, &prepared).map_err(interrupted)? {
-            prepared.report.reclaimed = chain
+            let reclaimed = chain
                 .account(&prepared.announcement, Commitment::Finalized)
                 .map_err(|e| interrupted(e.into()))?
                 .is_none();
+            let retained_lamports = chain
+                .account(&prepared.report.payment_authority, Commitment::Finalized)
+                .map_err(|e| interrupted(e.into()))?
+                .map_or(0, |a| a.lamports);
+            prepared.report.reclaimed = reclaimed;
+            prepared.report.retained_lamports = retained_lamports;
             return Ok(prepared.report);
         }
         if started.elapsed() >= opts.timeout

@@ -59,7 +59,7 @@ Recipe and checks: [crypto.md](crypto.md). Each payment has its own R, so one R 
 
 P and the mint are not stored: P is the token account's owner and the mint is in the token account. The scanner fetches program-owned announcements and checks tags locally after reading R; there is no fixed recipient tag for an RPC filter. It derives the token account from (payer, R) and verifies both the authority and confidential keys.
 
-**P.** A system account with no data, funded in the payer transaction and drained to zero in the sweep (verification: V24).
+**P.** A system account with no data, funded in the payer transaction and kept rent-exempt by the sweep (verification: V24).
 
 Every field is a byte array read by copy. Layout, seeds, instruction data, error codes and the Token-2022 account reader live in `crates/interface`. In the program each instruction is one module under `programs/scope/src/instructions/`: an accounts struct checks count, signer and program ids when it is built, and `process` holds the rest.
 
@@ -126,7 +126,7 @@ T22 Transfer, full balance to D           three proofs
 T22 EmptyAccount                          zero-ciphertext proof
 T22 Burn of any public balance            only if the public amount is nonzero
 reclaim                                   rent of both accounts to the payer
-System Transfer of P's remainder to D_owner
+System Transfer of P's surplus to D_owner, retaining P's rent reserve
 ```
 
 The core (apply, transfer, empty, reclaim, with D created beforehand) is 2,759 bytes and 256,800 CU in LiteSVM (verification: V56); the full shape above is estimated at about 3,300 bytes [likely]. The zero-ciphertext proof is over the new source ciphertext from the transfer's equality proof: Transfer sets the available balance to exactly that ciphertext (verification: V8). Burn removes public dust a mint authority can mint in, since MintTo ignores the disabled public-credit flag and a nonzero public amount blocks CloseAccount (verification: V4, V6). If reclaim fails, the client drops it and resends, so our program can never block funds. D and D_owner are derived per payment; nothing is persisted on the recipient side.
@@ -145,7 +145,7 @@ Rent is `(size + 128) x 5,080` lamports today, read from the Rent sysvar at run 
 | Token account, mint with no account extensions | 465 | 3,012,440 |
 | P, minimum while nonzero | 0 | 650,240 |
 
-The payer locks 4,008,120 lamports per stealth payment and sends P enough for D's rent, two signatures and a priority allowance ([client.md](client.md)). The refund goes only to the payer, but whether it happens depends on P: only P can empty the account.
+The payer locks 4,008,120 lamports per stealth payment and sends P enough for D's rent, two signatures, a priority allowance and P's rent reserve ([client.md](client.md)). The refund goes only to the payer, but whether it happens depends on P: only P can empty the account.
 
 ## Limitations
 

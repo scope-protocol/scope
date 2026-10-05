@@ -149,6 +149,10 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
         report.amount,
         report.destination
     );
+    println!(
+        "SOL remaining\t{} lamports at {}",
+        report.retained_lamports, report.payment_authority
+    );
     if report.burned_public_amount > 0 {
         println!(
             "public balance {}: {} base units",
@@ -293,6 +297,8 @@ mod tests {
         let report = sweep::SweepReport {
             destination: Address::default(),
             destination_owner: Address::default(),
+            payment_authority: Address::default(),
+            retained_lamports: 0,
             ephemeral: [7; 32],
             amount: 1,
             burned_public_amount: 0,

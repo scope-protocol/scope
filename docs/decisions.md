@@ -10,6 +10,8 @@ Docs describe the present; this file holds the why. Design history from before t
 
 ## 2026-10-05 Recipient sweep reliability
 
+- **P retains a rent reserve.** Sweep quotes fees, destination rent and P's reserve exactly. Incoming SOL cannot turn a zero drain into a rent-paying balance. Small surplus stays in P unless D_owner can receive it without becoming rent-paying. The recipient retains control of this SOL. Rejected: draining P to an exact zero based on a stale balance snapshot.
+
 - **Recovery precedes broadcast.** Preparation and submission are separate APIs. The CLI flushes public recovery details before submission, and timeout or status errors retain the report. Rejected: returning recovery details only after successful finalization.
 
 ## 2026-10-05 Scan error isolation

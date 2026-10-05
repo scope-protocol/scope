@@ -592,3 +592,123 @@ fn sweep_timeout_preserves_recovery_details_after_execution() {
         report.destination_owner
     );
 }
+
+#[test]
+fn sweep_survives_a_credit_to_the_authority_after_simulation() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, _, _) = fund(&mut h, &alice, 3);
+    let minimum = h.svm.minimum_balance_for_rent_exemption(0);
+    let sender = h.payer.insecure_clone();
+    let mut chain = SvmChain::new(&mut h.svm);
+    let opts = SweepOptions {
+        poll: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("prepare");
+    let credit = solana_system_interface::instruction::transfer(
+        &sender.pubkey(),
+        &prepared.report().payment_authority,
+        1,
+    );
+    chain.before_send = Some(scope_client::tx::v1_transaction(
+        &sender,
+        &[],
+        &[credit],
+        chain.svm.latest_blockhash(),
+    ));
+    let report = sweep::submit(&mut chain, prepared, &opts).expect("sweep after credit");
+    assert!(report.reclaimed);
+    assert_eq!(report.amount, AMOUNT);
+    assert_eq!(report.retained_lamports, minimum + 1);
+}
+
+fn sweep_requirement(h: &Harness) -> u64 {
+    let space = ExtensionType::try_calculate_account_len::<Account>(&[
+        ExtensionType::ConfidentialTransferAccount,
+    ])
+    .expect("space");
+    h.svm.minimum_balance_for_rent_exemption(space)
+        + 10_000
+        + h.svm.minimum_balance_for_rent_exemption(0)
+}
+
+fn set_funding(h: &mut Harness, authority: Address, amount: u64) {
+    let mut account = h.svm.get_account(&authority).expect("authority");
+    account.lamports = amount;
+    h.svm.set_account(authority, account).expect("funding");
+}
+
+#[test]
+fn sweep_funding_boundaries_include_the_reserve_and_quote_exact_shortages() {
+    use scope_client::sweep::{self, SweepError, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, _, _) = fund(&mut h, &alice, 3);
+    let opts = SweepOptions {
+        poll: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let authority = sweep::prepare(&SvmChain::new(&mut h.svm), &alice, &announcement, &opts)
+        .expect("prepare")
+        .report()
+        .payment_authority;
+    let need = sweep_requirement(&h);
+    let minimum = h.svm.minimum_balance_for_rent_exemption(0);
+    set_funding(&mut h, authority, need - 1);
+    let error = sweep::prepare(&SvmChain::new(&mut h.svm), &alice, &announcement, &opts)
+        .expect_err("one lamport short");
+    assert!(
+        matches!(error, SweepError::Underfunded { need: quoted, short: 1, .. } if quoted == need)
+    );
+    for surplus in [0, 1, minimum - 1, minimum] {
+        set_funding(&mut h, authority, need + surplus);
+        let prepared = sweep::prepare(&SvmChain::new(&mut h.svm), &alice, &announcement, &opts)
+            .expect("simulation at funding boundary");
+        let retained = if surplus < minimum {
+            minimum + surplus
+        } else {
+            minimum
+        };
+        assert_eq!(prepared.report().retained_lamports, retained);
+        assert!(h.svm.get_account(&prepared.report().destination).is_none());
+    }
+    set_funding(&mut h, authority, need);
+    let report = sweep::sweep(&mut SvmChain::new(&mut h.svm), &alice, &announcement, &opts)
+        .expect("exact funding succeeds");
+    assert_eq!(report.retained_lamports, minimum);
+    assert!(report.reclaimed);
+}
+
+#[test]
+fn sweep_transfers_a_small_surplus_to_an_already_funded_owner() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, _, _) = fund(&mut h, &alice, 3);
+    let opts = SweepOptions {
+        poll: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let recovery = sweep::prepare(&SvmChain::new(&mut h.svm), &alice, &announcement, &opts)
+        .expect("prepare")
+        .report()
+        .clone();
+    let minimum = h.svm.minimum_balance_for_rent_exemption(0);
+    h.svm
+        .airdrop(&recovery.destination_owner, minimum)
+        .expect("fund owner");
+    let need = sweep_requirement(&h);
+    set_funding(&mut h, recovery.payment_authority, need + 1);
+    let report = sweep::sweep(&mut SvmChain::new(&mut h.svm), &alice, &announcement, &opts)
+        .expect("small surplus");
+    assert_eq!(report.retained_lamports, minimum);
+    assert_eq!(
+        h.svm
+            .get_account(&report.destination_owner)
+            .expect("owner")
+            .lamports,
+        minimum + 1
+    );
+}
