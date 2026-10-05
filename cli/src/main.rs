@@ -153,11 +153,23 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
         "SOL remaining\t{} lamports at {}",
         report.retained_lamports, report.payment_authority
     );
-    if report.burned_public_amount > 0 {
+    if !report.dry_run {
+        match &report.finalized_signature {
+            Some(signature) => println!("finalized_signature\t{signature}"),
+            None => println!("payment completed; this attempt's success was not verified"),
+        }
+    }
+    if report.burned_public_amount > 0 && (report.dry_run || report.finalized_signature.is_some()) {
         println!(
             "public balance {}: {} base units",
             if report.dry_run { "to burn" } else { "burned" },
             report.burned_public_amount
+        );
+    }
+    if report.public_amount_remaining > 0 {
+        println!(
+            "public balance remaining\t{} base units",
+            report.public_amount_remaining
         );
     }
     let rent_status = match (report.reclaimed, report.dry_run) {
@@ -302,7 +314,9 @@ mod tests {
             ephemeral: [7; 32],
             amount: 1,
             burned_public_amount: 0,
-            signature: "attempt".into(),
+            public_amount_remaining: 0,
+            attempt_signature: "attempt".into(),
+            finalized_signature: None,
             reclaimed: false,
             dry_run: false,
         };

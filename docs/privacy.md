@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 ---
 
 # Privacy
@@ -44,7 +44,7 @@ The payer can follow the funds it paid, as on any public ledger, but reads no am
 - **A payer can skip `announce`.** The payment is real and can be disclosed, but the recipient's scan never finds it, and the recipient then depends on the payer to learn of it.
 - **Scanning.** Tags are checked locally after fetching announcements. Follow-up token-account reads can reveal candidates to the RPC provider together with the scanner's IP. Run your own RPC or accept this query leak.
 - **Program fingerprint.** Calling this program, or confidential-transfer instructions at all, marks a wallet as privacy-seeking while usage is low. Applies to every privacy tool on Solana.
-- **Mint authority.** On approval-required mints the issuer sees and gates every account; a freeze authority can freeze a one-time account and block its sweep; MintTo can put public dust in it, which the sweep burns (verification: V6).
+- **Mint authority.** On approval-required mints the issuer sees and gates every account; a freeze authority can freeze a one-time account and block its sweep; MintTo can put public dust in it; sweep attempts to burn it, or transfers confidential funds while leaving dust and rent cleanup outstanding (verification: V6).
 - **View tag.** One byte of the shared-secret hash is public. Standard.
 
 ## What we do not claim

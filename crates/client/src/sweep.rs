@@ -71,7 +71,9 @@ pub struct SweepReport {
     pub ephemeral: [u8; 32],
     pub amount: u64,
     pub burned_public_amount: u64,
-    pub signature: String,
+    pub public_amount_remaining: u64,
+    pub attempt_signature: String,
+    pub finalized_signature: Option<String>,
     pub reclaimed: bool,
     pub dry_run: bool,
 }
@@ -85,7 +87,7 @@ impl fmt::Display for SweepReport {
             self.destination_owner,
             self.payment_authority,
             Address::new_from_array(self.ephemeral),
-            self.signature
+            self.attempt_signature
         )
     }
 }
@@ -359,19 +361,6 @@ fn instructions(
         )
         .map_err(invalid)?,
     );
-    if payment.info.public_amount > 0 {
-        ixs.push(
-            t22::burn(
-                &t22,
-                &payment.info.token_account,
-                &payment.info.mint,
-                authority,
-                &[],
-                payment.info.public_amount,
-            )
-            .map_err(invalid)?,
-        );
-    }
     Ok(ixs)
 }
 
@@ -438,9 +427,22 @@ pub fn prepare<C: RecipientChain>(
         Some(a) if !a.data.is_empty() => chain.rent(a.data.len())?,
         _ => minimum,
     };
-    let build = |reclaim: bool| -> Result<(VersionedTransaction, u64), SweepError> {
+    let build = |cleanup: bool| -> Result<(VersionedTransaction, u64), SweepError> {
         let mut ixs = base.clone();
-        if reclaim {
+        if cleanup {
+            if payment.info.public_amount > 0 {
+                ixs.push(
+                    t22::burn(
+                        &token_2022(),
+                        &payment.info.token_account,
+                        &payment.info.mint,
+                        &signer.pubkey(),
+                        &[],
+                        payment.info.public_amount,
+                    )
+                    .map_err(invalid)?,
+                );
+            }
             ixs.push(ix::reclaim(
                 announcement,
                 &payment.info.token_account,
@@ -519,8 +521,18 @@ pub fn prepare<C: RecipientChain>(
         retained_lamports,
         ephemeral: payment.info.ephemeral,
         amount: payment.info.amount,
-        burned_public_amount: payment.info.public_amount,
-        signature: tx.signatures[0].to_string(),
+        burned_public_amount: if reclaimed {
+            payment.info.public_amount
+        } else {
+            0
+        },
+        public_amount_remaining: if reclaimed {
+            0
+        } else {
+            payment.info.public_amount
+        },
+        attempt_signature: tx.signatures[0].to_string(),
+        finalized_signature: None,
         reclaimed,
         dry_run: opts.dry_run,
     };
@@ -535,22 +547,28 @@ pub fn prepare<C: RecipientChain>(
     })
 }
 
-fn completed<C: RecipientChain>(chain: &C, prepared: &PreparedSweep) -> Result<bool, SweepError> {
+fn completed_public_balance<C: RecipientChain>(
+    chain: &C,
+    prepared: &PreparedSweep,
+) -> Result<Option<u64>, SweepError> {
     let source = chain.account(&prepared.source, Commitment::Finalized)?;
-    let empty = match source {
-        None => true,
+    let (empty, public_amount) = match source {
+        None => (true, 0),
         Some(a) => {
             let state = StateWithExtensions::<Account>::unpack(&a.data).map_err(invalid)?;
             let ext = state
                 .get_extension::<ConfidentialTransferAccount>()
                 .map_err(invalid)?;
-            ext.available_balance.0 == [0; 64]
-                && ext.pending_balance_lo.0 == [0; 64]
-                && ext.pending_balance_hi.0 == [0; 64]
+            (
+                ext.available_balance.0 == [0; 64]
+                    && ext.pending_balance_lo.0 == [0; 64]
+                    && ext.pending_balance_hi.0 == [0; 64],
+                state.base.amount,
+            )
         }
     };
     if !empty {
-        return Ok(false);
+        return Ok(None);
     }
     let destination_ready = match chain
         .account(&prepared.report.destination, Commitment::Finalized)?
@@ -566,7 +584,7 @@ fn completed<C: RecipientChain>(chain: &C, prepared: &PreparedSweep) -> Result<b
         }
         _ => false,
     };
-    Ok(destination_ready)
+    Ok(destination_ready.then_some(public_amount))
 }
 
 pub fn submit<C: RecipientChain>(
@@ -583,7 +601,9 @@ pub fn submit<C: RecipientChain>(
             report: Box::new(prepared.report.clone()),
             source: Box::new(source),
         };
-        if completed(chain, &prepared).map_err(interrupted)? {
+        if let Some(public_amount) =
+            completed_public_balance(chain, &prepared).map_err(interrupted)?
+        {
             let reclaimed = chain
                 .account(&prepared.announcement, Commitment::Finalized)
                 .map_err(|e| interrupted(e.into()))?
@@ -592,8 +612,16 @@ pub fn submit<C: RecipientChain>(
                 .account(&prepared.report.payment_authority, Commitment::Finalized)
                 .map_err(|e| interrupted(e.into()))?
                 .map_or(0, |a| a.lamports);
+            let finalized = chain
+                .finalized_success(&prepared.transaction.signatures[0])
+                .map_err(|e| interrupted(e.into()))?;
             prepared.report.reclaimed = reclaimed;
             prepared.report.retained_lamports = retained_lamports;
+            prepared.report.public_amount_remaining = public_amount;
+            if finalized {
+                prepared.report.finalized_signature =
+                    Some(prepared.report.attempt_signature.clone());
+            }
             return Ok(prepared.report);
         }
         if started.elapsed() >= opts.timeout

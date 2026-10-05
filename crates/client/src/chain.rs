@@ -9,6 +9,7 @@ use solana_rpc_client::{
     api::config::{RpcBlockConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig},
     rpc_client::RpcClient,
 };
+use solana_signature::Signature;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction_status_client_types::{TransactionDetails, UiTransactionEncoding};
 
@@ -57,6 +58,7 @@ pub trait RecipientChain: Chain {
     fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError>;
     fn rent(&self, space: usize) -> Result<u64, ChainError>;
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError>;
+    fn finalized_success(&self, signature: &Signature) -> Result<bool, ChainError>;
 }
 
 fn rpc_err<E: core::fmt::Display>(e: E) -> ChainError {
@@ -158,6 +160,20 @@ impl Chain for RpcChain {
 }
 
 impl RecipientChain for RpcChain {
+    fn finalized_success(&self, signature: &Signature) -> Result<bool, ChainError> {
+        let statuses = self
+            .0
+            .get_signature_statuses_with_history(&[*signature])
+            .map_err(rpc_err)?;
+        Ok(statuses
+            .value
+            .first()
+            .and_then(Option::as_ref)
+            .is_some_and(|status| {
+                status.err.is_none() && status.satisfies_commitment(CommitmentConfig::finalized())
+            }))
+    }
+
     fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
         self.0
             .get_genesis_hash()

@@ -100,6 +100,14 @@ impl Harness {
     }
 
     pub fn with_auditor(auditor: Option<&ElGamalPubkey>) -> Self {
+        Self::with_mint_policy(auditor, false)
+    }
+
+    pub fn with_permissioned_burn() -> Self {
+        Self::with_mint_policy(None, true)
+    }
+
+    fn with_mint_policy(auditor: Option<&ElGamalPubkey>, permissioned_burn: bool) -> Self {
         let mut svm = LiteSVM::new();
         svm.add_program_from_file(program_id(), program_elf())
             .expect("load program");
@@ -116,7 +124,7 @@ impl Harness {
             source_ae: AeKey::new_rand(),
             source_balance: 0,
         };
-        h.create_mint(auditor);
+        h.create_mint(auditor, permissioned_burn);
         h.create_funded_source();
         h
     }
@@ -130,14 +138,15 @@ impl Harness {
         result
     }
 
-    fn create_mint(&mut self, auditor: Option<&ElGamalPubkey>) {
+    fn create_mint(&mut self, auditor: Option<&ElGamalPubkey>, permissioned_burn: bool) {
         let mint = Keypair::new();
         let t22 = token_2022();
-        let space = ExtensionType::try_calculate_account_len::<Mint>(&[
-            ExtensionType::ConfidentialTransferMint,
-        ])
-        .expect("len");
-        let ixs = [
+        let mut types = vec![ExtensionType::ConfidentialTransferMint];
+        if permissioned_burn {
+            types.push(ExtensionType::PermissionedBurn);
+        }
+        let space = ExtensionType::try_calculate_account_len::<Mint>(&types).expect("len");
+        let mut ixs = vec![
             solana_system_interface::instruction::create_account(
                 &self.payer.pubkey(),
                 &mint.pubkey(),
@@ -162,6 +171,17 @@ impl Harness {
             )
             .expect("mint"),
         ];
+        if permissioned_burn {
+            ixs.insert(
+                1,
+                spl_token_2022_interface::extension::permissioned_burn::instruction::initialize(
+                    &t22,
+                    &mint.pubkey(),
+                    &self.mint_authority.pubkey(),
+                )
+                .expect("permissioned burn"),
+            );
+        }
         self.send(&ixs, &[&mint]).expect("create mint");
         self.mint = mint.pubkey();
     }
@@ -407,6 +427,17 @@ impl Chain for SvmChain<'_> {
 }
 
 impl RecipientChain for SvmChain<'_> {
+    fn finalized_success(
+        &self,
+        signature: &solana_signature::Signature,
+    ) -> Result<bool, ChainError> {
+        Ok(!self.lag_finalized_reads
+            && self
+                .svm
+                .get_transaction(signature)
+                .is_some_and(Result::is_ok))
+    }
+
     fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
         Ok([42; 32])
     }

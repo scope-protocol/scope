@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 ---
 
 # Design
@@ -129,7 +129,7 @@ reclaim                                   rent of both accounts to the payer
 System Transfer of P's surplus to D_owner, retaining P's rent reserve
 ```
 
-The core (apply, transfer, empty, reclaim, with D created beforehand) is 2,759 bytes and 256,800 CU in LiteSVM (verification: V56); the full shape above is estimated at about 3,300 bytes [likely]. The zero-ciphertext proof is over the new source ciphertext from the transfer's equality proof: Transfer sets the available balance to exactly that ciphertext (verification: V8). Burn removes public dust a mint authority can mint in, since MintTo ignores the disabled public-credit flag and a nonzero public amount blocks CloseAccount (verification: V4, V6). If reclaim fails, the client drops it and resends, so our program can never block funds. D and D_owner are derived per payment; nothing is persisted on the recipient side.
+The core (apply, transfer, empty, reclaim, with D created beforehand) is 2,759 bytes and 256,800 CU in LiteSVM (verification: V56); the full shape above is estimated at about 3,300 bytes [likely]. The zero-ciphertext proof is over the new source ciphertext from the transfer's equality proof: Transfer sets the available balance to exactly that ciphertext (verification: V8). Burn removes public dust a mint authority can mint in, since MintTo ignores the disabled public-credit flag and a nonzero public amount blocks CloseAccount (verification: V4, V6). If full simulation fails, the client separately simulates and sends a version without burn and reclaim, so cleanup cannot block a transfer that is otherwise valid. D and D_owner are derived per payment; nothing is persisted on the recipient side.
 
 With the credit cap at 1, the payer's transfer is the only credit that can land (verification: V7), and apply, transfer and empty share one transaction, so there is no boundary for a second credit.
 
