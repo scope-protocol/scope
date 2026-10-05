@@ -8,6 +8,10 @@ last_verified: 2026-10-05
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
 
+## 2026-10-05 Recipient sweep reliability
+
+- **Recovery precedes broadcast.** Preparation and submission are separate APIs. The CLI flushes public recovery details before submission, and timeout or status errors retain the report. Rejected: returning recovery details only after successful finalization.
+
 ## 2026-10-05 Scan error isolation
 
 - **Invalid payments do not abort discovery.** Scan returns valid payments and skipped validation errors; the CLI reports skipped accounts on stderr. A sender can announce a matching payment authority with an unrelated ElGamal key using only public recipient keys. Rejected: aborting every payment's discovery on that entry or silently hiding its validation error. Chain errors remain fatal and sweep still rejects invalid payments. Evidence: V64.

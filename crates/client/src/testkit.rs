@@ -305,6 +305,10 @@ pub struct SvmChain<'a> {
     pub drop_sends: usize,
     /// Model a source that has not appeared in finalized reads yet.
     pub finalized_missing_until_send: Option<Address>,
+    pub fail_finalized_after_send: bool,
+    pub lag_finalized_reads: bool,
+    pub before_send: Option<VersionedTransaction>,
+    sent: bool,
 }
 
 const HEIGHT_STEP: u64 = 40;
@@ -318,6 +322,10 @@ impl<'a> SvmChain<'a> {
             height: Cell::new(0),
             drop_sends: 0,
             finalized_missing_until_send: None,
+            fail_finalized_after_send: false,
+            lag_finalized_reads: false,
+            before_send: None,
+            sent: false,
         }
     }
 }
@@ -328,6 +336,14 @@ impl Chain for SvmChain<'_> {
         address: &Address,
         commitment: Commitment,
     ) -> Result<Option<AccountData>, ChainError> {
+        if commitment == Commitment::Finalized {
+            if self.fail_finalized_after_send && self.sent {
+                return Err(ChainError("RPC disconnected after send".into()));
+            }
+            if self.lag_finalized_reads {
+                return Ok(None);
+            }
+        }
         if commitment == Commitment::Finalized
             && self.finalized_missing_until_send == Some(*address)
         {
@@ -369,9 +385,15 @@ impl Chain for SvmChain<'_> {
             self.drop_sends -= 1;
             return Ok(());
         }
+        if let Some(before) = self.before_send.take() {
+            self.svm
+                .send_transaction(before)
+                .map_err(|failed| ChainError(format!("{:?}", failed.err)))?;
+        }
         let result = self.svm.send_transaction(tx.clone());
         if result.is_ok() {
             self.finalized_missing_until_send = None;
+            self.sent = true;
         }
         self.svm.expire_blockhash();
         result

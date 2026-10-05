@@ -36,7 +36,10 @@ use spl_token_2022_interface::{
 };
 use spl_token_confidential_transfer_proof_extraction::instruction::ProofLocation;
 use spl_token_confidential_transfer_proof_generation::transfer::transfer_split_proof_data;
-use std::time::{Duration, Instant};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 use stealth_keygen::RecipientSecretKeys;
 
 const DESTINATION_SEED: &str = "scope-sweep/v1";
@@ -59,7 +62,7 @@ impl Default for SweepOptions {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SweepReport {
     pub destination: Address,
     pub destination_owner: Address,
@@ -69,6 +72,39 @@ pub struct SweepReport {
     pub signature: String,
     pub reclaimed: bool,
     pub dry_run: bool,
+}
+
+impl fmt::Display for SweepReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "destination\t{}\nowner\t{}\nephemeral\t{}\nattempt_signature\t{}",
+            self.destination,
+            self.destination_owner,
+            Address::new_from_array(self.ephemeral),
+            self.signature
+        )
+    }
+}
+
+#[derive(Debug)]
+pub struct PreparedSweep {
+    report: SweepReport,
+    transaction: VersionedTransaction,
+    announcement: Address,
+    source: Address,
+    mint: Address,
+    elgamal: ElGamalPubkey,
+    valid_until: u64,
+}
+
+impl PreparedSweep {
+    pub fn report(&self) -> &SweepReport {
+        &self.report
+    }
+    pub fn transaction(&self) -> &VersionedTransaction {
+        &self.transaction
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,8 +119,14 @@ pub enum SweepError {
     Underfunded { have: u64, need: u64, short: u64 },
     #[error("simulation failed, nothing sent: {0}")]
     Simulation(String),
-    #[error("sweep {signature} has not finalized; retry after checking chain state")]
-    Pending { signature: String },
+    #[error("sweep has not finalized; check chain state before retrying\n{report}")]
+    Pending { report: Box<SweepReport> },
+    #[error("sweep status is unavailable: {source}\n{report}")]
+    Interrupted {
+        report: Box<SweepReport>,
+        #[source]
+        source: Box<SweepError>,
+    },
 }
 
 fn invalid(e: impl core::fmt::Display) -> SweepError {
@@ -337,6 +379,16 @@ pub fn sweep<C: RecipientChain>(
     announcement: &Address,
     opts: &SweepOptions,
 ) -> Result<SweepReport, SweepError> {
+    let prepared = prepare(chain, recipient, announcement, opts)?;
+    submit(chain, prepared, opts)
+}
+
+pub fn prepare<C: RecipientChain>(
+    chain: &C,
+    recipient: &RecipientSecretKeys,
+    announcement: &Address,
+    opts: &SweepOptions,
+) -> Result<PreparedSweep, SweepError> {
     let account = chain
         .account(announcement, Commitment::Confirmed)?
         .ok_or_else(|| invalid("announcement not found; it may already have been reclaimed"))?;
@@ -447,7 +499,7 @@ pub fn sweep<C: RecipientChain>(
             }
         }
     };
-    let mut report = SweepReport {
+    let report = SweepReport {
         destination: destination.address,
         destination_owner: destination.owner.pubkey(),
         ephemeral: payment.info.ephemeral,
@@ -457,50 +509,84 @@ pub fn sweep<C: RecipientChain>(
         reclaimed,
         dry_run: opts.dry_run,
     };
-    if opts.dry_run {
-        return Ok(report);
+    Ok(PreparedSweep {
+        report,
+        transaction: tx,
+        announcement: *announcement,
+        source: payment.info.token_account,
+        mint: payment.info.mint,
+        elgamal: *destination.keys.pubkey(),
+        valid_until,
+    })
+}
+
+fn completed<C: RecipientChain>(chain: &C, prepared: &PreparedSweep) -> Result<bool, SweepError> {
+    let source = chain.account(&prepared.source, Commitment::Finalized)?;
+    let empty = match source {
+        None => true,
+        Some(a) => {
+            let state = StateWithExtensions::<Account>::unpack(&a.data).map_err(invalid)?;
+            let ext = state
+                .get_extension::<ConfidentialTransferAccount>()
+                .map_err(invalid)?;
+            ext.available_balance.0 == [0; 64]
+                && ext.pending_balance_lo.0 == [0; 64]
+                && ext.pending_balance_hi.0 == [0; 64]
+        }
+    };
+    if !empty {
+        return Ok(false);
+    }
+    let destination_ready = match chain
+        .account(&prepared.report.destination, Commitment::Finalized)?
+    {
+        Some(account) if account.owner == token_2022() => {
+            let state = StateWithExtensions::<Account>::unpack(&account.data).map_err(invalid)?;
+            let ext = state
+                .get_extension::<ConfidentialTransferAccount>()
+                .map_err(invalid)?;
+            state.base.owner == prepared.report.destination_owner
+                && state.base.mint == prepared.mint
+                && ext.elgamal_pubkey == prepared.elgamal.into()
+        }
+        _ => false,
+    };
+    Ok(destination_ready)
+}
+
+pub fn submit<C: RecipientChain>(
+    chain: &mut C,
+    mut prepared: PreparedSweep,
+    opts: &SweepOptions,
+) -> Result<SweepReport, SweepError> {
+    if prepared.report.dry_run {
+        return Ok(prepared.report);
     }
     let started = Instant::now();
     loop {
-        let source = chain.account(&payment.info.token_account, Commitment::Finalized)?;
-        let empty = match source {
-            None => true,
-            Some(a) => {
-                let state = StateWithExtensions::<Account>::unpack(&a.data).map_err(invalid)?;
-                let ext = state
-                    .get_extension::<ConfidentialTransferAccount>()
-                    .map_err(invalid)?;
-                ext.available_balance.0 == [0; 64]
-                    && ext.pending_balance_lo.0 == [0; 64]
-                    && ext.pending_balance_hi.0 == [0; 64]
-            }
+        let interrupted = |source| SweepError::Interrupted {
+            report: Box::new(prepared.report.clone()),
+            source: Box::new(source),
         };
-        let destination_ready = match chain.account(&destination.address, Commitment::Finalized)? {
-            Some(account) if account.owner == token_2022() => {
-                let state =
-                    StateWithExtensions::<Account>::unpack(&account.data).map_err(invalid)?;
-                let ext = state
-                    .get_extension::<ConfidentialTransferAccount>()
-                    .map_err(invalid)?;
-                state.base.owner == destination.owner.pubkey()
-                    && state.base.mint == payment.info.mint
-                    && ext.elgamal_pubkey == (*destination.keys.pubkey()).into()
-            }
-            _ => false,
-        };
-        if empty && destination_ready {
-            report.reclaimed = chain
-                .account(announcement, Commitment::Finalized)?
+        if completed(chain, &prepared).map_err(interrupted)? {
+            prepared.report.reclaimed = chain
+                .account(&prepared.announcement, Commitment::Finalized)
+                .map_err(|e| interrupted(e.into()))?
                 .is_none();
-            return Ok(report);
+            return Ok(prepared.report);
         }
-        if started.elapsed() >= opts.timeout || chain.finalized_block_height()? > valid_until {
+        if started.elapsed() >= opts.timeout
+            || chain
+                .finalized_block_height()
+                .map_err(|e| interrupted(e.into()))?
+                > prepared.valid_until
+        {
             return Err(SweepError::Pending {
-                signature: report.signature,
+                report: Box::new(prepared.report),
             });
         }
         // Resend the identical signed transaction; destination creation prevents a second sweep.
-        let _ = chain.send(&tx);
+        let _ = chain.send(&prepared.transaction);
         std::thread::sleep(opts.poll);
     }
 }

@@ -12,7 +12,11 @@ use scope_client::{
 use solana_address::Address;
 use solana_keypair::read_keypair_file;
 use solana_rpc_client::rpc_client::RpcClient;
-use std::{path::PathBuf, time::Duration};
+use std::{
+    io::{self, Write},
+    path::PathBuf,
+    time::Duration,
+};
 
 /// Confidential payouts on Solana: hidden amounts, optional one-time recipient accounts.
 #[derive(Parser)]
@@ -110,11 +114,18 @@ fn run_scan(args: ScanArgs) -> anyhow::Result<()> {
     for error in report.skipped {
         eprintln!("skipped {error}");
     }
-    println!("announcement\ttoken_account\tmint\tamount_base_units\tpublic_amount_base_units");
+    println!(
+        "announcement\ttoken_account\tmint\tamount_base_units\tpublic_amount_base_units\tephemeral"
+    );
     for p in report.payments {
         println!(
-            "{}\t{}\t{}\t{}\t{}",
-            p.announcement, p.token_account, p.mint, p.amount, p.public_amount
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            p.announcement,
+            p.token_account,
+            p.mint,
+            p.amount,
+            p.public_amount,
+            Address::new_from_array(p.ephemeral)
         );
     }
     Ok(())
@@ -122,28 +133,21 @@ fn run_scan(args: ScanArgs) -> anyhow::Result<()> {
 
 fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
     let recipient = args.keys.load()?;
-    let report = sweep::sweep(
-        &mut recipient_chain(args.url),
-        &recipient,
-        &args.announcement,
-        &sweep::SweepOptions {
-            max_price_per_cu: args.max_price,
-            timeout: Duration::from_secs(args.timeout),
-            dry_run: args.dry_run,
-            ..Default::default()
-        },
-    )?;
+    let mut chain = recipient_chain(args.url);
+    let opts = sweep::SweepOptions {
+        max_price_per_cu: args.max_price,
+        timeout: Duration::from_secs(args.timeout),
+        dry_run: args.dry_run,
+        ..Default::default()
+    };
+    let prepared = sweep::prepare(&chain, &recipient, &args.announcement, &opts)?;
+    write_recovery(&mut io::stdout().lock(), prepared.report())?;
+    let report = sweep::submit(&mut chain, prepared, &opts)?;
     println!(
         "{}: {} base units to {}",
         if report.dry_run { "simulated" } else { "swept" },
         report.amount,
         report.destination
-    );
-    println!(
-        "owner\t{}\nephemeral\t{}\nsignature\t{}",
-        report.destination_owner,
-        Address::new_from_array(report.ephemeral),
-        report.signature
     );
     if report.burned_public_amount > 0 {
         println!(
@@ -160,6 +164,11 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
     };
     println!("rent {rent_status}");
     Ok(())
+}
+
+fn write_recovery(output: &mut impl Write, report: &sweep::SweepReport) -> io::Result<()> {
+    writeln!(output, "{report}")?;
+    output.flush()
 }
 
 #[derive(Debug, Args)]
@@ -257,6 +266,53 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecoveryOutput {
+        bytes: Vec<u8>,
+        flushed: bool,
+        fail_flush: bool,
+    }
+
+    impl Write for RecoveryOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            if self.fail_flush {
+                return Err(io::Error::other("flush failed"));
+            }
+            self.flushed = true;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn recovery_output_must_be_flushed_before_submission() {
+        let report = sweep::SweepReport {
+            destination: Address::default(),
+            destination_owner: Address::default(),
+            ephemeral: [7; 32],
+            amount: 1,
+            burned_public_amount: 0,
+            signature: "attempt".into(),
+            reclaimed: false,
+            dry_run: false,
+        };
+        let mut output = RecoveryOutput::default();
+        write_recovery(&mut output, &report).expect("recovery");
+        assert!(output.flushed);
+        let text = String::from_utf8(output.bytes).expect("text");
+        assert!(text.contains(&Address::new_from_array(report.ephemeral).to_string()));
+        assert!(text.contains("attempt_signature\tattempt"));
+        let mut output = RecoveryOutput {
+            fail_flush: true,
+            ..Default::default()
+        };
+        assert!(write_recovery(&mut output, &report).is_err());
+        assert!(!output.flushed);
+    }
 
     #[test]
     fn recipient_commands_parse_and_sweep_requires_an_announcement() {

@@ -515,3 +515,80 @@ fn sweep_builds_proofs_for_the_mint_auditor() {
     assert_eq!(report.amount, AMOUNT);
     assert!(report.reclaimed);
 }
+
+#[test]
+fn sweep_preserves_recovery_details_when_rpc_fails_after_send() {
+    use scope_client::sweep::{self, SweepError, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, account, _) = fund(&mut h, &alice, 3);
+    let mut chain = SvmChain::new(&mut h.svm);
+    let opts = SweepOptions {
+        poll: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("prepare");
+    let recovery = prepared.report().clone();
+    assert!(chain.svm.get_account(&recovery.destination).is_none());
+    assert!(chain.svm.get_account(&account).is_some());
+    chain.fail_finalized_after_send = true;
+    let error = sweep::submit(&mut chain, prepared, &opts).expect_err("RPC failure");
+    assert!(
+        error
+            .to_string()
+            .contains(&Address::new_from_array(recovery.ephemeral).to_string())
+    );
+    let SweepError::Interrupted { report, .. } = error else {
+        panic!("missing recovery report")
+    };
+    assert_eq!(report.destination, recovery.destination);
+    assert_eq!(report.destination_owner, recovery.destination_owner);
+    assert_eq!(report.ephemeral, recovery.ephemeral);
+    assert_eq!(report.signature, recovery.signature);
+    assert!(chain.svm.get_account(&announcement).is_none());
+    assert!(chain.svm.get_account(&report.destination).is_some());
+    let seed = alice
+        .derive_sweep_destination(&report.ephemeral)
+        .expect("seed");
+    assert_eq!(
+        solana_keypair::Keypair::new_from_array(*seed.as_bytes()).pubkey(),
+        report.destination_owner
+    );
+    assert!(
+        matches!(sweep::sweep(&mut chain, &alice, &announcement, &opts),
+        Err(SweepError::Invalid(why)) if why.contains("not found"))
+    );
+}
+
+#[test]
+fn sweep_timeout_preserves_recovery_details_after_execution() {
+    use scope_client::sweep::{self, SweepError, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, _, _) = fund(&mut h, &alice, 3);
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.lag_finalized_reads = true;
+    let error = sweep::sweep(
+        &mut chain,
+        &alice,
+        &announcement,
+        &SweepOptions {
+            poll: std::time::Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect_err("pending");
+    let SweepError::Pending { report } = error else {
+        panic!("missing recovery report")
+    };
+    assert!(!report.signature.is_empty());
+    assert!(chain.svm.get_account(&announcement).is_none());
+    assert!(chain.svm.get_account(&report.destination).is_some());
+    let seed = alice
+        .derive_sweep_destination(&report.ephemeral)
+        .expect("seed");
+    assert_eq!(
+        solana_keypair::Keypair::new_from_array(*seed.as_bytes()).pubkey(),
+        report.destination_owner
+    );
+}
