@@ -26,7 +26,7 @@ Built for plain recipients in `crates/client/src/pay.rs`; stealth rows come next
 
 The library supplies `RecipientPublicKeys::to_meta_address()` and `from_meta_address(&str)`: a `scope:` Base58Check string containing a version and both public keys. The parser validates the checksum, version and keys before the payer derives a payment (verification: V62). Register output is available in the CLI; payer stealth-row input wiring remains planned.
 
-**Fees.** Each attempt samples the per-CU price landed non-vote transactions actually paid in the latest confirmed block: ComputeBudget price for legacy and v0, header `priority_fee` over its compute unit limit for v1. It takes p75; above `--max-price` the run stops, resumable. `getRecentPrioritizationFees` is not used: unfiltered it returns each slot's minimum and reads near zero (verification: V39). The header carries the fee as total lamports (verification: V20). Until S5 measures both transactions, `tx::COMPUTE_UNIT_LIMIT` is a fixed 600,000 and the loaded-accounts limit 4 MiB.
+**Fees.** Each attempt samples the per-CU price landed non-vote transactions actually paid in the latest confirmed block: ComputeBudget price for legacy and v0, header `priority_fee` over its compute unit limit for v1. It takes p75; above `--max-price` the run stops, resumable. `getRecentPrioritizationFees` is not used: unfiltered it returns each slot's minimum and reads near zero (verification: V39). The header carries the fee as total lamports (verification: V20). `tx::COMPUTE_UNIT_LIMIT` remains a fixed 600,000 and the loaded-accounts limit 4 MiB; the full recipient sweep fits that budget in LiteSVM (V68).
 
 `lamports_for_P` uses a fixed high price, not the sample, because the recipient may sweep weeks later: D's rent, two signatures and 600,000 CU at 1,000,000 micro-lamports per CU, plus a rent reserve in P. The recipient computes the exact requirement from the chain; the earlier allowance estimate must include this reserve. P remains rent-exempt so incoming SOL cannot invalidate a fixed drain (verification: V23).
 
@@ -36,49 +36,15 @@ Plain recipients: `recipient,amount` rows, amounts in token units. The engine pr
 
 ## Recipient flow
 
-The recipient keeps one private-key backup. D_owner is derived from `b_spend` and R, so transaction retries need no sweep journal. Scan includes public R, and sweep prints and flushes its destination, owner, R and attempt signature before each newly signed attempt is broadcast; identical resends reuse that checkpoint. Preserve this recovery output: after reclaim closes the announcement, it is needed to reconstruct D_owner and its confidential keys, or must be recovered from the historical payer transaction.
-
-`RecipientSecretKeys::derive_sweep_destination(&R)` supplies a protected standard Ed25519 seed. The client builds D_owner with `Keypair::new_from_array(*seed.as_bytes())`; this SDK conversion and reconstruction after a recipient backup are tested (verification: V61). The source is signed through the raw-scalar `PaymentSigner` adapter (V63).
-
-`scope_client::scan::scan` fetches program-owned accounts, validates the announcement layout and canonical PDA, and checks each tag locally. The tag depends on R and cannot be known before reading the announcement. Per candidate it recovers P, compares the token account's authority, derives the account-scoped confidential keys, verifies the ElGamal key and AE balance hint, and decrypts the pending balance. An optional mint filter restricts the results. Wrong-key candidates and malformed announcements are ignored. `ScanReport` returns valid payments and skipped invalid payments with their account and reason; the CLI prints skipped errors to stderr. Chain errors still abort the scan. RPC capacity remains unverified (S6).
-
-`scope_client::sweep::sweep` creates a fresh account at `create_with_seed(D_owner, "scope-sweep/v1", Token-2022)`, derives its confidential keys using the standard SDK wallet schedule, and builds the full recipient transaction. It verifies mint policy, refuses an existing token destination, funds any rent deficit and allocates and assigns D with its owner as the signing base, so System-owned prefunds arriving before execution cannot block creation, disables incoming confidential credits, burns public dust, empties the source, refunds rent with `reclaim`, and transfers surplus SOL from P to D_owner while retaining a rent reserve in P. A surplus too small to fund a new D_owner stays in P; an already-funded owner can receive a smaller transfer. The recipient controls the retained SOL, and the report includes P and its finalized balance. It computes rent and fees from the chain and reports an exact funding shortage. Both signatures are verified during simulation; if the full transaction fails but the version without burn and reclaim simulates successfully, confidential funds are swept and the report shows any public balance and rent left behind. Dry runs send nothing.
-
-`prepare` simulates and returns a signed `PreparedSweep`, retaining protected signing material in memory for one transfer-only retry. Its debug output contains only the public report. `submit` resends the same transaction while its outcome is unresolved; after a finalized failure or blockhash expiry, it can build and simulate one attempt without burn and reclaim using a fresh blockhash, balance, destination rent deficit and fee quote. It refuses to rebuild over an existing token destination. The deterministic owner and public R stay the same across attempts. `submit_with_recovery` invokes a fallible callback before each new attempt; the CLI flushes that report, and a write or flush failure prevents that attempt from being sent. `submit` is the same flow with no output callback.
-
-Timeout and status errors retain the public recovery report. `attempt_signature` names the most recent prepared transaction; `finalized_signature` is present only when that signature has a successful finalized status. A concurrent attempt can complete the payment without proving this attempt succeeded; its finalized signature and burned amount remain unknown in that case. Closed source and announcement addresses that later receive SOL are treated as empty System placeholders rather than live token or announcement accounts. Counterparty destinations and destination-reuse overrides remain follow-up work.
-
-Any wallet that signs Token-2022 confidential instructions with an imported key can sweep without this CLI.
+`scope register`, `scan` and `sweep` implement the recipient side: protected backups, streaming authenticated discovery and whole-balance v1 transfers into a fresh deterministic destination. Preparation and each safe rebuild simulate before sending. Recovery is flushed before every new attempt, and submission shares one deadline across RPC waits, retry preparation and polling. Source and mint state are refreshed on safe retries; a finalized successful signature proves the atomic outcome (verification: V64 to V67).
 
 ## Recipient commands
 
-Register once and back up the resulting private file. Stdout is the public meta-address shared with payers; an existing backup is never overwritten. Raw files contain the library's 64-byte format and must be regular, nonsymlinked files with owner-only permissions. New files use mode 0600 and new directories mode 0700. Secret buffers are cleared on drop.
-
-```sh
-scope register --recipient-key ./recipient.key
-scope scan --recipient-key ./recipient.key --url http://127.0.0.1:8899
-scope sweep --recipient-key ./recipient.key --url http://127.0.0.1:8899 \
-  --announcement <address-from-scan> --dry-run
-scope sweep --recipient-key ./recipient.key --url http://127.0.0.1:8899 \
-  --announcement <address-from-scan>
-```
-
-Scan prints announcement, token account, mint, confidential amount and public amount in base units, and public R. `--mint` restricts discovery. Sweep moves the whole confidential balance and attempts to burn public dust and close the source; dry-run output reports both. `--max-price` caps priority prices, and `--timeout` starts at submission, after initial preparation and simulation. It bounds RPC waits, including HTTP retry delays, and polling sleeps; the client starts no further sends after the deadline. `RpcChain` cancels unfinished RPC futures at that shared deadline, and other `RecipientChain` implementations must honor `set_deadline` for blocking I/O. A timeout or missing announcement does not authorize an extra payment: retry reads chain state and fresh destination creation prevents duplicates. If cleanup is omitted during preparation or a safe submission retry, the output explicitly shows the public balance left behind and says rent was not reclaimed. Active permissioned burning can use this transfer-only fallback; issuer authorization is still required for later dust cleanup.
-
-For encrypted backups, install [age](https://github.com/FiloSottile/age) and supply its public recipient at registration and owner-only private identity when loading. Encryption and decryption stream through the age process; plaintext keys are never written to a temporary file.
-
-```sh
-scope register --recipient-key ./recipient.age --encrypt-to <age-public-recipient>
-scope scan --recipient-key ./recipient.age --identity ./identity.txt --url <rpc-url>
-scope sweep --recipient-key ./recipient.age --identity ./identity.txt \
-  --url <rpc-url> --announcement <announcement-address> --dry-run
-```
-
-The default backup path is `~/.config/scope/recipient.key`, and the default RPC is localhost. Live-cluster recipient validation, counterparty destinations, destination-reuse overrides, and receipts remain planned. CLI and encrypted-backup checks are V66; on-chain recipient tests are V64 and V65.
+Commands, backup formats, callback APIs, recovery and supported limits are documented in [recipient.md](recipient.md). Counterparty destinations, destination reuse and receipts remain follow-up work.
 
 ## Mints
 
-Works unmodified on mints whose `auto_approve_new_accounts` is true. The client refuses other mints, non-transferable mints and mints that freeze new accounts by default. PYUSD and USDG are Token-2022 with the extension but require their authority's ApproveAccount for every new confidential account; USDC is legacy SPL Token (verification: V14). The issuer path, documented and not built: the payer stays the owner until the issuer approves, then hands over and transfers in a second transaction [likely]. The issuer's side can be one change: point the mint's confidential-transfer authority at the PDA of a small policy program that approves every account, since ApproveAccount needs only that authority's signature (verification: V13).
+Works unmodified on mints whose `auto_approve_new_accounts` is true. The client refuses other mints, non-transferable, transfer-fee and transfer-hook mints, and mints that freeze new accounts by default. PYUSD and USDG are Token-2022 with the extension but require their authority's ApproveAccount for every new confidential account; USDC is legacy SPL Token (verification: V14). The issuer path, documented and not built: the payer stays the owner until the issuer approves, then hands over and transfers in a second transaction [likely]. The issuer's side can be one change: point the mint's confidential-transfer authority at the PDA of a small policy program that approves every account, since ApproveAccount needs only that authority's signature (verification: V13).
 
 ## Audit (planned)
 
@@ -87,13 +53,14 @@ Disclosure receipt `{R, ct_ikm, payer transaction signature}`. `verify` re-deriv
 ## Testing
 
 What runs today, all with `cargo test --workspace --locked` after `cargo build-sbf`:
+
 - `programs/scope/tests/it`: LiteSVM integration tests for `announce` and `reclaim` (verification: V33, V34), S3 end to end (V36) and the S1 size check (V37). LiteSVM loads the real `.so`, Token-2022 and the ZK ElGamal builtin. It does not enforce the 4,096-byte cap or the loaded-accounts limit and charges 6,960 lamports per byte of rent (verification: V31), so the S1 test measures size itself.
 - `crates/client/tests/pay.rs`: the payer engine on LiteSVM, with a fault-injecting chain that kills runs before a send, after a send and between rows (verification: V48).
 - `crates/client/tests/interface_crosscheck.rs`: the account reader, program ids and CloseAccount byte against spl-token-2022-interface 3.1.1 (verification: V35).
 - Unit tests in `crates/interface` (layout, instruction data, seeds, error codes) and `crates/stealth-keygen` (vectors from an independent Python generator, point checks, the nonce regression test).
 - Example binaries, run by hand: `s1_v1` sends the payer transaction to a cluster (V38), reads the announcement back, then announces an unpaid account and reclaims it; `s4_fees` samples priority fees (V40, V52); `p2_fixture` sets up a mint, a funded source and plain recipients for `scope pay` (V49).
 
-Done: an attack test for every `announce` and `reclaim` check, and CU ceilings from LiteSVM logs (V54, V55). Planned: scan against Surfpool (P2); Mollusk 0.15.1 if a fuzz fixture is wanted (P4); a chaos harness over the existing `chain::Chain` trait that kills the engine at every step of a 20-recipient run and asserts convergence (P4); devnet release smoke (P5). The rest of the adversarial suite (P2 to P4) adds: transfer, apply or empty signed by any key but P after handover; public credit after setup; a second confidential credit; wrong mint; a mint that does not auto-approve; two P signatures sharing an R.
+Done: an attack test for every `announce` and `reclaim` check, and CU ceilings from LiteSVM logs (V54, V55). Recipient tests cover source and destination races, streaming output, safe retries and public recovery; a 1,000-announcement RPC fixture covers the wire format and filtering (V64 to V67). Planned: scan against Surfpool and the selected provider (P2); Mollusk 0.15.1 if a fuzz fixture is wanted (P4); a chaos harness over the existing `chain::Chain` trait that kills the engine at every step of a 20-recipient run and asserts convergence (P4); devnet release smoke (P5). Further P2 to P4 checks target unauthorized Token-2022 operations and cross-payment signing.
 
 ## Stack
 

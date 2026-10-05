@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-09-28
+last_verified: 2026-10-05
 ---
 
 # Docs
@@ -15,6 +15,7 @@ Start with the root README, then the brief and the plan.
 | [brief.md](brief.md) | What we build and why, limitations, scope, success criteria | scope |
 | [design.md](design.md) | Components, keys, accounts, `announce` and `reclaim`, one payment per side, money, limitations | on-chain design |
 | [client.md](client.md) | Payer engine, recipient flow, audit receipts, fees, testing, stack | off-chain design |
+| [recipient.md](recipient.md) | Recipient commands, backups, discovery, safe retries, recovery and supported boundaries | recipient client |
 | [crypto.md](crypto.md) | Key derivation, curve checks, signing, reviewer checklist | cryptography |
 | [privacy.md](privacy.md) | Adversaries, what an observer sees, residual leaks | privacy guarantees |
 | [plan.md](plan.md) | Owners, phases and gates with status, spikes, risks, open questions | what happens next |
@@ -25,7 +26,7 @@ Start with the root README, then the brief and the plan.
 
 - Everyone: the [root README](../README.md), then brief, then plan.
 - Program and payer engine: design, client, decisions.
-- Crypto and recipient: design, crypto, client (Recipient flow), privacy.
+- Crypto and recipient: design, crypto, recipient, privacy.
 - Audit and security: design, privacy, crypto, client (Audit, Testing), verification.
 
 ## Rules

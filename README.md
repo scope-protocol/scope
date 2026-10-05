@@ -11,7 +11,7 @@ It joins two existing pieces that were never combined, stealth addresses and Tok
 - Spike S3 green end to end: payer setup, handover and payment in one transaction, the recipient's sweep and rent refund in another.
 - Spike S1 green on Surfpool; the devnet run is pending.
 - `scope pay` pays plain confidential recipients, resumably; stealth rows are next, on the `ct_ikm` export. Phases and gates: [docs/plan.md](docs/plan.md).
-- `scope register`, `scan`, and `sweep` support recipient backups, authenticated discovery, and full-balance sweeps into fresh confidential accounts. The flow is tested in LiteSVM; live-cluster validation remains pending. Usage: [docs/client.md](docs/client.md#recipient-commands).
+- `scope register`, `scan`, and `sweep` support recipient backups, authenticated discovery, and full-balance sweeps into fresh confidential accounts. The flow is tested in LiteSVM; live-cluster validation remains pending. Usage: [docs/recipient.md](docs/recipient.md).
 
 ## Layout
 
@@ -26,7 +26,7 @@ One cargo workspace.
 | `cli` | `scope-cli`, binary `scope` | Argument parsing and output over `crates/client`. Plain `pay`, recipient `register`, `scan` and `sweep` work; disclose, verify and bench remain stubs |
 | `docs/` | | Brief, design, client, crypto, privacy, plan, decisions, verification. Start at [docs/README.md](docs/README.md) |
 
-The program and the client depend on `crates/interface`, which depends on nothing. `crates/stealth-keygen` derives stealth keys and account-scoped `ct_ikm`. `scope-client::confidential` converts that material into ElGamal and symmetric keys with the workspace ZK SDK. Remaining protocol integration is tracked in Q14.
+The program and the client depend on `crates/interface`, which depends on nothing. `crates/stealth-keygen` derives stealth keys and account-scoped `ct_ikm`. `scope-client::confidential` converts that material into ElGamal and symmetric keys with the workspace ZK SDK. Q14 implementation is complete; external derivation review remains Q1. Payer-engine stealth rows and receipts remain planned.
 
 ## Build and test
 

@@ -8,6 +8,14 @@ last_verified: 2026-10-05
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
 
+## 2026-10-05 Recipient state refresh and discovery
+
+- **Two safe retries refresh the full snapshot.** An applied source can accept a further credit, and a mint auditor can change. Each rebuild refreshes source balances, mint policy, proofs, funding and rent; two retries cover cleanup followed by one additional credit. Work remains bounded by the deadline and funding floor. Rejected: treating the pending-credit cap as a lifetime limit or reusing stale proofs.
+
+- **Proof preparation cannot authorize a late send.** Retry decoding and proving run on a worker with no chain access; the caller stops waiting at its deadline. A successful finalized signature remains an immutable outcome proof even when the payer recreates accounts. Rejected: inferring failure from later account state.
+
+- **Discovery streams validated results.** Scan exposes a fallible per-result callback and the CLI flushes rows immediately. RPC fetches only the announcement layout, and malformed binary transport data returns an error. Public all-zero ciphertexts skip unnecessary decoding. Rejected: withholding every result until the final scan or adding a new cryptographic decoding algorithm.
+
 ## 2026-10-05 Recipient sweep reliability
 
 - **Destination creation tolerates concurrent prefunding.** Every build reads the current rent deficit and uses transfer, allocation and assignment with D_owner as the signing base. Rejected: a creation instruction or cached rent requirement invalidated by an incoming SOL transfer.
