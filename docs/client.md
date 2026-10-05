@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 ---
 
 # Client
@@ -40,7 +40,7 @@ The recipient keeps one private-key backup. D_owner is derived from `b_spend` an
 
 `RecipientSecretKeys::derive_sweep_destination(&R)` supplies a protected standard Ed25519 seed. The client builds D_owner with `Keypair::new_from_array(*seed.as_bytes())`; this SDK conversion and reconstruction after a recipient backup are tested (verification: V61). The source is signed through the raw-scalar `PaymentSigner` adapter (V63).
 
-`scope_client::scan::scan` fetches program-owned accounts, validates the announcement layout and canonical PDA, and checks each tag locally. The tag depends on R and cannot be known before reading the announcement. Per candidate it recovers P, compares the token account's authority, derives the account-scoped confidential keys, verifies the ElGamal key and AE balance hint, and decrypts the pending balance. An optional mint filter restricts the results. Wrong-key candidates and malformed announcements are ignored; invalid owned payments fail with their account and reason. RPC capacity remains unverified (S6).
+`scope_client::scan::scan` fetches program-owned accounts, validates the announcement layout and canonical PDA, and checks each tag locally. The tag depends on R and cannot be known before reading the announcement. Per candidate it recovers P, compares the token account's authority, derives the account-scoped confidential keys, verifies the ElGamal key and AE balance hint, and decrypts the pending balance. An optional mint filter restricts the results. Wrong-key candidates and malformed announcements are ignored. `ScanReport` returns valid payments and skipped invalid payments with their account and reason; the CLI prints skipped errors to stderr. Chain errors still abort the scan. RPC capacity remains unverified (S6).
 
 `scope_client::sweep::sweep` creates a fresh account at `create_with_seed(D_owner, "scope-sweep/v1", Token-2022)`, derives its confidential keys using the standard SDK wallet schedule, and builds the full recipient transaction. It verifies mint policy, refuses an existing token destination, handles System-owned prefunds, burns public dust, empties the source, refunds rent with `reclaim`, and drains P to D_owner. It computes rent and fees from the chain and reports an exact funding shortage. Both signatures are verified during simulation; if the full transaction fails but the version without reclaim simulates successfully, funds are swept and the report marks rent as unreclaimed. Dry runs send nothing. Submission resends only the same signed transaction, waits for finalized source state and destination creation, and stops at expiry or timeout; retry re-reads the chain. Counterparty destinations and destination-reuse overrides remain follow-up work.
 

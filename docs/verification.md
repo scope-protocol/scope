@@ -1,6 +1,6 @@
 ---
 status: verified
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 ---
 
 # Verification
@@ -78,7 +78,7 @@ Line numbers drift; when bumping a pinned version, re-check the rows that name i
 | Id | Claim | Source |
 |---|---|---|
 | V63 | The client pins the program ID in the confidential context; payer and recipient derive identical material and a recovered scalar signs a standard Solana transaction | `recovered_payment_signs_a_solana_transaction_with_the_protocol_context` in `crates/client/tests/confidential.rs` |
-| V64 | Recipient scan finds real stealth payments after key restoration, ignores foreign or malformed announcements, and rejects forged balance hints and mismatched ElGamal keys | scan tests in `crates/client/tests/recipient.rs`; canonical PDA, token authority and confidential policy checks in `src/scan.rs` |
+| V64 | Recipient scan finds real stealth payments after key restoration, ignores foreign or malformed announcements, and reports forged balance hints and mismatched ElGamal keys without losing valid payments; sweep still rejects invalid payments | scan tests in `crates/client/tests/recipient.rs`, including `scan_skips_mismatched_elgamal_keys_without_blocking_valid_payments` with an announcement signed only by the attacker; canonical PDA, token authority and confidential policy checks in `src/scan.rs` |
 | V65 | A full recipient sweep creates D, transfers the entire confidential amount, empties the source, refunds rent and drains P; lost sends retry safely, dust burns, prefunds allocate, auditor proofs verify, underfunding and dry runs send nothing, and a blocked reclaim can be omitted | sweep tests in `crates/client/tests/recipient.rs`; real SBF program and Token-2022 loaded by LiteSVM |
 | V66 | CLI recipient commands parse correctly and require a sweep announcement; backup creation is owner-only and refuses overwrites; loading rejects public permissions, symlinks and invalid material; age backups reconstruct the same recipient | tests in `cli/src/main.rs` and `cli/src/recipient_keys.rs`; encrypted round trip requires age on PATH and runs explicitly with `cargo test -p scope-cli encrypted_backup_round_trips_with_age -- --ignored` |
 | V33 | `announce` writes the 68-byte record, works on an address pre-funded below or above the rent minimum, and rejects a second call, an owner still equal to the payer, another close authority, public credits enabled, and a wrong R | tests in `announce.rs`: `announce_writes_the_record`, `announce_succeeds_when_announcement_prefunded`, `announce_keeps_a_prefund_at_or_above_rent`, `announce_twice_fails`, `announce_rejects_owner_still_payer`, `announce_rejects_other_close_authority`, `announce_rejects_public_credits_enabled`, `announce_rejects_wrong_ephemeral` |

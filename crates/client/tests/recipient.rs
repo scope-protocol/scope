@@ -143,7 +143,9 @@ fn scan_recovers_backed_up_recipient_and_ignores_other_payments() {
     fund(&mut h, &recipient(7), 4);
     let restored = RecipientSecretKeys::from_bytes(*alice.export().as_bytes()).expect("restore");
     let chain = SvmChain::new(&mut h.svm);
-    let found = scan::scan(&chain, &restored, None).expect("scan");
+    let report = scan::scan(&chain, &restored, None).expect("scan");
+    assert!(report.skipped.is_empty());
+    let found = report.payments;
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].announcement, announcement);
     assert_eq!(found[0].token_account, account);
@@ -151,6 +153,7 @@ fn scan_recovers_backed_up_recipient_and_ignores_other_payments() {
     assert!(
         scan::scan(&chain, &restored, Some(&Address::default()))
             .expect("filter")
+            .payments
             .is_empty()
     );
 }
@@ -163,14 +166,93 @@ fn scan_rejects_forged_balance_hints_and_elgamal_keys() {
     edit_source(&mut h, account, |ext| {
         ext.decryptable_available_balance = ae.encrypt(7).into()
     });
-    let error = scan::scan(&SvmChain::new(&mut h.svm), &alice, None).expect_err("forged hint");
-    assert!(matches!(error, ScanError::Invalid { why, .. } if why.contains("disagrees")));
+    let report = scan::scan(&SvmChain::new(&mut h.svm), &alice, None).expect("scan");
+    assert!(report.payments.is_empty());
+    assert!(
+        matches!(report.skipped.as_slice(), [ScanError::Invalid { why, .. }] if why.contains("disagrees"))
+    );
     edit_source(&mut h, account, |ext| {
         ext.decryptable_available_balance = ae.encrypt(0).into();
         ext.elgamal_pubkey = (*ElGamalKeypair::new_rand().pubkey()).into();
     });
-    let error = scan::scan(&SvmChain::new(&mut h.svm), &alice, None).expect_err("wrong keys");
-    assert!(matches!(error, ScanError::Invalid { why, .. } if why.contains("ElGamal")));
+    let report = scan::scan(&SvmChain::new(&mut h.svm), &alice, None).expect("scan");
+    assert!(report.payments.is_empty());
+    assert!(
+        matches!(report.skipped.as_slice(), [ScanError::Invalid { why, .. }] if why.contains("ElGamal"))
+    );
+}
+
+#[test]
+fn scan_skips_mismatched_elgamal_keys_without_blocking_valid_payments() {
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (first, _, _) = fund(&mut h, &alice, 3);
+    let attacker = solana_keypair::Keypair::new();
+    h.svm
+        .airdrop(&attacker.pubkey(), 1_000_000_000)
+        .expect("airdrop");
+    let sent = derive_payment_with_ephemeral(
+        &alice.derive_public_keys(),
+        &EphemeralSecret::from_bytes([5; 32]),
+    )
+    .expect("payment");
+    let ephemeral = sent.announcement.ephemeral_public_key;
+    let account = token_account_address(&attacker.pubkey(), &ephemeral);
+    let (announcement, _) = announcement_address(&account);
+    let keys = ElGamalKeypair::new_rand();
+    let ae = AeKey::new_rand();
+    let space = ExtensionType::try_calculate_account_len::<Account>(&[
+        ExtensionType::ConfidentialTransferAccount,
+    ])
+    .expect("space");
+    let ixs = stealth_setup(&StealthSetup {
+        payer: attacker.pubkey(),
+        mint: h.mint,
+        ephemeral,
+        view_tag: sent.announcement.discovery_tag,
+        one_time_owner: Address::new_from_array(sent.payment_public_key),
+        elgamal: &keys,
+        ae: &ae,
+        rent_lamports: h.svm.minimum_balance_for_rent_exemption(space),
+        space: space as u64,
+        lamports_for_owner: 8_000_000,
+    })
+    .expect("setup");
+    let tx = scope_client::tx::v1_transaction(&attacker, &[], &ixs, h.svm.latest_blockhash());
+    assert_eq!(tx.signatures.len(), 1);
+    h.svm.send_transaction(tx).expect("attacker announcement");
+    h.svm.expire_blockhash();
+    let (second, _, _) = fund(&mut h, &alice, 4);
+    let mut expected = vec![first, second];
+    expected.sort_unstable();
+    let mut chain = SvmChain::new(&mut h.svm);
+    for mint in [None, Some(h.mint)] {
+        let report = scan::scan(&chain, &alice, mint.as_ref()).expect("scan");
+        assert_eq!(
+            report
+                .payments
+                .iter()
+                .map(|p| p.announcement)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(report.payments.iter().all(|p| p.amount == AMOUNT));
+        assert!(
+            matches!(report.skipped.as_slice(), [ScanError::Invalid { account: a, why }]
+            if *a == account && why.contains("ElGamal"))
+        );
+    }
+    let error = scope_client::sweep::sweep(
+        &mut chain,
+        &alice,
+        &announcement,
+        &scope_client::sweep::SweepOptions::default(),
+    )
+    .expect_err("invalid payment cannot be swept");
+    assert!(matches!(
+        error,
+        scope_client::sweep::SweepError::Scan(ScanError::Invalid { .. })
+    ));
 }
 
 #[test]
@@ -186,6 +268,7 @@ fn scan_ignores_wrong_announcement_bumps_and_invalid_ephemeral_keys() {
     assert!(
         scan::scan(&SvmChain::new(&mut h.svm), &alice, None)
             .expect("scan")
+            .payments
             .is_empty()
     );
     account.data[3] ^= 1;
@@ -194,6 +277,7 @@ fn scan_ignores_wrong_announcement_bumps_and_invalid_ephemeral_keys() {
     assert!(
         scan::scan(&SvmChain::new(&mut h.svm), &alice, None)
             .expect("scan")
+            .payments
             .is_empty()
     );
 }
@@ -292,7 +376,9 @@ fn sweep_dry_run_and_underfunding_leave_the_payment_untouched() {
     assert!(report.dry_run);
     assert!(h.svm.get_account(&report.destination).is_none());
     assert!(h.svm.get_account(&account).is_some());
-    let public = scan::scan(&SvmChain::new(&mut h.svm), &alice, None).expect("scan");
+    let public = scan::scan(&SvmChain::new(&mut h.svm), &alice, None)
+        .expect("scan")
+        .payments;
     let note = stealth_keygen::PaymentAnnouncement {
         ephemeral_public_key: public[0].ephemeral,
         discovery_tag: h.svm.get_account(&announcement).expect("announcement").data[2],
@@ -323,7 +409,10 @@ fn sweep_burns_public_dust_and_handles_a_prefunded_destination() {
     let mut h = Harness::new();
     let alice = recipient(1);
     let (announcement, account, _) = fund(&mut h, &alice, 3);
-    let r = scan::scan(&SvmChain::new(&mut h.svm), &alice, None).expect("scan")[0].ephemeral;
+    let r = scan::scan(&SvmChain::new(&mut h.svm), &alice, None)
+        .expect("scan")
+        .payments[0]
+        .ephemeral;
     let seed = alice.derive_sweep_destination(&r).expect("seed");
     let owner = solana_keypair::Keypair::new_from_array(*seed.as_bytes());
     let d = sweep::destination_address(&owner.pubkey());

@@ -41,6 +41,12 @@ pub enum ScanError {
     Invalid { account: Address, why: String },
 }
 
+#[derive(Debug)]
+pub struct ScanReport {
+    pub payments: Vec<PaymentInfo>,
+    pub skipped: Vec<ScanError>,
+}
+
 pub(crate) struct OwnedPayment {
     pub info: PaymentInfo,
     pub payment: RecoveredPayment,
@@ -54,16 +60,20 @@ pub fn scan<C: RecipientChain>(
     chain: &C,
     recipient: &RecipientSecretKeys,
     mint: Option<&Address>,
-) -> Result<Vec<PaymentInfo>, ScanError> {
+) -> Result<ScanReport, ScanError> {
     let genesis = chain.genesis_hash()?;
     let mut payments = Vec::new();
+    let mut skipped = Vec::new();
     for (address, account) in chain.announcements()? {
-        if let Some(payment) = inspect(chain, recipient, genesis, address, &account, mint)? {
-            payments.push(payment.info);
+        match inspect(chain, recipient, genesis, address, &account, mint) {
+            Ok(Some(payment)) => payments.push(payment.info),
+            Ok(None) => {}
+            Err(error @ ScanError::Invalid { .. }) => skipped.push(error),
+            Err(error) => return Err(error),
         }
     }
     payments.sort_by_key(|p| p.announcement);
-    Ok(payments)
+    Ok(ScanReport { payments, skipped })
 }
 
 pub(crate) fn inspect<C: RecipientChain>(

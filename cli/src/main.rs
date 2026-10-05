@@ -106,9 +106,12 @@ fn recipient_chain(url: String) -> RpcChain {
 
 fn run_scan(args: ScanArgs) -> anyhow::Result<()> {
     let recipient = args.keys.load()?;
-    let payments = scan::scan(&recipient_chain(args.url), &recipient, args.mint.as_ref())?;
+    let report = scan::scan(&recipient_chain(args.url), &recipient, args.mint.as_ref())?;
+    for error in report.skipped {
+        eprintln!("skipped {error}");
+    }
     println!("announcement\ttoken_account\tmint\tamount_base_units\tpublic_amount_base_units");
-    for p in payments {
+    for p in report.payments {
         println!(
             "{}\t{}\t{}\t{}\t{}",
             p.announcement, p.token_account, p.mint, p.amount, p.public_amount
