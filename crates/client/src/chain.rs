@@ -12,11 +12,19 @@ use solana_rpc_client::{
 use solana_signature::Signature;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction_status_client_types::{TransactionDetails, UiTransactionEncoding};
+use std::{future::Future, time::Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Commitment {
     Confirmed,
     Finalized,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinalizedStatus {
+    Unknown,
+    Succeeded,
+    Failed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,11 +62,12 @@ pub trait Chain {
 
 /// Cluster reads needed by recipient discovery and sweeping.
 pub trait RecipientChain: Chain {
+    fn set_deadline(&mut self, deadline: Option<Instant>);
     fn genesis_hash(&self) -> Result<[u8; 32], ChainError>;
     fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError>;
     fn rent(&self, space: usize) -> Result<u64, ChainError>;
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError>;
-    fn finalized_success(&self, signature: &Signature) -> Result<bool, ChainError>;
+    fn finalized_status(&self, signature: &Signature) -> Result<FinalizedStatus, ChainError>;
 }
 
 fn rpc_err<E: core::fmt::Display>(e: E) -> ChainError {
@@ -72,7 +81,47 @@ fn config(c: Commitment) -> CommitmentConfig {
     }
 }
 
-pub struct RpcChain(pub RpcClient);
+pub struct RpcChain {
+    client: RpcClient,
+    deadline: Option<Instant>,
+}
+
+impl From<RpcClient> for RpcChain {
+    fn from(client: RpcClient) -> Self {
+        Self {
+            client,
+            deadline: None,
+        }
+    }
+}
+
+impl RpcChain {
+    fn rpc(&self) -> &solana_rpc_client::nonblocking::rpc_client::RpcClient {
+        self.client.get_inner_client()
+    }
+
+    fn call<T>(
+        &self,
+        request: impl Future<Output = solana_rpc_client::api::client_error::Result<T>>,
+    ) -> Result<T, ChainError> {
+        tokio::task::block_in_place(|| {
+            self.client.runtime().block_on(async {
+                match self.deadline {
+                    Some(deadline) => {
+                        if Instant::now() >= deadline {
+                            return Err(ChainError("sweep deadline exceeded".into()));
+                        }
+                        tokio::time::timeout_at(deadline.into(), request)
+                            .await
+                            .map_err(rpc_err)?
+                            .map_err(rpc_err)
+                    }
+                    None => request.await.map_err(rpc_err),
+                }
+            })
+        })
+    }
+}
 
 impl Chain for RpcChain {
     fn account(
@@ -81,9 +130,10 @@ impl Chain for RpcChain {
         commitment: Commitment,
     ) -> Result<Option<AccountData>, ChainError> {
         let found = self
-            .0
-            .get_account_with_commitment(address, config(commitment))
-            .map_err(rpc_err)?
+            .call(
+                self.rpc()
+                    .get_account_with_commitment(address, config(commitment)),
+            )?
             .value;
         Ok(found.map(|a| AccountData {
             owner: a.owner,
@@ -93,29 +143,29 @@ impl Chain for RpcChain {
     }
 
     fn blockhash(&self) -> Result<(Hash, u64), ChainError> {
-        self.0
-            .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())
-            .map_err(rpc_err)
+        self.call(
+            self.rpc()
+                .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed()),
+        )
     }
 
     fn finalized_block_height(&self) -> Result<u64, ChainError> {
-        self.0
-            .get_block_height_with_commitment(CommitmentConfig::finalized())
-            .map_err(rpc_err)
+        self.call(
+            self.rpc()
+                .get_block_height_with_commitment(CommitmentConfig::finalized()),
+        )
     }
 
     fn simulate(&self, tx: &VersionedTransaction) -> Result<Result<(), String>, ChainError> {
         let result = self
-            .0
-            .simulate_transaction_with_config(
+            .call(self.rpc().simulate_transaction_with_config(
                 tx,
                 RpcSimulateTransactionConfig {
                     sig_verify: true,
                     commitment: Some(CommitmentConfig::confirmed()),
                     ..RpcSimulateTransactionConfig::default()
                 },
-            )
-            .map_err(rpc_err)?
+            ))?
             .value;
         Ok(match result.err {
             None => Ok(()),
@@ -124,88 +174,89 @@ impl Chain for RpcChain {
     }
 
     fn send(&mut self, tx: &VersionedTransaction) -> Result<(), ChainError> {
-        self.0
-            .send_transaction_with_config(
-                tx,
-                RpcSendTransactionConfig {
-                    skip_preflight: true,
-                    max_retries: Some(0),
-                    ..RpcSendTransactionConfig::default()
-                },
-            )
-            .map(|_| ())
-            .map_err(rpc_err)
+        self.call(self.rpc().send_transaction_with_config(
+            tx,
+            RpcSendTransactionConfig {
+                skip_preflight: true,
+                max_retries: Some(0),
+                ..RpcSendTransactionConfig::default()
+            },
+        ))
+        .map(|_| ())
     }
 
     fn recent_prices(&self) -> Result<Vec<u64>, ChainError> {
-        let slot = self
-            .0
-            .get_slot_with_commitment(CommitmentConfig::confirmed())
-            .map_err(rpc_err)?;
-        let block = self
-            .0
-            .get_block_with_config(
-                slot,
-                RpcBlockConfig {
-                    encoding: Some(UiTransactionEncoding::Base64),
-                    transaction_details: Some(TransactionDetails::Full),
-                    rewards: Some(false),
-                    commitment: Some(CommitmentConfig::confirmed()),
-                    max_supported_transaction_version: Some(1),
-                },
-            )
-            .map_err(rpc_err)?;
+        let slot = self.call(
+            self.rpc()
+                .get_slot_with_commitment(CommitmentConfig::confirmed()),
+        )?;
+        let block = self.call(self.rpc().get_block_with_config(
+            slot,
+            RpcBlockConfig {
+                encoding: Some(UiTransactionEncoding::Base64),
+                transaction_details: Some(TransactionDetails::Full),
+                rewards: Some(false),
+                commitment: Some(CommitmentConfig::confirmed()),
+                max_supported_transaction_version: Some(1),
+            },
+        ))?;
         Ok(fees::block_prices(block.transactions.unwrap_or_default()))
     }
 }
 
 impl RecipientChain for RpcChain {
-    fn finalized_success(&self, signature: &Signature) -> Result<bool, ChainError> {
-        let statuses = self
-            .0
-            .get_signature_statuses_with_history(&[*signature])
-            .map_err(rpc_err)?;
-        Ok(statuses
-            .value
-            .first()
-            .and_then(Option::as_ref)
-            .is_some_and(|status| {
-                status.err.is_none() && status.satisfies_commitment(CommitmentConfig::finalized())
-            }))
+    fn set_deadline(&mut self, deadline: Option<Instant>) {
+        self.deadline = deadline;
+    }
+
+    fn finalized_status(&self, signature: &Signature) -> Result<FinalizedStatus, ChainError> {
+        let statuses = self.call(
+            self.rpc()
+                .get_signature_statuses_with_history(&[*signature]),
+        )?;
+        Ok(
+            match statuses
+                .value
+                .first()
+                .and_then(Option::as_ref)
+                .filter(|status| status.satisfies_commitment(CommitmentConfig::finalized()))
+            {
+                Some(status) if status.err.is_none() => FinalizedStatus::Succeeded,
+                Some(_) => FinalizedStatus::Failed,
+                None => FinalizedStatus::Unknown,
+            },
+        )
     }
 
     fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
-        self.0
-            .get_genesis_hash()
+        self.call(self.rpc().get_genesis_hash())
             .map(|h| h.to_bytes())
-            .map_err(rpc_err)
     }
 
     fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
-        self.0
-            .get_program_accounts(&crate::address::program_id())
-            .map(|accounts| {
-                accounts
-                    .into_iter()
-                    .map(|(address, a)| {
-                        (
-                            address,
-                            AccountData {
-                                owner: a.owner,
-                                lamports: a.lamports,
-                                data: a.data,
-                            },
-                        )
-                    })
-                    .collect()
-            })
-            .map_err(rpc_err)
+        self.call(
+            self.rpc()
+                .get_program_accounts(&crate::address::program_id()),
+        )
+        .map(|accounts| {
+            accounts
+                .into_iter()
+                .map(|(address, a)| {
+                    (
+                        address,
+                        AccountData {
+                            owner: a.owner,
+                            lamports: a.lamports,
+                            data: a.data,
+                        },
+                    )
+                })
+                .collect()
+        })
     }
 
     fn rent(&self, space: usize) -> Result<u64, ChainError> {
-        self.0
-            .get_minimum_balance_for_rent_exemption(space)
-            .map_err(rpc_err)
+        self.call(self.rpc().get_minimum_balance_for_rent_exemption(space))
     }
 
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError> {
@@ -215,8 +266,61 @@ impl RecipientChain for RpcChain {
                 self.0.serialize()
             }
         }
-        self.0
-            .get_fee_for_message(&WireMessage(message))
-            .map_err(rpc_err)
+        self.call(self.rpc().get_fee_for_message(&WireMessage(message)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        cell::Cell,
+        io::{Read, Write},
+        net::TcpListener,
+        time::Duration,
+    };
+
+    #[test]
+    fn rpc_deadline_cancels_slow_responses_and_rate_limit_retries() {
+        for rate_limited in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listen");
+            let url = format!("http://{}", listener.local_addr().expect("address"));
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("read timeout");
+                let mut request = [0; 4096];
+                assert!(stream.read(&mut request).expect("request") > 0);
+                if rate_limited {
+                    stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("rate limit");
+                } else {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            });
+            let mut chain = RpcChain::from(RpcClient::new(url));
+            let start = Instant::now();
+            chain.set_deadline(Some(start + Duration::from_millis(100)));
+            chain
+                .finalized_block_height()
+                .expect_err("deadline interrupts RPC");
+            assert!(start.elapsed() < Duration::from_millis(400));
+            chain.set_deadline(None);
+            assert_eq!(chain.call(async { Ok(7) }).expect("deadline cleared"), 7);
+            server.join().expect("server");
+        }
+    }
+
+    #[test]
+    fn expired_rpc_deadline_does_not_start_a_request() {
+        let mut chain = RpcChain::from(RpcClient::new_mock("succeeds"));
+        chain.set_deadline(Some(Instant::now()));
+        let called = Cell::new(false);
+        let request = async {
+            called.set(true);
+            Ok(())
+        };
+        chain.call(request).expect_err("expired");
+        assert!(!called.get());
     }
 }

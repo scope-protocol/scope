@@ -102,7 +102,7 @@ struct SweepArgs {
 }
 
 fn recipient_chain(url: String) -> RpcChain {
-    RpcChain(RpcClient::new_with_commitment(
+    RpcChain::from(RpcClient::new_with_commitment(
         url,
         solana_commitment_config::CommitmentConfig::confirmed(),
     ))
@@ -231,7 +231,7 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
     let keypair_path = expand_home(&args.keypair)?;
     let payer = read_keypair_file(&keypair_path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", keypair_path.display()))?;
-    let chain = RpcChain(RpcClient::new(args.url));
+    let chain = RpcChain::from(RpcClient::new(args.url));
     let opts = PayOptions {
         runs_dir: args.runs,
         max_price_per_cu: args.max_price,

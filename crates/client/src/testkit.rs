@@ -2,7 +2,7 @@
 
 use crate::{
     address::*,
-    chain::{AccountData, Chain, ChainError, Commitment, RecipientChain},
+    chain::{AccountData, Chain, ChainError, Commitment, FinalizedStatus, RecipientChain},
     ix::*,
     tx::v1_transaction,
 };
@@ -327,7 +327,11 @@ pub struct SvmChain<'a> {
     pub finalized_missing_until_send: Option<Address>,
     pub fail_finalized_after_send: bool,
     pub lag_finalized_reads: bool,
+    pub lag_finalized_status: bool,
     pub before_send: Option<VersionedTransaction>,
+    pub sent_signatures: Vec<solana_signature::Signature>,
+    pub failed_status_lag: Cell<usize>,
+    pub height_delay: std::time::Duration,
     sent: bool,
 }
 
@@ -344,7 +348,11 @@ impl<'a> SvmChain<'a> {
             finalized_missing_until_send: None,
             fail_finalized_after_send: false,
             lag_finalized_reads: false,
+            lag_finalized_status: false,
             before_send: None,
+            sent_signatures: Vec::new(),
+            failed_status_lag: Cell::new(0),
+            height_delay: std::time::Duration::ZERO,
             sent: false,
         }
     }
@@ -388,6 +396,7 @@ impl Chain for SvmChain<'_> {
     }
 
     fn finalized_block_height(&self) -> Result<u64, ChainError> {
+        std::thread::sleep(self.height_delay);
         self.height.set(self.height.get() + HEIGHT_STEP);
         Ok(self.height.get())
     }
@@ -401,6 +410,7 @@ impl Chain for SvmChain<'_> {
     }
 
     fn send(&mut self, tx: &VersionedTransaction) -> Result<(), ChainError> {
+        self.sent_signatures.push(tx.signatures[0]);
         if self.drop_sends > 0 {
             self.drop_sends -= 1;
             return Ok(());
@@ -427,15 +437,25 @@ impl Chain for SvmChain<'_> {
 }
 
 impl RecipientChain for SvmChain<'_> {
-    fn finalized_success(
+    fn set_deadline(&mut self, _deadline: Option<std::time::Instant>) {}
+
+    fn finalized_status(
         &self,
         signature: &solana_signature::Signature,
-    ) -> Result<bool, ChainError> {
-        Ok(!self.lag_finalized_reads
-            && self
-                .svm
-                .get_transaction(signature)
-                .is_some_and(Result::is_ok))
+    ) -> Result<FinalizedStatus, ChainError> {
+        Ok(if self.lag_finalized_status {
+            FinalizedStatus::Unknown
+        } else {
+            match self.svm.get_transaction(signature) {
+                Some(Ok(_)) => FinalizedStatus::Succeeded,
+                Some(Err(_)) if self.failed_status_lag.get() > 0 => {
+                    self.failed_status_lag.set(self.failed_status_lag.get() - 1);
+                    FinalizedStatus::Unknown
+                }
+                Some(Err(_)) => FinalizedStatus::Failed,
+                None => FinalizedStatus::Unknown,
+            }
+        })
     }
 
     fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {

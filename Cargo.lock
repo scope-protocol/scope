@@ -3020,6 +3020,7 @@ dependencies = [
  "spl-token-confidential-transfer-proof-generation",
  "stealth-keygen",
  "thiserror 2.0.20",
+ "tokio",
  "wincode",
 ]
 

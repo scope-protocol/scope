@@ -38,6 +38,7 @@ spl-token-confidential-transfer-proof-extraction.workspace = true
 spl-token-confidential-transfer-proof-generation.workspace = true
 stealth-keygen.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 wincode.workspace = true
 
 [dev-dependencies]

@@ -590,6 +590,7 @@ fn sweep_timeout_preserves_recovery_details_after_execution() {
     let (announcement, _, _) = fund(&mut h, &alice, 3);
     let mut chain = SvmChain::new(&mut h.svm);
     chain.lag_finalized_reads = true;
+    chain.lag_finalized_status = true;
     let error = sweep::sweep(
         &mut chain,
         &alice,
@@ -840,4 +841,227 @@ fn concurrent_sweep_completion_does_not_claim_an_unexecuted_signature() {
             .expect("winner history")
             .is_ok()
     );
+}
+
+fn mint_dust(h: &Harness, source: Address, amount: u64) -> solana_instruction::Instruction {
+    spl_token_2022_interface::instruction::mint_to(
+        &token_2022(),
+        &h.mint,
+        &source,
+        &h.mint_authority.pubkey(),
+        &[],
+        amount,
+    )
+    .expect("dust")
+}
+
+#[test]
+fn sweep_retries_without_cleanup_after_a_finalized_dust_failure() {
+    use scope_client::sweep::{self, SweepOptions};
+    for existing_dust in [0, 17] {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let (announcement, source, _) = fund(&mut h, &alice, 3);
+        if existing_dust > 0 {
+            h.send(
+                &[mint_dust(&h, source, existing_dust)],
+                &[&h.mint_authority.insecure_clone()],
+            )
+            .expect("initial dust");
+        }
+        let dust = scope_client::tx::v1_transaction(
+            &h.payer,
+            &[&h.mint_authority],
+            &[mint_dust(&h, source, 17)],
+            h.svm.latest_blockhash(),
+        );
+        let opts = SweepOptions {
+            poll: std::time::Duration::ZERO,
+            ..Default::default()
+        };
+        let mut chain = SvmChain::new(&mut h.svm);
+        let prepared =
+            sweep::prepare(&chain, &alice, &announcement, &opts).expect("full simulation");
+        assert!(prepared.report().reclaimed);
+        let signature = prepared.transaction().signatures[0];
+        let recovery = prepared.report().clone();
+        chain.before_send = Some(dust);
+        chain.failed_status_lag.set(1);
+        let report = sweep::submit(&mut chain, prepared, &opts).expect("fallback after failure");
+        assert_eq!(chain.sent_signatures.len(), 3);
+        assert_eq!(chain.sent_signatures[..2], [signature; 2]);
+        assert_ne!(chain.sent_signatures[2], signature);
+        assert!(
+            chain
+                .svm
+                .get_transaction(&signature)
+                .expect("original")
+                .is_err()
+        );
+        assert_eq!(
+            report.finalized_signature.as_ref(),
+            Some(&report.attempt_signature)
+        );
+        assert!(!report.reclaimed);
+        assert_eq!(report.burned_public_amount, Some(0));
+        assert_eq!(report.public_amount_remaining, existing_dust + 17);
+        assert_eq!(report.destination_owner, recovery.destination_owner);
+        assert_eq!(report.ephemeral, recovery.ephemeral);
+        assert!(chain.svm.get_account(&report.destination).is_some());
+        let account = chain.svm.get_account(&source).expect("source remains");
+        let state = StateWithExtensions::<Account>::unpack(&account.data).expect("state");
+        let ext = state
+            .get_extension::<ConfidentialTransferAccount>()
+            .expect("ct");
+        assert_eq!(ext.available_balance.0, [0; 64]);
+        assert_eq!(ext.pending_balance_lo.0, [0; 64]);
+        assert_eq!(ext.pending_balance_hi.0, [0; 64]);
+        assert!(!bool::from(ext.allow_confidential_credits));
+    }
+}
+
+#[test]
+fn sweep_retries_without_cleanup_only_after_an_unknown_attempt_expires() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, source, _) = fund(&mut h, &alice, 3);
+    let dust = scope_client::tx::v1_transaction(
+        &h.payer,
+        &[&h.mint_authority],
+        &[mint_dust(&h, source, 17)],
+        h.svm.latest_blockhash(),
+    );
+    let opts = SweepOptions {
+        poll: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.drop_sends = 3;
+    chain.before_send = Some(dust);
+    let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("prepare");
+    let signature = prepared.transaction().signatures[0];
+    let report = sweep::submit(&mut chain, prepared, &opts).expect("retry after expiry");
+    assert_eq!(chain.sent_signatures.len(), 4);
+    assert_eq!(chain.sent_signatures[..3], [signature; 3]);
+    assert_ne!(chain.sent_signatures[3], signature);
+    assert!(chain.svm.get_transaction(&signature).is_none());
+    assert!(!report.reclaimed);
+    assert_eq!(report.public_amount_remaining, 17);
+    assert_eq!(
+        report.finalized_signature.as_ref(),
+        Some(&report.attempt_signature)
+    );
+}
+
+#[test]
+fn sweep_retry_rechecks_funding_after_a_failed_attempt_charges_fees() {
+    use scope_client::sweep::{self, SweepError, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, source, _) = fund(&mut h, &alice, 3);
+    let opts = SweepOptions {
+        poll: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let recovery = sweep::prepare(&SvmChain::new(&mut h.svm), &alice, &announcement, &opts)
+        .expect("prepare")
+        .report()
+        .clone();
+    let need = sweep_requirement(&h);
+    set_funding(&mut h, recovery.payment_authority, need);
+    let dust = scope_client::tx::v1_transaction(
+        &h.payer,
+        &[&h.mint_authority],
+        &[mint_dust(&h, source, 17)],
+        h.svm.latest_blockhash(),
+    );
+    let mut chain = SvmChain::new(&mut h.svm);
+    let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("exact funding");
+    chain.before_send = Some(dust);
+    let error = sweep::submit(&mut chain, prepared, &opts).expect_err("retry funding shortage");
+    let SweepError::Interrupted {
+        report,
+        source: cause,
+    } = error
+    else {
+        panic!("recovery missing")
+    };
+    assert!(matches!(
+        *cause,
+        SweepError::Underfunded { short: 10_000, .. }
+    ));
+    assert_eq!(report.ephemeral, recovery.ephemeral);
+    assert_eq!(report.destination_owner, recovery.destination_owner);
+    assert_eq!(chain.sent_signatures.len(), 1);
+    assert!(chain.svm.get_account(&source).is_some());
+    assert!(chain.svm.get_account(&report.destination).is_none());
+}
+
+#[test]
+fn sweep_deadline_prevents_late_sends_and_caps_poll_sleeps() {
+    use scope_client::sweep::{self, SweepError, SweepOptions};
+    use std::time::{Duration, Instant};
+    for (timeout, height_delay, sends) in [
+        (Duration::ZERO, Duration::ZERO, 0),
+        (Duration::from_millis(25), Duration::from_millis(150), 0),
+        (Duration::from_millis(50), Duration::ZERO, 1),
+    ] {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let (announcement, source, _) = fund(&mut h, &alice, 3);
+        let opts = SweepOptions {
+            timeout,
+            poll: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let mut chain = SvmChain::new(&mut h.svm);
+        let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("prepare");
+        let recovery = prepared.report().clone();
+        chain.height_delay = height_delay;
+        chain.drop_sends = usize::MAX;
+        let start = Instant::now();
+        let error = sweep::submit(&mut chain, prepared, &opts).expect_err("deadline");
+        assert!(start.elapsed() < Duration::from_millis(500));
+        let SweepError::Pending { report } = error else {
+            panic!("recovery missing")
+        };
+        assert_eq!(report.destination_owner, recovery.destination_owner);
+        assert_eq!(report.ephemeral, recovery.ephemeral);
+        assert_eq!(chain.sent_signatures.len(), sends);
+        assert!(chain.svm.get_account(&report.destination).is_none());
+        assert!(chain.svm.get_account(&source).is_some());
+    }
+}
+
+#[test]
+fn finalized_sweep_waits_for_account_reads_without_resending_or_rebuilding() {
+    use scope_client::sweep::{self, SweepError, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, _, _) = fund(&mut h, &alice, 3);
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.lag_finalized_reads = true;
+    let opts = SweepOptions {
+        timeout: std::time::Duration::from_secs(2),
+        poll: std::time::Duration::from_millis(5),
+        ..Default::default()
+    };
+    let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("prepare");
+    let signature = prepared.transaction().signatures[0];
+    let error = sweep::submit(&mut chain, prepared, &opts).expect_err("account state unavailable");
+    let SweepError::Pending { report } = error else {
+        panic!("recovery missing")
+    };
+    assert_eq!(chain.sent_signatures, [signature]);
+    assert_eq!(report.attempt_signature, signature.to_string());
+    assert_eq!(report.finalized_signature, Some(signature.to_string()));
+    assert!(
+        chain
+            .svm
+            .get_transaction(&signature)
+            .expect("finalized")
+            .is_ok()
+    );
+    assert!(chain.svm.get_account(&report.destination).is_some());
 }
