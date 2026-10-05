@@ -121,6 +121,7 @@ One transaction, signed by P (fee payer) and D_owner:
 ```
 VerifyPubkeyValidity for D
 System CreateAccountWithSeed (base D_owner, P pays), InitializeAccount3 (owner D_owner), ConfigureAccount, DisableNonConfidentialCredits
+T22 DisableConfidentialCredits           prevents credits after a transfer-only sweep
 T22 ApplyPendingBalance                   P signs
 T22 Transfer, full balance to D           three proofs
 T22 EmptyAccount                          zero-ciphertext proof
@@ -129,11 +130,11 @@ reclaim                                   rent of both accounts to the payer
 System Transfer of P's surplus to D_owner, retaining P's rent reserve
 ```
 
-The core (apply, transfer, empty, reclaim, with D created beforehand) is 2,759 bytes and 256,800 CU in LiteSVM (verification: V56); the full shape above is estimated at about 3,300 bytes [likely]. The zero-ciphertext proof is over the new source ciphertext from the transfer's equality proof: Transfer sets the available balance to exactly that ciphertext (verification: V8). Burn removes public dust a mint authority can mint in, since MintTo ignores the disabled public-credit flag and a nonzero public amount blocks CloseAccount (verification: V4, V6). If full simulation fails, the client separately simulates and sends a version without burn and reclaim, so cleanup cannot block a transfer that is otherwise valid. D and D_owner are derived per payment; nothing is persisted on the recipient side.
+The core (apply, transfer, empty, reclaim, with D created beforehand) is 2,759 bytes and 256,800 CU in LiteSVM (verification: V56); the full shape above is estimated at about 3,300 bytes [likely]. The zero-ciphertext proof is over the new source ciphertext from the transfer's equality proof: Transfer sets the available balance to exactly that ciphertext (verification: V8). Burn removes public dust a mint authority can mint in, since MintTo ignores the disabled public-credit flag and a nonzero public amount blocks CloseAccount (verification: V4, V6). If full simulation fails, the client separately simulates a version without burn and reclaim. If cleanup fails after simulation, submission waits for a finalized failure or blockhash expiry before building and simulating one transfer-only retry with refreshed funding. The retry uses the same deterministic destination and remains subject to the submission deadline and available funding. D and D_owner are derived per payment; nothing is persisted on the recipient side.
 
-With the credit cap at 1, the payer's transfer is the only credit that can land (verification: V7), and apply, transfer and empty share one transaction, so there is no boundary for a second credit.
+The credit cap of 1 prevents a second confidential credit before the sweep (verification: V7). The sweep disables confidential credits atomically with apply, transfer and empty; resetting the counter during apply therefore does not reopen a source left behind by the transfer-only fallback (verification: V65).
 
-Failure model: both transactions are atomic. Payer side: an announcement at `["ann", token_account]` means the payment landed, and only the payer can have created it. Recipient side: the announcement is gone means swept and reclaimed.
+Failure model: both transactions are atomic. Payer side: an announcement at `["ann", token_account]` means the payment landed, and only the payer can have created it. Recipient side: an empty source and authenticated destination mean swept; closing the announcement additionally means reclaimed. Account state alone does not identify which attempt succeeded.
 
 ## Money
 
@@ -150,7 +151,7 @@ The payer locks 4,008,120 lamports per stealth payment and sends P enough for D'
 ## Limitations
 
 - A payer that never calls `announce` makes the payment invisible to scan. The payment is real and can be disclosed, but the recipient depends on the payer to learn of it.
-- A mint authority can freeze the account or mint public dust into it; the sweep burns dust, a freeze blocks the sweep.
+- A mint authority can freeze the account or mint public dust into it. The sweep attempts dust cleanup and can fall back to transfer-only; a freeze still blocks the transfer.
 - Rent needs P's cooperation. P must empty the account, and must not enable CpiGuard, which blocks reclaim's CPI close to the payer (verification: V5). P cannot close the account itself, since CloseAccount needs the close authority, the announcement PDA (verification: V4).
 - The client refuses mints that are non-transferable (they force ImmutableOwner) or freeze new accounts by default (SetAuthority fails on a frozen account) (verification: V10, V2).
 
@@ -160,7 +161,7 @@ The program holds no authority over tokens: the announcement PDA is only a close
 
 ## Registry
 
-Deferred to P4 ([plan.md](plan.md), Q12). v1 passes `scope:` followed by Base58Check of `0x01 || B_spend || B_scan`; version 1 identifies the key layout and current payment schedule, and the checksum is four bytes of double-SHA256. `RecipientPublicKeys::to_meta_address` and `from_meta_address` implement this format and validate the decoded keys (verification: V59, V62). The CLI's register and stealth-row parsing remain planned. Until a registry exists, the small-order and mixed-order rejection in `stealth-keygen` is the only check on B_spend (verification: V42).
+Deferred to P4 ([plan.md](plan.md), Q12). v1 passes `scope:` followed by Base58Check of `0x01 || B_spend || B_scan`; version 1 identifies the key layout and current payment schedule, and the checksum is four bytes of double-SHA256. `RecipientPublicKeys::to_meta_address` and `from_meta_address` implement this format and validate the decoded keys (verification: V59, V62). The CLI's `register` creates a recipient backup and prints its meta-address; payer-engine stealth-row parsing remains planned. Until a registry exists, the small-order and mixed-order rejection in `stealth-keygen` is the only check on B_spend (verification: V42).
 
 ## Fallback
 

@@ -10,6 +10,12 @@ Docs describe the present; this file holds the why. Design history from before t
 
 ## 2026-10-05 Recipient sweep reliability
 
+- **Submission has one shared deadline.** RPC futures, including HTTP retries, and polling sleeps share the submission deadline; preparation precedes it. Rejected: checking elapsed time only between blocking calls or sending after a slow height query overruns the limit.
+
+- **A safe retry omits cleanup.** State can change after simulation. One fresh transfer-only attempt is permitted after a finalized failure or blockhash expiry, with updated funding and simulation. Signing material remains protected in memory and is excluded from debug output. Rejected: rebuilding while the earlier attempt may still land or resending stale cleanup indefinitely.
+
+- **Swept sources reject further confidential credits.** Sweep disables credits atomically with applying and emptying balances, including when cleanup is omitted. Rejected: relying on a credit counter that apply resets.
+
 - **Backup filenames are synchronized.** Registration syncs both the file and its parent directory, using the current directory for a bare filename. Rejected: treating an empty parent path as a reason to skip directory synchronization.
 
 - **Cleanup is optional and signatures are explicit.** The fallback omits both public dust burning and reclaim, including for permissioned-burn mints. It reports the public balance left behind. Completion from account state does not prove a specific transaction landed; the report separates the attempt signature from its verified finalized signature. Rejected: letting cleanup prevent a valid confidential transfer or reporting an unexecuted signature as successful.
