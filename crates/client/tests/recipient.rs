@@ -1065,3 +1065,193 @@ fn finalized_sweep_waits_for_account_reads_without_resending_or_rebuilding() {
     );
     assert!(chain.svm.get_account(&report.destination).is_some());
 }
+
+#[test]
+fn sweep_accepts_destination_prefunding_after_simulation() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, _, _) = fund(&mut h, &alice, 3);
+    let donor = h.payer.insecure_clone();
+    let prefund = h.svm.minimum_balance_for_rent_exemption(0);
+    let opts = SweepOptions {
+        poll: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let mut chain = SvmChain::new(&mut h.svm);
+    let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("prepare");
+    chain.before_send = Some(scope_client::tx::v1_transaction(
+        &donor,
+        &[],
+        &[solana_system_interface::instruction::transfer(
+            &donor.pubkey(),
+            &prepared.report().destination,
+            prefund,
+        )],
+        chain.svm.latest_blockhash(),
+    ));
+    let report = sweep::submit(&mut chain, prepared, &opts).expect("late prefund");
+    assert!(report.reclaimed);
+    assert_eq!(chain.sent_signatures.len(), 1);
+    assert_eq!(
+        report.finalized_signature.as_ref(),
+        Some(&report.attempt_signature)
+    );
+}
+
+#[test]
+fn sweep_retry_refreshes_destination_rent_after_prefunding() {
+    use scope_client::sweep::{self, SweepOptions};
+    for fully_funded in [false, true] {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let (announcement, source, _) = fund(&mut h, &alice, 3);
+        let donor = h.payer.insecure_clone();
+        let issuer = h.mint_authority.insecure_clone();
+        let space = ExtensionType::try_calculate_account_len::<Account>(&[
+            ExtensionType::ConfidentialTransferAccount,
+        ])
+        .expect("space");
+        let rent = h.svm.minimum_balance_for_rent_exemption(space);
+        let prefund = if fully_funded {
+            rent
+        } else {
+            h.svm.minimum_balance_for_rent_exemption(0)
+        };
+        let dust = mint_dust(&h, source, 17);
+        let opts = SweepOptions {
+            poll: std::time::Duration::ZERO,
+            ..Default::default()
+        };
+        let mut chain = SvmChain::new(&mut h.svm);
+        let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("prepare");
+        chain.before_send = Some(scope_client::tx::v1_transaction(
+            &donor,
+            &[&issuer],
+            &[
+                dust,
+                solana_system_interface::instruction::transfer(
+                    &donor.pubkey(),
+                    &prepared.report().destination,
+                    prefund,
+                ),
+            ],
+            chain.svm.latest_blockhash(),
+        ));
+        let report = sweep::submit(&mut chain, prepared, &opts).expect("fresh destination funding");
+        assert!(!report.reclaimed);
+        assert_eq!(report.public_amount_remaining, 17);
+        assert_eq!(chain.sent_signatures.len(), 2);
+        assert_eq!(
+            chain
+                .svm
+                .get_account(&report.destination)
+                .expect("destination")
+                .lamports,
+            rent
+        );
+        assert_eq!(
+            report.finalized_signature.as_ref(),
+            Some(&report.attempt_signature)
+        );
+    }
+}
+
+#[test]
+fn sweep_reports_success_when_closed_addresses_are_refunded() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, source, _) = fund(&mut h, &alice, 3);
+    let donor = h.payer.insecure_clone();
+    let rent = h.svm.minimum_balance_for_rent_exemption(0);
+    let refund = scope_client::tx::v1_transaction(
+        &donor,
+        &[],
+        &[
+            solana_system_interface::instruction::transfer(&donor.pubkey(), &source, rent),
+            solana_system_interface::instruction::transfer(&donor.pubkey(), &announcement, rent),
+        ],
+        h.svm.latest_blockhash(),
+    );
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.after_send = Some(refund);
+    let report = sweep::sweep(
+        &mut chain,
+        &alice,
+        &announcement,
+        &SweepOptions {
+            poll: std::time::Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect("refunded closed addresses");
+    assert!(report.reclaimed);
+    assert_eq!(
+        report.finalized_signature.as_ref(),
+        Some(&report.attempt_signature)
+    );
+    for address in [source, announcement] {
+        let account = chain.svm.get_account(&address).expect("System placeholder");
+        assert_eq!(account.owner, Address::default());
+        assert!(account.data.is_empty());
+        assert_eq!(account.lamports, rent);
+    }
+}
+
+#[test]
+fn recovery_is_checkpointed_for_each_attempt_and_flush_failure_stops_sends() {
+    use scope_client::sweep::{self, SweepError, SweepOptions};
+    for failed_checkpoint in [None, Some(1), Some(2)] {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let (announcement, source, _) = fund(&mut h, &alice, 3);
+        let dust = scope_client::tx::v1_transaction(
+            &h.payer,
+            &[&h.mint_authority],
+            &[mint_dust(&h, source, 17)],
+            h.svm.latest_blockhash(),
+        );
+        let mut chain = SvmChain::new(&mut h.svm);
+        chain.before_send = Some(dust);
+        let opts = SweepOptions {
+            poll: std::time::Duration::ZERO,
+            ..Default::default()
+        };
+        let prepared = sweep::prepare(&chain, &alice, &announcement, &opts).expect("prepare");
+        let recovery = prepared.report().clone();
+        let mut checkpoints = Vec::new();
+        let result = sweep::submit_with_recovery(&mut chain, prepared, &opts, |report| {
+            assert_eq!(report.destination_owner, recovery.destination_owner);
+            assert_eq!(report.ephemeral, recovery.ephemeral);
+            checkpoints.push(report.attempt_signature.clone());
+            if failed_checkpoint == Some(checkpoints.len()) {
+                Err(std::io::Error::other("flush failed"))
+            } else {
+                Ok(())
+            }
+        });
+        match failed_checkpoint {
+            None => {
+                let report = result.expect("sweep");
+                assert_eq!(checkpoints.len(), 2);
+                assert_ne!(checkpoints[0], checkpoints[1]);
+                assert_eq!(checkpoints[1], report.attempt_signature);
+                assert_eq!(report.finalized_signature.as_ref(), Some(&checkpoints[1]));
+            }
+            Some(n) => {
+                let SweepError::RecoveryOutput { report, .. } = result.expect_err("output failed")
+                else {
+                    panic!("missing recovery")
+                };
+                assert_eq!(checkpoints.len(), n);
+                assert_eq!(chain.sent_signatures.len(), n - 1);
+                assert_eq!(report.attempt_signature, checkpoints[n - 1]);
+                assert!(chain.svm.get_account(&report.destination).is_none());
+            }
+        }
+        for (sent, checkpoint) in chain.sent_signatures.iter().zip(&checkpoints) {
+            assert_eq!(sent.to_string(), *checkpoint);
+        }
+    }
+}

@@ -119,8 +119,11 @@ ConfigureAccount and SetAuthority check only the current owner's signature, so t
 One transaction, signed by P (fee payer) and D_owner:
 
 ```
-VerifyPubkeyValidity for D
-System CreateAccountWithSeed (base D_owner, P pays), InitializeAccount3 (owner D_owner), ConfigureAccount, DisableNonConfidentialCredits
+System Transfer any rent deficit from P to D
+System AllocateWithSeed and AssignWithSeed (base D_owner, owner Token-2022)
+T22 InitializeAccount3 (owner D_owner), ConfigureAccount
+VerifyPubkeyValidity for D                inline
+T22 DisableNonConfidentialCredits         D_owner signs
 T22 DisableConfidentialCredits           prevents credits after a transfer-only sweep
 T22 ApplyPendingBalance                   P signs
 T22 Transfer, full balance to D           three proofs
@@ -130,7 +133,7 @@ reclaim                                   rent of both accounts to the payer
 System Transfer of P's surplus to D_owner, retaining P's rent reserve
 ```
 
-The core (apply, transfer, empty, reclaim, with D created beforehand) is 2,759 bytes and 256,800 CU in LiteSVM (verification: V56); the full shape above is estimated at about 3,300 bytes [likely]. The zero-ciphertext proof is over the new source ciphertext from the transfer's equality proof: Transfer sets the available balance to exactly that ciphertext (verification: V8). Burn removes public dust a mint authority can mint in, since MintTo ignores the disabled public-credit flag and a nonzero public amount blocks CloseAccount (verification: V4, V6). If full simulation fails, the client separately simulates a version without burn and reclaim. If cleanup fails after simulation, submission waits for a finalized failure or blockhash expiry before building and simulating one transfer-only retry with refreshed funding. The retry uses the same deterministic destination and remains subject to the submission deadline and available funding. D and D_owner are derived per payment; nothing is persisted on the recipient side.
+The core (apply, transfer, empty, reclaim, with D created beforehand) is 2,759 bytes and 256,800 CU in LiteSVM (verification: V56); the full shape above is estimated at about 3,300 bytes [likely]. The zero-ciphertext proof is over the new source ciphertext from the transfer's equality proof: Transfer sets the available balance to exactly that ciphertext (verification: V8). Burn removes public dust a mint authority can mint in, since MintTo ignores the disabled public-credit flag and a nonzero public amount blocks CloseAccount (verification: V4, V6). If full simulation fails, the client separately simulates a version without burn and reclaim. If cleanup fails after simulation, submission waits for a finalized failure or blockhash expiry before building and simulating one transfer-only retry with refreshed funding and destination rent deficit. The retry uses the same deterministic destination and remains subject to the submission deadline and available funding. D and D_owner are derived per payment; nothing is persisted on the recipient side.
 
 The credit cap of 1 prevents a second confidential credit before the sweep (verification: V7). The sweep disables confidential credits atomically with apply, transfer and empty; resetting the counter during apply therefore does not reopen a source left behind by the transfer-only fallback (verification: V65).
 

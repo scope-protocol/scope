@@ -141,8 +141,9 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
         ..Default::default()
     };
     let prepared = sweep::prepare(&chain, &recipient, &args.announcement, &opts)?;
-    write_recovery(&mut io::stdout().lock(), prepared.report())?;
-    let report = sweep::submit(&mut chain, prepared, &opts)?;
+    let report = sweep::submit_with_recovery(&mut chain, prepared, &opts, |report| {
+        write_recovery(&mut io::stdout().lock(), report)
+    })?;
     println!(
         "{}: {} base units to {}",
         if report.dry_run { "simulated" } else { "swept" },

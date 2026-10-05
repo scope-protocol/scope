@@ -10,6 +10,10 @@ Docs describe the present; this file holds the why. Design history from before t
 
 ## 2026-10-05 Recipient sweep reliability
 
+- **Destination creation tolerates concurrent prefunding.** Every build reads the current rent deficit and uses transfer, allocation and assignment with D_owner as the signing base. Rejected: a creation instruction or cached rent requirement invalidated by an incoming SOL transfer.
+
+- **Recovery checkpoints precede every new attempt.** The CLI flushes each changed signature through a fallible callback; an output failure stops that attempt. Closed addresses funded again are classified by owner and data, so System placeholders do not undo completion or reclaim reporting.
+
 - **Submission has one shared deadline.** RPC futures, including HTTP retries, and polling sleeps share the submission deadline; preparation precedes it. Rejected: checking elapsed time only between blocking calls or sending after a slow height query overruns the limit.
 
 - **A safe retry omits cleanup.** State can change after simulation. One fresh transfer-only attempt is permitted after a finalized failure or blockhash expiry, with updated funding and simulation. Signing material remains protected in memory and is excluded from debug output. Rejected: rebuilding while the earlier attempt may still land or resending stale cleanup indefinitely.

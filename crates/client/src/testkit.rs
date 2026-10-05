@@ -329,6 +329,7 @@ pub struct SvmChain<'a> {
     pub lag_finalized_reads: bool,
     pub lag_finalized_status: bool,
     pub before_send: Option<VersionedTransaction>,
+    pub after_send: Option<VersionedTransaction>,
     pub sent_signatures: Vec<solana_signature::Signature>,
     pub failed_status_lag: Cell<usize>,
     pub height_delay: std::time::Duration,
@@ -350,6 +351,7 @@ impl<'a> SvmChain<'a> {
             lag_finalized_reads: false,
             lag_finalized_status: false,
             before_send: None,
+            after_send: None,
             sent_signatures: Vec::new(),
             failed_status_lag: Cell::new(0),
             height_delay: std::time::Duration::ZERO,
@@ -424,6 +426,11 @@ impl Chain for SvmChain<'_> {
         if result.is_ok() {
             self.finalized_missing_until_send = None;
             self.sent = true;
+            if let Some(after) = self.after_send.take() {
+                self.svm
+                    .send_transaction(after)
+                    .map_err(|failed| ChainError(format!("{:?}", failed.err)))?;
+            }
         }
         self.svm.expire_blockhash();
         result

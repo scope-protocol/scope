@@ -2,7 +2,7 @@
 
 use crate::{
     address::token_2022,
-    chain::{ChainError, Commitment, FinalizedStatus, RecipientChain},
+    chain::{AccountData, ChainError, Commitment, FinalizedStatus, RecipientChain},
     fees, ix,
     scan::{self, OwnedPayment, ScanError},
     signer::PaymentSigner,
@@ -132,6 +132,12 @@ pub enum SweepError {
     Underfunded { have: u64, need: u64, short: u64 },
     #[error("simulation failed: {0}")]
     Simulation(String),
+    #[error("recovery output failed; this attempt was not broadcast: {source}\n{report}")]
+    RecoveryOutput {
+        report: Box<SweepReport>,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("sweep completion has not been observed; check chain state before retrying\n{report}")]
     Pending { report: Box<SweepReport> },
     #[error("sweep status is unavailable: {source}\n{report}")]
@@ -158,7 +164,7 @@ struct Destination {
     owner: Keypair,
     address: Address,
     keys: ElGamalKeypair,
-    rent: u64,
+    space: usize,
     setup: Vec<Instruction>,
     auditor: Option<ElGamalPubkey>,
 }
@@ -167,7 +173,6 @@ fn destination<C: RecipientChain>(
     chain: &C,
     recipient: &RecipientSecretKeys,
     payment: &OwnedPayment,
-    authority: &Address,
 ) -> Result<Destination, SweepError> {
     let seed = recipient
         .derive_sweep_destination(&payment.info.ephemeral)
@@ -214,52 +219,8 @@ fn destination<C: RecipientChain>(
             &[ExtensionType::ConfidentialTransferAccount],
         )
         .map_err(invalid)?;
-    let rent = chain.rent(space)?;
-    let prefund = chain.account(&address, Commitment::Confirmed)?;
-    if prefund
-        .as_ref()
-        .is_some_and(|a| a.owner != Address::default() || !a.data.is_empty())
-    {
-        return Err(invalid(
-            "sweep destination already exists; refusing destination reuse",
-        ));
-    }
-    let cost = rent.saturating_sub(prefund.as_ref().map_or(0, |a| a.lamports));
     let t22 = token_2022();
-    let mut setup = if prefund.is_some() {
-        let mut ixs = Vec::new();
-        if cost > 0 {
-            ixs.push(solana_system_interface::instruction::transfer(
-                authority, &address, cost,
-            ));
-        }
-        ixs.push(solana_system_interface::instruction::allocate_with_seed(
-            &address,
-            &owner.pubkey(),
-            DESTINATION_SEED,
-            space as u64,
-            &t22,
-        ));
-        ixs.push(solana_system_interface::instruction::assign_with_seed(
-            &address,
-            &owner.pubkey(),
-            DESTINATION_SEED,
-            &t22,
-        ));
-        ixs
-    } else {
-        vec![
-            solana_system_interface::instruction::create_account_with_seed(
-                authority,
-                &address,
-                &owner.pubkey(),
-                DESTINATION_SEED,
-                rent,
-                space as u64,
-                &t22,
-            ),
-        ]
-    };
+    let mut setup = Vec::new();
     setup.push(
         t22::initialize_account3(&t22, &address, &payment.info.mint, &owner.pubkey())
             .map_err(invalid)?,
@@ -286,10 +247,52 @@ fn destination<C: RecipientChain>(
         owner,
         address,
         keys,
-        rent: cost,
+        space,
         setup,
         auditor,
     })
+}
+
+fn system_placeholder(account: &AccountData) -> bool {
+    account.owner == Address::default() && account.data.is_empty()
+}
+
+fn destination_creation<C: RecipientChain>(
+    chain: &C,
+    owner: &Address,
+    authority: &Address,
+    space: usize,
+) -> Result<(Vec<Instruction>, u64), SweepError> {
+    let address = destination_address(owner);
+    let account = chain.account(&address, Commitment::Confirmed)?;
+    if account.as_ref().is_some_and(|a| !system_placeholder(a)) {
+        return Err(invalid(
+            "sweep destination already exists; refusing destination reuse",
+        ));
+    }
+    let rent = chain
+        .rent(space)?
+        .saturating_sub(account.map_or(0, |a| a.lamports));
+    let mut ixs = Vec::new();
+    if rent > 0 {
+        ixs.push(solana_system_interface::instruction::transfer(
+            authority, &address, rent,
+        ));
+    }
+    ixs.push(solana_system_interface::instruction::allocate_with_seed(
+        &address,
+        owner,
+        DESTINATION_SEED,
+        space as u64,
+        &token_2022(),
+    ));
+    ixs.push(solana_system_interface::instruction::assign_with_seed(
+        &address,
+        owner,
+        DESTINATION_SEED,
+        &token_2022(),
+    ));
+    Ok((ixs, rent))
 }
 
 fn instructions(
@@ -321,7 +324,7 @@ fn instructions(
         .map_err(invalid)?;
     let zero = build_zero_ciphertext_proof_data(&payment.elgamal, &post).map_err(invalid)?;
     let t22 = token_2022();
-    let mut ixs = destination.setup.clone();
+    let mut ixs = Vec::new();
     ixs.push(
         ct::disable_confidential_credits(&t22, &payment.info.token_account, authority, &[])
             .map_err(invalid)?,
@@ -379,7 +382,8 @@ fn instructions(
 struct SweepPlan {
     payment: RecoveredPayment,
     owner: Keypair,
-    rent: u64,
+    space: usize,
+    setup: Vec<Instruction>,
     instructions: Vec<Instruction>,
     priority: u64,
 }
@@ -388,9 +392,14 @@ impl SweepPlan {
     fn build<C: RecipientChain>(
         &self,
         chain: &C,
-        mut ixs: Vec<Instruction>,
+        ixs: Vec<Instruction>,
     ) -> Result<(VersionedTransaction, u64, u64), SweepError> {
         let signer = PaymentSigner::new(&self.payment);
+        let (mut setup, rent) =
+            destination_creation(chain, &self.owner.pubkey(), &signer.pubkey(), self.space)?;
+        setup.extend(self.setup.iter().cloned());
+        setup.extend(ixs);
+        let mut ixs = setup;
         let (blockhash, valid_until) = chain.blockhash()?;
         let balance = chain
             .account(&signer.pubkey(), Commitment::Confirmed)?
@@ -420,7 +429,7 @@ impl SweepPlan {
         .map_err(invalid)?;
         let fee = chain.fee(&provisional.message)?;
         let cost = fee
-            .checked_add(self.rent)
+            .checked_add(rent)
             .ok_or_else(|| invalid("fee and rent overflow"))?;
         let need = cost
             .checked_add(minimum)
@@ -494,7 +503,7 @@ pub fn prepare<C: RecipientChain>(
         return Err(invalid("payment has no confidential balance to sweep"));
     }
     let signer = PaymentSigner::new(&payment.payment);
-    let destination = destination(chain, recipient, &payment, &signer.pubkey())?;
+    let destination = destination(chain, recipient, &payment)?;
     let base = instructions(&payment, &destination, &signer.pubkey())?;
     let mut prices = chain.recent_prices()?;
     prices.sort_unstable();
@@ -532,7 +541,8 @@ pub fn prepare<C: RecipientChain>(
     let plan = SweepPlan {
         payment: payment.payment,
         owner: destination.owner,
-        rent: destination.rent,
+        space: destination.space,
+        setup: destination.setup,
         instructions: base,
         priority,
     };
@@ -588,8 +598,17 @@ fn completed_public_balance<C: RecipientChain>(
     let source = chain.account(&prepared.source, Commitment::Finalized)?;
     let (empty, public_amount) = match source {
         None => (true, 0),
+        Some(a) if system_placeholder(&a) => (true, 0),
         Some(a) => {
+            if a.owner != token_2022() {
+                return Err(invalid("unexpected sweep source owner"));
+            }
             let state = StateWithExtensions::<Account>::unpack(&a.data).map_err(invalid)?;
+            if state.base.owner != prepared.report.payment_authority
+                || state.base.mint != prepared.mint
+            {
+                return Err(invalid("sweep source identity changed"));
+            }
             let ext = state
                 .get_extension::<ConfidentialTransferAccount>()
                 .map_err(invalid)?;
@@ -655,18 +674,31 @@ fn retry_without_cleanup<C: RecipientChain>(
 
 pub fn submit<C: RecipientChain>(
     chain: &mut C,
-    mut prepared: PreparedSweep,
+    prepared: PreparedSweep,
     opts: &SweepOptions,
 ) -> Result<SweepReport, SweepError> {
-    if prepared.report.dry_run || opts.dry_run {
-        prepared.report.dry_run = true;
+    submit_with_recovery(chain, prepared, opts, |_| Ok(()))
+}
+
+pub fn submit_with_recovery<C: RecipientChain>(
+    chain: &mut C,
+    mut prepared: PreparedSweep,
+    opts: &SweepOptions,
+    mut before_broadcast: impl FnMut(&SweepReport) -> std::io::Result<()>,
+) -> Result<SweepReport, SweepError> {
+    prepared.report.dry_run |= opts.dry_run;
+    before_broadcast(&prepared.report).map_err(|source| SweepError::RecoveryOutput {
+        report: Box::new(prepared.report.clone()),
+        source,
+    })?;
+    if prepared.report.dry_run {
         return Ok(prepared.report);
     }
     let deadline = Instant::now()
         .checked_add(opts.timeout)
         .ok_or_else(|| invalid("sweep timeout is too large"))?;
     chain.set_deadline(Some(deadline));
-    let result = submit_until(chain, prepared, opts, deadline);
+    let result = submit_until(chain, prepared, opts, deadline, &mut before_broadcast);
     chain.set_deadline(None);
     result
 }
@@ -689,6 +721,7 @@ fn submit_until<C: RecipientChain>(
     mut prepared: PreparedSweep,
     opts: &SweepOptions,
     deadline: Instant,
+    before_broadcast: &mut impl FnMut(&SweepReport) -> std::io::Result<()>,
 ) -> Result<SweepReport, SweepError> {
     loop {
         if Instant::now() >= deadline {
@@ -702,7 +735,8 @@ fn submit_until<C: RecipientChain>(
             let reclaimed = chain
                 .account(&prepared.announcement, Commitment::Finalized)
                 .map_err(|e| status_error(&prepared.report, e.into(), deadline))?
-                .is_none();
+                .as_ref()
+                .is_none_or(system_placeholder);
             let retained_lamports = chain
                 .account(&prepared.report.payment_authority, Commitment::Finalized)
                 .map_err(|e| status_error(&prepared.report, e.into(), deadline))?
@@ -751,6 +785,12 @@ fn submit_until<C: RecipientChain>(
             if retry_without_cleanup(chain, &mut prepared)
                 .map_err(|source| status_error(&prepared.report, source, deadline))?
             {
+                before_broadcast(&prepared.report).map_err(|source| {
+                    SweepError::RecoveryOutput {
+                        report: Box::new(prepared.report.clone()),
+                        source,
+                    }
+                })?;
                 continue;
             }
             return Err(SweepError::Pending {
