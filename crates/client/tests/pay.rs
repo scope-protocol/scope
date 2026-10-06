@@ -1181,3 +1181,53 @@ fn receipts_still_verify_after_the_sweep_closes_every_account() {
         3_500_000
     );
 }
+
+/// The P4 chaos gate: a 20-row run, half plain and half stealth, killed at every send
+/// (before and after it leaves) and at every simulation, then resumed; every row must be
+/// paid exactly once. About sixty runs, so it is not part of the default suite:
+/// `cargo test --locked -p scope-client --test pay chaos -- --ignored`.
+#[test]
+#[ignore = "sixty full runs; run by hand before a release"]
+fn chaos_converges_from_every_kill_point_of_a_20_row_run() {
+    const ROWS: usize = 20;
+    let mut points = Vec::new();
+    for n in 1..=ROWS {
+        points.extend([
+            KillAt::BeforeSend(n),
+            KillAt::AfterSend(n),
+            KillAt::Simulate(n),
+        ]);
+    }
+    for (i, at) in points.into_iter().enumerate() {
+        let mut h = Harness::new();
+        let plain = recipients(&mut h, ROWS / 2);
+        let stealth: Vec<RecipientSecretKeys> = (0..ROWS / 2)
+            .map(|k| stealth_recipient(20 + k as u8))
+            .collect();
+        let o = opts(&format!("chaos-{i}"));
+        let (mint, source) = (h.mint, h.source);
+        let killed = pay::start(
+            Killer::new(SvmChain::new(&mut h.svm), at),
+            &h.payer,
+            keys(&h.source_elgamal, &h.source_ae),
+            mint,
+            source,
+            mixed_input(&plain, &stealth).as_bytes(),
+            &o,
+        );
+        assert!(
+            matches!(killed, Err(PayError::Chain(_))),
+            "point {i}: {killed:?}"
+        );
+        let report = pay::resume(
+            SvmChain::new(&mut h.svm),
+            &h.payer,
+            keys(&h.source_elgamal, &h.source_ae),
+            &only_run(&o),
+            &o,
+        )
+        .unwrap_or_else(|e| panic!("point {i}: resume failed: {e}"));
+        assert_eq!(report.paid.len(), ROWS, "point {i}");
+        assert_mixed_paid_once(&mut h, &plain, &stealth);
+    }
+}
