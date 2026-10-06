@@ -828,3 +828,163 @@ fn a_paid_stealth_row_sweeps_to_the_recipient_and_returns_both_rents_to_the_paye
         "D holds the amount, under the owner's wallet keys"
     );
 }
+
+/// Fails simulation of anything that calls our program, so a sweep falls back to its
+/// transfer-only version and leaves the announcement open.
+struct NoReclaim<'a>(SvmChain<'a>);
+
+impl Chain for NoReclaim<'_> {
+    fn account(&self, a: &Address, c: Commitment) -> Result<Option<AccountData>, ChainError> {
+        self.0.account(a, c)
+    }
+    fn blockhash(&self) -> Result<(Hash, u64), ChainError> {
+        self.0.blockhash()
+    }
+    fn finalized_block_height(&self) -> Result<u64, ChainError> {
+        self.0.finalized_block_height()
+    }
+    fn simulate(&self, tx: &VersionedTransaction) -> Result<Result<(), String>, ChainError> {
+        let keys = tx.message.static_account_keys();
+        let calls_scope = tx.message.instructions().iter().any(|ix| {
+            keys[usize::from(ix.program_id_index)] == scope_client::address::program_id()
+        });
+        if calls_scope {
+            return Ok(Err("reclaim refused in this test".into()));
+        }
+        self.0.simulate(tx)
+    }
+    fn send(&mut self, tx: &VersionedTransaction) -> Result<(), ChainError> {
+        self.0.send(tx)
+    }
+    fn recent_prices(&self) -> Result<Vec<u64>, ChainError> {
+        self.0.recent_prices()
+    }
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        self.0.genesis_hash()
+    }
+    fn rent(&self, space: usize) -> Result<u64, ChainError> {
+        self.0.rent(space)
+    }
+}
+
+impl scope_client::chain::RecipientChain for NoReclaim<'_> {
+    fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
+        self.0.set_deadline(deadline)
+    }
+    fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        self.0.announcements()
+    }
+    fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError> {
+        self.0.fee(message)
+    }
+    fn finalized_status(
+        &self,
+        signature: &solana_signature::Signature,
+    ) -> Result<scope_client::chain::FinalizedStatus, ChainError> {
+        self.0.finalized_status(signature)
+    }
+}
+
+#[test]
+fn status_and_reclaim_follow_a_stealth_row_from_paid_to_reclaimed() {
+    use pay::StealthState::{Open, Reclaimed, Swept};
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = stealth_recipient(8);
+    let plain = recipients(&mut h, 1);
+    let o = opts("status");
+    let input = format!(
+        "{},1\n{},2\n",
+        plain[0].account,
+        alice.derive_public_keys().to_meta_address()
+    );
+    let run_id = start(&mut h, &input, &o).expect("pay").run_id;
+    let states = |h: &mut Harness| {
+        pay::status(&SvmChain::new(&mut h.svm), &h.payer, &run_id, &o)
+            .expect("status")
+            .iter()
+            .map(|s| (s.row, s.state))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        states(&mut h),
+        [(1, Open)],
+        "only the stealth row is listed"
+    );
+
+    let announcement = found_announcement(&mut h, &alice);
+    let report = sweep::sweep(
+        &mut NoReclaim(SvmChain::new(&mut h.svm)),
+        &alice,
+        &announcement,
+        &SweepOptions {
+            poll: Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect("transfer-only sweep");
+    assert!(!report.reclaimed);
+    assert_eq!(states(&mut h), [(1, Swept)]);
+
+    let lamports = |h: &Harness, a: &Address| h.svm.get_account(a).map_or(0, |a| a.lamports);
+    let token_account = pay::status(&SvmChain::new(&mut h.svm), &h.payer, &run_id, &o)
+        .expect("status")[0]
+        .token_account;
+    let rents = lamports(&h, &token_account) + lamports(&h, &announcement);
+    let before = lamports(&h, &h.payer.pubkey());
+    let after_reclaim =
+        pay::reclaim(&mut SvmChain::new(&mut h.svm), &h.payer, &run_id, &o).expect("reclaim");
+    assert_eq!(after_reclaim[0].state, Reclaimed);
+    assert_eq!(
+        lamports(&h, &h.payer.pubkey()),
+        before + rents - scope_client::fees::LAMPORTS_PER_SIGNATURE,
+        "both rents back, less one signature"
+    );
+    pay::reclaim(&mut SvmChain::new(&mut h.svm), &h.payer, &run_id, &o)
+        .expect("reclaiming again is a no-op");
+}
+
+fn found_announcement(h: &mut Harness, recipient: &RecipientSecretKeys) -> Address {
+    scan::scan(&SvmChain::new(&mut h.svm), recipient, None)
+        .expect("scan")
+        .payments[0]
+        .announcement
+}
+
+#[test]
+fn status_shows_an_unswept_row_as_open_and_cannot_reclaim_it() {
+    let mut h = Harness::new();
+    let o = opts("status-open");
+    let input = format!(
+        "{},1\n",
+        stealth_recipient(9).derive_public_keys().to_meta_address()
+    );
+    let run_id = start(&mut h, &input, &o).expect("pay").run_id;
+    let after = pay::reclaim(&mut SvmChain::new(&mut h.svm), &h.payer, &run_id, &o)
+        .expect("nothing to reclaim");
+    assert_eq!(after[0].state, pay::StealthState::Open);
+}
+
+#[test]
+fn status_reports_a_row_killed_before_its_send_as_unpaid() {
+    let mut h = Harness::new();
+    let o = opts("status-unpaid");
+    let input = format!(
+        "{},1\n",
+        stealth_recipient(10).derive_public_keys().to_meta_address()
+    );
+    let (mint, source) = (h.mint, h.source);
+    let killed = pay::start(
+        Killer::new(SvmChain::new(&mut h.svm), KillAt::BeforeSend(1)),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        mint,
+        source,
+        input.as_bytes(),
+        &o,
+    );
+    assert!(killed.is_err());
+    let run_id = only_run(&o);
+    let rows = pay::status(&SvmChain::new(&mut h.svm), &h.payer, &run_id, &o).expect("status");
+    assert_eq!(rows[0].state, pay::StealthState::Unpaid);
+}

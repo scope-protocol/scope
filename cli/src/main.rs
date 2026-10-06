@@ -207,18 +207,24 @@ fn write_recovery(output: &mut impl Write, report: &sweep::SweepReport) -> io::R
 struct PayArgs {
     /// `recipient,amount` rows; recipient is a configured confidential token account (plain row)
     /// or a `scope:` meta-address (stealth row).
-    #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, required_unless_present_any = ["resume", "status"], conflicts_with_all = ["resume", "status"])]
     input: Option<PathBuf>,
     /// Token-2022 mint with confidential transfers enabled.
-    #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, required_unless_present_any = ["resume", "status"], conflicts_with_all = ["resume", "status"])]
     mint: Option<Address>,
     /// The payer's confidential token account to pay from, configured with the keys
     /// spl-token-cli derives from --keypair.
-    #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, required_unless_present_any = ["resume", "status"], conflicts_with_all = ["resume", "status"])]
     source: Option<Address>,
     /// Continue an interrupted run.
-    #[arg(long, value_name = "RUN_ID")]
+    #[arg(long, value_name = "RUN_ID", conflicts_with = "status")]
     resume: Option<String>,
+    /// Show where each stealth row of a run stands: unpaid, open, swept or reclaimed.
+    #[arg(long, value_name = "RUN_ID")]
+    status: Option<String>,
+    /// With --status, return the rent of every swept stealth row to the payer.
+    #[arg(long, requires = "status")]
+    reclaim: bool,
     /// Payer keypair: owns the source and pays every fee.
     #[arg(long, default_value = "~/.config/solana/id.json")]
     keypair: String,
@@ -256,6 +262,28 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
         again: args.again,
         log: |line| eprintln!("{line}"),
     };
+    if let Some(run_id) = args.status {
+        let mut chain = chain;
+        let rows = if args.reclaim {
+            pay::reclaim(&mut chain, &payer, &run_id, &opts)?
+        } else {
+            pay::status(&chain, &payer, &run_id, &opts)?
+        };
+        println!("row\ttoken_account\tannouncement\tstate");
+        for s in rows {
+            let state = match s.state {
+                pay::StealthState::Unpaid => "unpaid",
+                pay::StealthState::Open => "open",
+                pay::StealthState::Swept => "swept",
+                pay::StealthState::Reclaimed => "reclaimed",
+            };
+            println!(
+                "{}\t{}\t{}\t{state}",
+                s.row, s.token_account, s.announcement
+            );
+        }
+        return Ok(());
+    }
     let report = match args.resume {
         Some(run_id) => {
             let keys = SourceKeys::from_signer(&payer)?;

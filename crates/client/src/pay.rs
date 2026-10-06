@@ -12,7 +12,9 @@
 //! finalized source still shows `pre`.
 
 use crate::{
-    address::{token_2022, token_account_address, token_account_seed_str},
+    address::{
+        announcement_address, program_id, token_2022, token_account_address, token_account_seed_str,
+    },
     chain::{Chain, ChainError, Commitment},
     confidential, fees,
     input::{self, InputError, Recipient, Row},
@@ -20,7 +22,9 @@ use crate::{
     journal::{self, INPUT_COPY, Journal, JournalError, Record, hex, unhex},
     proofs::transfer_proofs,
     run_secret::RunSecret,
-    tx::{PLAIN_TRANSFER_CU_LIMIT, STEALTH_PAYMENT_CU_LIMIT, v1_transaction_with_fee},
+    tx::{
+        PLAIN_TRANSFER_CU_LIMIT, STEALTH_PAYMENT_CU_LIMIT, v1_transaction, v1_transaction_with_fee,
+    },
 };
 use core::num::NonZeroI8;
 use curve25519_dalek::scalar::Scalar;
@@ -231,7 +235,6 @@ fn stealth_rows<C: Chain>(
     run_id: &str,
     payer: &Address,
     mint: &Address,
-    info: &MintInfo,
 ) -> Result<HashMap<usize, Stealth>, PayError> {
     let stealth: Vec<(usize, &RecipientPublicKeys)> = rows
         .iter()
@@ -243,12 +246,6 @@ fn stealth_rows<C: Chain>(
         .collect();
     if stealth.is_empty() {
         return Ok(HashMap::new());
-    }
-    if let Some(why) = info.stealth_refusal {
-        return Err(PayError::Mint {
-            mint: *mint,
-            why: why.into(),
-        });
     }
     let genesis = chain.genesis_hash()?;
     stealth
@@ -277,6 +274,20 @@ fn stealth_rows<C: Chain>(
             ))
         })
         .collect()
+}
+
+/// Refuses a run with stealth rows on a mint they cannot use.
+fn check_stealth_mint(rows: &[Row], mint: &Address, info: &MintInfo) -> Result<(), PayError> {
+    let any = rows
+        .iter()
+        .any(|r| matches!(r.recipient, Recipient::Stealth(_)));
+    match info.stealth_refusal {
+        Some(why) if any => Err(PayError::Mint {
+            mint: *mint,
+            why: why.into(),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Preflights every plain row not in `skip` and returns its ElGamal key.
@@ -509,15 +520,8 @@ pub fn start<C: Chain>(
     let run_id = hex(&random_bytes::<8>());
     let run_secret =
         RunSecret::derive(payer, &run_id).map_err(|e| PayError::Keys(e.to_string()))?;
-    let stealth = stealth_rows(
-        &chain,
-        &rows,
-        &run_secret,
-        &run_id,
-        &payer.pubkey(),
-        &mint,
-        &info,
-    )?;
+    check_stealth_mint(&rows, &mint, &info)?;
+    let stealth = stealth_rows(&chain, &rows, &run_secret, &run_id, &payer.pubkey(), &mint)?;
     let plain = plain_rows(&chain, &rows, &HashSet::new(), &mint)?;
 
     let dir = opts.runs_dir.join(&run_id);
@@ -597,15 +601,8 @@ pub fn resume<C: Chain>(
     let text = std::str::from_utf8(&input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
     let rows = input::parse(text, info.decimals)?;
     let run_secret = RunSecret::derive(payer, run_id).map_err(|e| PayError::Keys(e.to_string()))?;
-    let stealth = stealth_rows(
-        &chain,
-        &rows,
-        &run_secret,
-        run_id,
-        &payer.pubkey(),
-        &mint,
-        &info,
-    )?;
+    check_stealth_mint(&rows, &mint, &info)?;
+    let stealth = stealth_rows(&chain, &rows, &run_secret, run_id, &payer.pubkey(), &mint)?;
 
     let mut landed = HashSet::new();
     let mut open: Option<Record> = None;
@@ -721,6 +718,185 @@ pub fn resume<C: Chain>(
         ));
     }
     engine.run(&order, &landed)
+}
+
+/// Where one stealth row of a run stands, read from the chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StealthState {
+    /// The run has not paid this row.
+    Unpaid,
+    /// Paid and announced; the recipient has not swept it yet.
+    Open,
+    /// Swept: both balances are empty, so `reclaim` returns the rent to the payer.
+    Swept,
+    /// The announcement is closed and its rent is back with the payer.
+    Reclaimed,
+}
+
+#[derive(Debug)]
+pub struct StealthStatus {
+    pub row: usize,
+    pub token_account: Address,
+    pub announcement: Address,
+    pub state: StealthState,
+}
+
+/// Where each stealth row of run `run_id` stands. Reads the journal without locking it,
+/// so it works while the run is live.
+pub fn status<C: Chain>(
+    chain: &C,
+    payer: &Keypair,
+    run_id: &str,
+    opts: &PayOptions,
+) -> Result<Vec<StealthStatus>, PayError> {
+    let dir = opts.runs_dir.join(run_id);
+    let records = journal::read_unlocked(&dir)?;
+    let corrupt = |why: &str| {
+        PayError::Journal(JournalError::Corrupt {
+            path: dir.join(journal::JOURNAL),
+            line: 1,
+            why: why.into(),
+        })
+    };
+    let Some(Record::Run {
+        input_sha256,
+        mint,
+        payer: journal_payer,
+        ..
+    }) = records.first()
+    else {
+        return Err(corrupt("no run header"));
+    };
+    if *journal_payer != payer.pubkey().to_string() {
+        return Err(corrupt("run belongs to another payer"));
+    }
+    let mint: Address = mint.parse().map_err(|_| corrupt("bad mint"))?;
+    let input_bytes = std::fs::read(dir.join(INPUT_COPY))
+        .map_err(|e| JournalError::Io(dir.join(INPUT_COPY), e))?;
+    if hex(&solana_sha256_hasher::hash(&input_bytes).to_bytes()) != *input_sha256 {
+        return Err(corrupt("input copy does not match the run's hash"));
+    }
+    let info = mint_info(chain, &mint)?;
+    let text = std::str::from_utf8(&input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
+    let rows = input::parse(text, info.decimals)?;
+    let landed: HashSet<usize> = records
+        .iter()
+        .filter_map(|r| match r {
+            Record::Landed { row, .. } => Some(*row),
+            _ => None,
+        })
+        .collect();
+    let secret = RunSecret::derive(payer, run_id).map_err(|e| PayError::Keys(e.to_string()))?;
+    let stealth = stealth_rows(chain, &rows, &secret, run_id, &payer.pubkey(), &mint)?;
+    let mut out = stealth
+        .iter()
+        .map(|(&row, s)| {
+            let (announcement, _) = announcement_address(&s.token_account);
+            Ok(StealthStatus {
+                row,
+                token_account: s.token_account,
+                announcement,
+                state: stealth_state(chain, landed.contains(&row), s, &announcement)?,
+            })
+        })
+        .collect::<Result<Vec<_>, PayError>>()?;
+    out.sort_by_key(|s| s.row);
+    Ok(out)
+}
+
+/// An open announcement means paid, whatever the journal says: a run killed after a
+/// send has no `landed` record for a row that landed.
+fn stealth_state<C: Chain>(
+    chain: &C,
+    landed: bool,
+    s: &Stealth,
+    announcement: &Address,
+) -> Result<StealthState, PayError> {
+    let open = chain
+        .account(announcement, Commitment::Confirmed)?
+        .is_some_and(|a| a.owner == program_id());
+    if !open {
+        return Ok(if landed {
+            StealthState::Reclaimed
+        } else {
+            StealthState::Unpaid
+        });
+    }
+    let empty = match chain.account(&s.token_account, Commitment::Confirmed)? {
+        Some(a) if a.owner == token_2022() => StateWithExtensions::<Account>::unpack(&a.data)
+            .ok()
+            .and_then(|state| {
+                let ext = state.get_extension::<ConfidentialTransferAccount>().ok()?;
+                Some(
+                    state.base.amount == 0
+                        && ext.available_balance.0 == [0; 64]
+                        && ext.pending_balance_lo.0 == [0; 64]
+                        && ext.pending_balance_hi.0 == [0; 64],
+                )
+            })
+            .unwrap_or(false),
+        _ => false,
+    };
+    // Every row pays a nonzero amount, so empty balances under an open announcement mean swept.
+    Ok(if empty {
+        StealthState::Swept
+    } else {
+        StealthState::Open
+    })
+}
+
+/// Calls `reclaim` for every swept stealth row of the run, then returns the new status.
+/// Token-2022 refuses to close an account with any balance (verification: V4), so this
+/// cannot touch funds; it pays only the base fee, since nothing here is urgent.
+pub fn reclaim<C: Chain>(
+    chain: &mut C,
+    payer: &Keypair,
+    run_id: &str,
+    opts: &PayOptions,
+) -> Result<Vec<StealthStatus>, PayError> {
+    let swept: Vec<StealthStatus> = status(chain, payer, run_id, opts)?
+        .into_iter()
+        .filter(|s| s.state == StealthState::Swept)
+        .collect();
+    for s in swept {
+        let ix = ix::reclaim(&s.announcement, &s.token_account, &payer.pubkey());
+        let closed = |chain: &C| -> Result<bool, PayError> {
+            Ok(chain
+                .account(&s.announcement, Commitment::Confirmed)?
+                .is_none_or(|a| a.owner != program_id()))
+        };
+        // Anyone may call reclaim, so another caller can win the race; that is success too.
+        'attempts: while !closed(chain)? {
+            let (blockhash, last_valid_block_height) = chain.blockhash()?;
+            let tx = v1_transaction(payer, &[], std::slice::from_ref(&ix), blockhash);
+            if let Err(logs) = chain.simulate(&tx)? {
+                if closed(chain)? {
+                    break;
+                }
+                return Err(PayError::Simulation { row: s.row, logs });
+            }
+            loop {
+                if let Err(e) = chain.send(&tx) {
+                    (opts.log)(&format!(
+                        "row {}: reclaim send failed, will retry: {e}",
+                        s.row
+                    ));
+                }
+                std::thread::sleep(opts.poll);
+                if closed(chain)? {
+                    break 'attempts;
+                }
+                if chain.finalized_block_height()? > last_valid_block_height {
+                    continue 'attempts;
+                }
+            }
+        }
+        (opts.log)(&format!(
+            "row {}: rent reclaimed from {}",
+            s.row, s.token_account
+        ));
+    }
+    status(chain, payer, run_id, opts)
 }
 
 impl<C: Chain> Engine<'_, C> {

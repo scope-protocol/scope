@@ -140,9 +140,15 @@ impl Journal {
 
 /// The first record of a journal without locking it, to compare input hashes across runs.
 pub fn read_header(dir: &Path) -> Result<Option<Record>, JournalError> {
+    Ok(read_unlocked(dir)?.into_iter().next())
+}
+
+/// Every record of a journal without locking it, for read-only views of a run that may
+/// still be live.
+pub fn read_unlocked(dir: &Path) -> Result<Vec<Record>, JournalError> {
     let path = dir.join(JOURNAL);
     let file = File::open(&path).map_err(io(&path))?;
-    Ok(read(&path, &file)?.into_iter().next())
+    read(&path, &file)
 }
 
 fn read(path: &Path, file: &File) -> Result<Vec<Record>, JournalError> {
