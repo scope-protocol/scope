@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Plan
@@ -86,3 +86,4 @@ Ids are stable; gaps are questions already closed.
 | Q14 | Finish `crates/stealth-keygen` on the crypto.md tree: `d`, externally supplied ephemeral keys, meta-address parsing; pin `program_id` in `C` | Abhineet, reviewed by Valentyn | before Q1 goes out | implemented: supplied ephemeral keys (V58), public imports (V59), recipient backups (V60), `d` (V61), meta-addresses (V62) and the pinned client context; keep the nonce-from-p construction and the vector generator |
 | Q15 | Receipts for plain payments: the format needs `ct_ikm`, which only stealth payments have | Jmkoy | P3 | stealth receipts in v1; check whether the payer can disclose the opening of the amount commitment; otherwise plain payments rely on the mint auditor key |
 | Q16 | Run secret derived from a payer master secret | Abhineet | P3 | one master secret in an age file or the OS keychain, `run_secret = HKDF(master, "run" \|\| run_id)`: one backup instead of one per run |
+| Q17 | Recover swept destinations from the recipient backup without a local journal | Abhineet | follow-up | scan historical `announce` instructions with an archival RPC, retaining exact R bytes and cluster context; until built, retain the synchronized recovery journal alongside the key backup |

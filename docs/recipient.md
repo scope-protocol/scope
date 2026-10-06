@@ -5,7 +5,7 @@ last_verified: 2026-10-06
 
 # Recipient client
 
-TL;DR: `scope register`, `scan` and `sweep` provide private backups, authenticated discovery and whole-balance transfers into a fresh confidential account.
+TL;DR: `scope register`, `scan`, `sweep` and `export-sweep-key` provide private backups, authenticated discovery, confidential sweeps and usable destination keys.
 The implementation and RPC wire format are tested locally; a full sweep with an auditor and dust measures 3,350 bytes and 268,049 CU (V68). Provider-scale and devnet release gates remain open in [plan.md](plan.md).
 
 ## Commands and backups
@@ -48,15 +48,40 @@ The transaction disables confidential credits to the source, applies pending bal
 
 `submit` resends an identical transaction while its outcome is unresolved. Only a finalized failure or blockhash expiry authorizes rebuilding. At most two transfer-only retries refresh source balances, mint policy, auditor proofs, blockhash, rent deficit and fees. Each new attempt samples the current p75 priority price and enforces `--max-price`; identical resends keep their signed fee. This covers cleanup failure followed by a further credit to a source whose pending counter was already applied. Retry decoding and proving run on a worker with no chain access; expired waiting cannot lead to a later broadcast (V65, V69).
 
-`submit_with_recovery` adds a fallible callback before every new attempt. The CLI writes and flushes genesis hash, destination, owner, P, R and signature through it. A write or flush failure prevents that attempt from being sent. Identical resends reuse the checkpoint; dry runs emit recovery information and send nothing. Callbacks are synchronous and should return promptly (V65, V66).
+`submit_with_recovery` adds a fallible callback before every new attempt. The CLI synchronizes a recovery record to disk, then writes and flushes genesis hash, destination, owner, P, R and signature to stdout. Either failure prevents that attempt from being sent. Identical resends reuse the checkpoint; dry runs emit recovery information, send nothing and do not open a journal. Callbacks are synchronous and should return promptly (V65, V66, V70).
 
-Save the output. Once reclaim closes the announcement, exact R plus the recipient backup reconstructs D_owner and its confidential keys; otherwise R must be recovered from historical payer transactions. `PreparedSweep` retains protected signing material only in memory and exposes only the public report in debug output (V61, V65).
+The journal defaults to `<recipient-key>.sweeps.jsonl`; `--recovery-file` selects another path. It is a locked, owner-only JSONL file with a versioned header. It records public recovery identifiers and attempt signatures, without private keys or confidential amounts. An interrupted final record is removed before appending; unrelated files and symlinks are refused. Journal entries record prepared attempts and do not prove transaction success. Back up this journal alongside the recipient key (V70).
+
+Once reclaim closes the announcement, exact R plus the recipient backup reconstructs D_owner and its confidential keys. Without the journal or saved output, R must be recovered from historical payer transactions. The key backup alone cannot enumerate past destinations; automatic historical recovery remains Q17. `PreparedSweep` retains protected signing material only in memory and exposes only the public report in debug output (V61, V65).
 
 A successful finalized signature proves this attempt's atomic transfer even if accounts are later closed, funded again, or recreated. It returns success even if optional balance reads fail or exhaust the deadline. Unavailable SOL and public balances are `None` and displayed as unknown; dry-run values are predictions. Without that proof, completion requires an empty or closed source and an authenticated destination; cleanup status can then be unknown. Empty System accounts at closed addresses do not undo reclaim detection. `attempt_signature` names the current attempt; `finalized_signature` is present only with verified success. `amount` describes the most recent prepared attempt. Concurrent completion can leave the amount actually transferred, this attempt's success and burned amount unknown; the CLI labels that amount as prepared (V65, V69).
 
 Errors preserve the recovery report. Unresolved submission includes the latest send error when available. An RPC rejection or transport failure does not establish whether an earlier send landed (V69).
 
 `--max-price` caps the priority price. `--timeout` starts after initial preparation and the first recovery checkpoint. It bounds RPC futures, HTTP retry waits, retry preparation waits and polling sleeps. No further sends start after the deadline; a submitted transaction can still finalize later (V65).
+
+## Using the swept funds
+
+Export D_owner from the recipient backup and public R recorded by scan, sweep or the journal:
+
+```sh
+scope export-sweep-key --recipient-key ./recipient.key \
+  --ephemeral <public-R> --output ./sweep-owner-keypair.json
+```
+
+Encrypted backups accept the same `--identity` option. The command writes a standard Solana keypair file with mode 0600, refuses overwrites and symlinks, and prints only the public owner and D addresses. It makes no RPC calls. An imported owner can apply and spend D's balance with the standard SDK wallet key schedule; this complete flow is tested in LiteSVM (V71).
+
+The swept tokens start in D's pending balance. With `spl-token-cli` 5.6.1, apply it, then transfer from the explicit D address:
+
+```sh
+spl-token --program-2022 --url <rpc-url> --fee-payer ./sweep-owner-keypair.json \
+  apply-pending-balance --address <D> --owner ./sweep-owner-keypair.json
+spl-token --program-2022 --url <rpc-url> --fee-payer ./sweep-owner-keypair.json \
+  transfer <mint> <amount-in-token-units> <configured-recipient-token-account> \
+  --from <D> --owner ./sweep-owner-keypair.json --confidential
+```
+
+Use a funded fee payer; the transfer tool can require SOL for proof context accounts as well as fees. D's keys match the CLI's empty-context derivation, and `--address`/`--from` select this seeded account instead of an associated account. Commands follow the [5.6.1 CLI source](https://github.com/solana-program/token-2022/tree/cli%40v5.6.1/clients/cli/src) and [SPL Token reference](https://solana.com/docs/references/spl-token-cli). Using a shared fee payer can link destinations; the privacy boundaries in [privacy.md](privacy.md) still apply.
 
 ## Supported boundary
 

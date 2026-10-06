@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
+mod private_files;
 mod recipient_keys;
+mod recovery;
 
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
@@ -12,6 +14,7 @@ use scope_client::{
 use solana_address::Address;
 use solana_keypair::read_keypair_file;
 use solana_rpc_client::rpc_client::RpcClient;
+use solana_signer::Signer;
 use std::{
     io::{self, Write},
     path::PathBuf,
@@ -36,6 +39,8 @@ enum Command {
     Scan(ScanArgs),
     /// Move a found payment into a fresh account of your own.
     Sweep(SweepArgs),
+    #[command(about = "Export one sweep's owner as a private Solana keypair file.")]
+    ExportSweepKey(ExportSweepKeyArgs),
     /// Produce a receipt that proves one payment's amount.
     Disclose,
     /// Check a receipt against the chain.
@@ -99,6 +104,24 @@ struct SweepArgs {
     /// Build and simulate the sweep without sending it.
     #[arg(long)]
     dry_run: bool,
+    #[arg(
+        long,
+        help = "Recovery journal path; defaults to <recipient-key>.sweeps.jsonl."
+    )]
+    recovery_file: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ExportSweepKeyArgs {
+    #[command(flatten)]
+    keys: RecipientKeys,
+    #[arg(long, help = "Public R from scan, sweep, or the recovery journal.")]
+    ephemeral: Address,
+    #[arg(
+        long,
+        help = "New owner-only keypair file; existing files are never overwritten."
+    )]
+    output: String,
 }
 
 fn recipient_chain(url: String) -> RpcChain {
@@ -148,9 +171,21 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
         dry_run: args.dry_run,
         ..Default::default()
     };
+    let mut journal = if opts.dry_run {
+        None
+    } else {
+        let path = match &args.recovery_file {
+            Some(path) => expand_home(path)?,
+            None => recovery::default_path(&expand_home(&args.keys.recipient_key)?),
+        };
+        Some(
+            recovery::RecoveryJournal::open(&path)
+                .with_context(|| format!("opening recovery journal {}", path.display()))?,
+        )
+    };
     let prepared = sweep::prepare(&chain, &recipient, &args.announcement, &opts)?;
     let report = sweep::submit_with_recovery(&mut chain, prepared, &opts, |report| {
-        write_recovery(&mut io::stdout().lock(), report)
+        checkpoint(&mut io::stdout().lock(), journal.as_mut(), report)
     })?;
     println!(
         "{}: {} base units to {}",
@@ -199,6 +234,31 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
     };
     println!("rent {rent_status}");
     Ok(())
+}
+
+fn run_export_sweep_key(args: ExportSweepKeyArgs) -> anyhow::Result<()> {
+    let recipient = args.keys.load()?;
+    let path = expand_home(&args.output)?;
+    let owner = recipient_keys::export_owner(&path, &recipient, &args.ephemeral.to_bytes())?;
+    println!(
+        "owner\t{}\ndestination\t{}",
+        owner.pubkey(),
+        sweep::destination_address(&owner.pubkey())
+    );
+    Ok(())
+}
+
+fn checkpoint(
+    output: &mut impl Write,
+    journal: Option<&mut recovery::RecoveryJournal>,
+    report: &sweep::SweepReport,
+) -> io::Result<()> {
+    if !report.dry_run {
+        journal
+            .ok_or_else(|| io::Error::other("recovery journal is required before broadcast"))?
+            .append(report)?;
+    }
+    write_recovery(output, report)
 }
 
 fn write_recovery(output: &mut impl Write, report: &sweep::SweepReport) -> io::Result<()> {
@@ -294,6 +354,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Scan(args) => run_scan(args),
         Command::Sweep(args) => run_sweep(args),
+        Command::ExportSweepKey(args) => run_export_sweep_key(args),
         other => bail!("{other:?} is not implemented yet"),
     }
 }
@@ -323,9 +384,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn recovery_output_must_be_flushed_before_submission() {
-        let report = sweep::SweepReport {
+    pub(super) fn report() -> sweep::SweepReport {
+        sweep::SweepReport {
             genesis_hash: [42; 32],
             destination: Address::default(),
             destination_owner: Address::default(),
@@ -340,7 +400,12 @@ mod tests {
             last_send_error: None,
             reclaimed: Some(false),
             dry_run: false,
-        };
+        }
+    }
+
+    #[test]
+    fn recovery_output_must_be_flushed_before_submission() {
+        let report = report();
         let mut output = RecoveryOutput::default();
         write_recovery(&mut output, &report).expect("recovery");
         assert!(output.flushed);
@@ -353,6 +418,57 @@ mod tests {
         };
         assert!(write_recovery(&mut output, &report).is_err());
         assert!(!output.flushed);
+    }
+
+    #[test]
+    fn checkpoint_requires_durable_recovery_and_dry_runs_do_not_append() {
+        use std::fs;
+        let dir = private_files::test_directory();
+        let path = dir.join("recovery.jsonl");
+        let mut journal = recovery::RecoveryJournal::open(&path).expect("journal");
+        let mut output = RecoveryOutput {
+            fail_flush: true,
+            ..Default::default()
+        };
+        let mut report = report();
+        assert!(checkpoint(&mut output, Some(&mut journal), &report).is_err());
+        let before = fs::read(&path).expect("durable record");
+        let lines = String::from_utf8(before.clone()).expect("json");
+        let saved: serde_json::Value =
+            serde_json::from_str(lines.lines().nth(1).expect("record")).expect("record");
+        assert_eq!(saved["attempt_signature"], report.attempt_signature);
+        let mut output = Vec::new();
+        assert!(checkpoint(&mut output, None, &report).is_err());
+        assert!(output.is_empty());
+        report.dry_run = true;
+        checkpoint(&mut output, Some(&mut journal), &report).expect("dry run");
+        assert_eq!(fs::read(&path).expect("unchanged"), before);
+        drop(journal);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn export_requires_public_r_and_an_explicit_output_file() {
+        let ephemeral = Address::new_from_array([3; 32]).to_string();
+        assert!(matches!(
+            Cli::try_parse_from([
+                "scope",
+                "export-sweep-key",
+                "--ephemeral",
+                &ephemeral,
+                "--output",
+                "owner.json"
+            ])
+            .expect("export command")
+            .command,
+            Command::ExportSweepKey(_)
+        ));
+        assert!(
+            Cli::try_parse_from(["scope", "export-sweep-key", "--ephemeral", &ephemeral]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["scope", "export-sweep-key", "--output", "owner.json"]).is_err()
+        );
     }
 
     #[test]

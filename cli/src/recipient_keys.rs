@@ -1,10 +1,12 @@
 //! Recipient backup files and optional age encryption.
 
+use crate::private_files;
 use anyhow::{Context, bail};
+use solana_keypair::Keypair;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{File, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::OpenOptionsExt,
     path::Path,
     process::{Command, Stdio},
 };
@@ -17,13 +19,7 @@ fn private_file(path: &Path) -> anyhow::Result<File> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
-        bail!(
-            "{} must be a regular file with owner-only permissions (chmod 600)",
-            path.display()
-        );
-    }
+    private_files::validate(&file, path)?;
     Ok(file)
 }
 
@@ -66,27 +62,7 @@ pub(super) fn create(path: &Path, encrypt_to: Option<&str>) -> anyhow::Result<St
     let recipient = RecipientSecretKeys::generate(&mut getrandom::SysRng)
         .context("generating recipient secrets")?;
     let material = recipient.export();
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(parent)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .with_context(|| {
-            format!(
-                "creating {}; existing backups are never overwritten",
-                path.display()
-            )
-        })?;
-    let write = (|| -> anyhow::Result<()> {
+    private_files::create(path, |file| {
         if let Some(encrypt_to) = encrypt_to {
             let mut child = Command::new("age")
                 .arg("--encrypt")
@@ -111,33 +87,31 @@ pub(super) fn create(path: &Path, encrypt_to: Option<&str>) -> anyhow::Result<St
         } else {
             file.write_all(material.as_bytes())?;
         }
-        file.sync_all()?;
-        File::open(parent)?.sync_all()?;
         Ok(())
-    })();
-    if let Err(error) = write {
-        drop(file);
-        let _ = fs::remove_file(path);
-        return Err(error);
-    }
+    })?;
     Ok(recipient.derive_public_keys().to_meta_address())
+}
+
+pub(super) fn export_owner(
+    path: &Path,
+    recipient: &RecipientSecretKeys,
+    ephemeral: &[u8; 32],
+) -> anyhow::Result<Keypair> {
+    let seed = recipient
+        .derive_sweep_destination(ephemeral)
+        .map_err(|error| anyhow::anyhow!("deriving sweep owner: {error:?}"))?;
+    let owner = Keypair::new_from_array(*seed.as_bytes());
+    let bytes = Zeroizing::new(owner.to_bytes());
+    let json = Zeroizing::new(serde_json::to_vec(bytes.as_slice())?);
+    private_files::create(path, |file| Ok(file.write_all(&json)?))?;
+    Ok(owner)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    fn directory() -> std::path::PathBuf {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "scope-recipient-keys-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&dir).expect("directory");
-        dir
-    }
+    use crate::private_files::test_directory as directory;
+    use std::{fs, os::unix::fs::PermissionsExt};
 
     #[test]
     fn private_backup_round_trips_and_cannot_be_overwritten() {
@@ -173,6 +147,51 @@ mod tests {
             fs::write(&path, invalid).expect("write");
             assert!(load(&path, None).is_err());
         }
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn exported_owner_is_a_private_standard_keypair_and_cannot_be_overwritten() {
+        use solana_signer::Signer;
+        use stealth_keygen::{EphemeralSecret, derive_payment_with_ephemeral};
+        let dir = directory();
+        let backup = dir.join("private/nested/recipient.key");
+        create(&backup, None).expect("backup");
+        let recipient = load(&backup, None).expect("restore");
+        let sent = derive_payment_with_ephemeral(
+            &recipient.derive_public_keys(),
+            &EphemeralSecret::from_bytes([3; 32]),
+        )
+        .expect("payment");
+        let path = dir.join("owner.json");
+        let owner = export_owner(&path, &recipient, &sent.announcement.ephemeral_public_key)
+            .expect("export");
+        let imported = solana_keypair::read_keypair_file(&path).expect("standard keypair");
+        assert_eq!(imported.pubkey(), owner.pubkey());
+        assert_eq!(
+            fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
+            0o600
+        );
+        for directory in [dir.join("private"), dir.join("private/nested")] {
+            assert_eq!(
+                fs::metadata(directory)
+                    .expect("metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        assert!(export_owner(&path, &recipient, &sent.announcement.ephemeral_public_key).is_err());
+        assert_eq!(
+            solana_keypair::read_keypair_file(&path)
+                .expect("preserved")
+                .pubkey(),
+            owner.pubkey()
+        );
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink(&path, &link).expect("symlink");
+        assert!(export_owner(&link, &recipient, &sent.announcement.ephemeral_public_key).is_err());
         fs::remove_dir_all(dir).expect("cleanup");
     }
 

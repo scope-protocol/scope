@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Privacy
@@ -28,12 +28,13 @@ The payer can follow the funds it paid, as on any public ledger, but reads no am
 | Payer's transaction: token account set up and handed to P, announcement (R, tag, payer), P funded, transfer in | payer identity, one-time account | no, needs S | encrypted; auditor readable |
 | Recipient's transaction: D created by P, disable source credits, apply, transfer, empty, optional burn and reclaim to the payer, surplus SOL transferred from P to D_owner with a reserve retained in P | yes | no; links P, D and D_owner to each other | encrypted |
 | A later spend from D | yes | no for the public; the payer can follow it | encrypted if confidential |
+| Recipient recovery journal, stored locally with owner-only permissions | no | yes if exposed, groups the recipient's destinations | none |
 | A sweep or spend into an account another payment also reached | yes | **yes**, merges everything that touched it | encrypted |
 | Timing of the payer's transactions in a run | yes | correlates payer with one-time accounts and counts them, not with recipients | none |
 
 ## Residual leaks and mitigations
 
-- **Merging.** Inherent to stealth addresses (BIP-352 has it). Sweep into a fresh D per payment and never merge accounts that different payers can see. The client refuses an existing token destination and offers no reuse override; this is client policy, not a program invariant. Unlinkable consolidation is out of scope (Q8).
+- **Merging.** Inherent to stealth addresses (BIP-352 has it). Sweep into a fresh D per payment and never merge accounts that different payers can see. Reusing a fee payer for later spends also links destinations. The client refuses an existing token destination and offers no reuse override; this is client policy, not a program invariant. Unlinkable consolidation is out of scope (Q8).
 - **The payer follows the funds.** The payer sees D in the sweep and can watch D's counterparties forever, amounts hidden. Any payer on a public ledger can do this with a wallet it paid, and the payer already knows who it paid. This rail hides the recipient from the public, not from the payer.
 - **Payer's keys.** The payer can read that one account until it is emptied. It cannot move funds (P owns the account) or decrypt the destination side. The credit cap limits outstanding pending credits, and public credits are disabled; an applied source can receive one further confidential credit before sweeping, which requires fresh proofs; sweeping also disables confidential credits so a transfer-only fallback cannot reopen the source to the payer (verification: V2, V3, V7, V65). Insufficient funding and mint-authority restrictions can still prevent a sweep. A partial spend straight from the one-time account shows the payer the split; sweep the whole balance.
 - **Balance cache.** The AE-encrypted balance hint is writable by anyone holding the AES key, which includes the payer. The client never trusts it.

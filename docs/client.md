@@ -1,12 +1,12 @@
 ---
 status: decided
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Client
 
 TL;DR: one Rust CLI, `scope`, for both sides. The payer engine resends a signed transfer freely and rebuilds it only once the previous attempt is provably dead; the recipient scans by view tag and sweeps with plain Token-2022 instructions signed by the one-time key.
-Today `crates/client` holds address derivation, builders, the LiteSVM test kit, spike binaries, the payer engine for plain recipients, and recipient scan and sweep. The CLI exposes `pay`, `register`, `scan` and `sweep`; payer stealth rows and receipts remain planned.
+Today `crates/client` holds address derivation, builders, the LiteSVM test kit, spike binaries, the payer engine for plain recipients, and recipient scan and sweep. The CLI exposes `pay`, `register`, `scan`, `sweep` and `export-sweep-key`; payer stealth rows and receipts remain planned.
 
 ## Payer engine
 
@@ -36,7 +36,7 @@ Plain recipients: `recipient,amount` rows, amounts in token units. The engine pr
 
 ## Recipient flow
 
-`scope register`, `scan` and `sweep` implement the recipient side: protected backups, streaming authenticated discovery and whole-balance v1 transfers into a fresh deterministic destination. Preparation and each safe rebuild simulate before sending. Recovery is flushed before every new attempt, and submission shares one deadline across RPC waits, retry preparation and polling. Source and mint state are refreshed on safe retries; a finalized successful signature proves the atomic outcome (verification: V64 to V67).
+`scope register`, `scan` and `sweep` implement the recipient side: protected backups, streaming authenticated discovery and whole-balance v1 transfers into a fresh deterministic destination. Preparation and each safe rebuild simulate before sending. Recovery is synchronized to a private journal and flushed to stdout before every new attempt. Submission shares one deadline across RPC waits, retry preparation and polling. Safe retries refresh source, mint and fee state; a finalized successful signature proves the atomic outcome even if optional metadata reads fail. `export-sweep-key` reconstructs a standard owner keypair from the backup and R so existing Token-2022 tools can apply and spend the destination balance (verification: V64 to V71).
 
 ## Recipient commands
 

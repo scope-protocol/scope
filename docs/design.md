@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Design
@@ -17,7 +17,7 @@ Marks: [verified] backed by a row in [verification.md](verification.md); [likely
 | Program `scope-program` | on-chain, Pinocchio 0.11.2, `no_std`, id `EwbfwDdaRdxzF6wJFBKQmqcGoh93wNFL7FMo31eK9V2H` | `announce` verifies a payer's setup and writes the announcement; `reclaim` returns rent to the payer |
 | Token-2022 and the ZK ElGamal proof program | Solana's, unchanged | confidential balances, proof verification, auditor key; live on mainnet-beta and devnet (verification: V15) |
 | `scope-interface` | `no_std`, no dependencies | account layout, instruction data, seeds, errors, Token-2022 account reader; shared by program and client |
-| CLI `scope` | off-chain, Rust | payer: pay, bench; recipient: register (prints an encoded meta-address; the on-chain registry is P4), scan, sweep; either: disclose, verify |
+| CLI `scope` | off-chain, Rust | payer: pay; recipient: register (prints an encoded meta-address; the on-chain registry is P4), scan, sweep, export-sweep-key; bench, disclose and verify remain planned |
 
 No relayer, no indexer, no second program, no on-chain registry in v1.
 
@@ -133,7 +133,7 @@ reclaim                                   rent of both accounts to the payer
 System Transfer of P's surplus to D_owner, retaining P's rent reserve
 ```
 
-The core (apply, transfer, empty, reclaim, with D created beforehand) is 2,759 bytes and 256,800 CU in LiteSVM (verification: V56); the full client sweep with an auditor and public dust measures 3,350 bytes and 268,049 CU in LiteSVM (verification: V68). The zero-ciphertext proof is over the new source ciphertext from the transfer's equality proof: Transfer sets the available balance to exactly that ciphertext (verification: V8). Burn removes public dust a mint authority can mint in, since MintTo ignores the disabled public-credit flag and a nonzero public amount blocks CloseAccount (verification: V4, V6). If full simulation fails, the client separately simulates a version without burn and reclaim. If cleanup fails after simulation, submission waits for a finalized failure or blockhash expiry before building and simulating up to two transfer-only retries with fresh source balances, mint policy, proofs, funding and destination rent deficit (verification: V65). The retry uses the same deterministic destination and remains subject to the submission deadline and available funding. D and D_owner are derived per payment; nothing is persisted on the recipient side.
+The core (apply, transfer, empty, reclaim, with D created beforehand) is 2,759 bytes and 256,800 CU in LiteSVM (verification: V56); the full client sweep with an auditor and public dust measures 3,350 bytes and 268,049 CU in LiteSVM (verification: V68). The zero-ciphertext proof is over the new source ciphertext from the transfer's equality proof: Transfer sets the available balance to exactly that ciphertext (verification: V8). Burn removes public dust a mint authority can mint in, since MintTo ignores the disabled public-credit flag and a nonzero public amount blocks CloseAccount (verification: V4, V6). If full simulation fails, the client separately simulates a version without burn and reclaim. If cleanup fails after simulation, submission waits for a finalized failure or blockhash expiry before building and simulating up to two transfer-only retries with fresh source balances, mint policy, proofs, funding, destination rent deficit and fees (verification: V65, V69). The retry uses the same deterministic destination and remains subject to the submission deadline and available funding. D and D_owner are derived per payment without a local counter. The CLI persists public recovery identifiers before broadcast; the backup and exact R reconstruct a standard owner keypair (verification: V70, V71).
 
 The credit cap of 1 limits outstanding pending credits (verification: V7). If a balance was applied before handover, one further credit can arrive; a safe retry refreshes its balance and proofs (V65). The sweep disables confidential credits atomically with apply, transfer and empty; resetting the counter during apply therefore does not reopen a source left behind by the transfer-only fallback (verification: V65).
 

@@ -1897,3 +1897,96 @@ fn observed_completion_survives_unavailable_cleanup_and_sol_metadata() {
         assert_eq!(chain.sent_signatures.len(), 1);
     }
 }
+
+#[test]
+fn restored_standard_owner_can_apply_and_spend_the_swept_balance() {
+    use scope_client::sweep::{self, SweepOptions};
+    use solana_keypair::{Keypair, read_keypair_file};
+    use std::{fs, os::unix::fs::OpenOptionsExt};
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, _, _) = fund(&mut h, &alice, 3);
+    let report = sweep::sweep(
+        &mut SvmChain::new(&mut h.svm),
+        &alice,
+        &announcement,
+        &SweepOptions {
+            poll: std::time::Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect("sweep");
+    let restored = RecipientSecretKeys::from_bytes(*alice.export().as_bytes()).expect("restore");
+    let seed = restored
+        .derive_sweep_destination(&report.ephemeral)
+        .expect("owner seed");
+    let owner = Keypair::new_from_array(*seed.as_bytes());
+    let path = std::env::temp_dir().join(format!(
+        "scope-standard-owner-{}-{}.json",
+        std::process::id(),
+        h.payer.pubkey()
+    ));
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .expect("private keypair");
+    serde_json::to_writer(file, owner.to_bytes().as_slice()).expect("standard JSON");
+    let owner = read_keypair_file(&path).expect("standard import");
+    fs::remove_file(path).expect("cleanup");
+    assert_eq!(owner.pubkey(), report.destination_owner);
+    let (keys, ae) = solana_zk_sdk::encryption::derivation::derive_confidential_keys(&owner, b"")
+        .expect("wallet keys");
+    let receiver = Keypair::new();
+    let (receiver_keys, receiver_ae) =
+        solana_zk_sdk::encryption::derivation::derive_confidential_keys(&receiver, b"")
+            .expect("receiver keys");
+    let destination = h.plain_confidential_account(&receiver, &receiver_keys, &receiver_ae);
+    h.payer = owner;
+    h.source = report.destination;
+    h.source_elgamal = keys;
+    h.source_ae = ae;
+    h.source_balance = AMOUNT;
+    let apply = ct::apply_pending_balance(
+        &token_2022(),
+        &h.source,
+        1,
+        &h.source_ae.encrypt(AMOUNT).into(),
+        &h.payer.pubkey(),
+        &[],
+    )
+    .expect("apply");
+    h.send(&[apply], &[])
+        .expect("apply with restored standard owner");
+    h.send(
+        &transfer(&h, destination, receiver_keys.pubkey(), AMOUNT),
+        &[],
+    )
+    .expect("spend with restored standard owner");
+    let received = h.svm.get_account(&destination).expect("receiver");
+    let state = StateWithExtensions::<Account>::unpack(&received.data).expect("account");
+    let ext = state
+        .get_extension::<ConfidentialTransferAccount>()
+        .expect("confidential extension");
+    let lo: ElGamalCiphertext = ext.pending_balance_lo.try_into().expect("lo");
+    let hi: ElGamalCiphertext = ext.pending_balance_hi.try_into().expect("hi");
+    assert_eq!(
+        receiver_keys.secret().decrypt_u32(&lo).expect("lo")
+            + (receiver_keys.secret().decrypt_u32(&hi).expect("hi") << 16),
+        AMOUNT
+    );
+    let spent = h
+        .svm
+        .get_account(&report.destination)
+        .expect("spent account");
+    let state = StateWithExtensions::<Account>::unpack(&spent.data).expect("account");
+    let ext = state
+        .get_extension::<ConfidentialTransferAccount>()
+        .expect("confidential extension");
+    assert_eq!(
+        h.source_ae
+            .decrypt(&ext.decryptable_available_balance.try_into().expect("hint")),
+        Some(0)
+    );
+}

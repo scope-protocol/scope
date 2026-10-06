@@ -14,6 +14,8 @@ Docs describe the present; this file holds the why. Design history from before t
 
 - **New attempts get current prices.** Preparation and safe rebuilds share the payer's p75-plus-cap policy. Identical resends retain the same fee and signature. Unresolved submission retains its latest send error without treating it as proof of failure. Rejected: reusing stale prices on new attempts or aborting solely on a transport error.
 
+- **Recovery is durable and the destination is usable.** Every non-dry-run attempt is synchronized to a private, locked recovery journal before stdout and broadcast. Public R and the backup can export D_owner as a standard private keypair file; its wallet keys can apply and spend D's pending balance. New directory entries are synchronized, and incomplete journal tails are repaired under the lock. Historical transaction discovery remains Q17. Rejected: relying on terminal output alone, exporting secrets to stdout, overwriting key files, or changing the derivations.
+
 ## 2026-10-05 Recipient state refresh and discovery
 
 - **Two safe retries refresh the full snapshot.** An applied source can accept a further credit, and a mint auditor can change. Each rebuild refreshes source balances, mint policy, proofs, funding and rent; two retries cover cleanup followed by one additional credit. Work remains bounded by the deadline and funding floor. Rejected: treating the pending-credit cap as a lifetime limit or reusing stale proofs.

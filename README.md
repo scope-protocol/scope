@@ -11,7 +11,7 @@ It joins two existing pieces that were never combined, stealth addresses and Tok
 - Spike S3 green end to end: payer setup, handover and payment in one transaction, the recipient's sweep and rent refund in another.
 - Spike S1 green on Surfpool; the devnet run is pending.
 - `scope pay` pays plain confidential recipients, resumably; stealth rows are next, on the `ct_ikm` export. Phases and gates: [docs/plan.md](docs/plan.md).
-- `scope register`, `scan`, and `sweep` support recipient backups, authenticated discovery, and full-balance sweeps into fresh confidential accounts. The flow is tested in LiteSVM; live-cluster validation remains pending. Usage: [docs/recipient.md](docs/recipient.md).
+- `scope register`, `scan`, `sweep`, and `export-sweep-key` support recipient backups, authenticated discovery, durable recovery, and spendable confidential destinations. The flow is tested in LiteSVM; live-cluster validation remains pending. Usage: [docs/recipient.md](docs/recipient.md).
 
 ## Layout
 
@@ -23,7 +23,7 @@ One cargo workspace.
 | `crates/interface` | `scope-interface` | `no_std`, no dependencies: program id, announcement layout, instruction data, seeds, error codes, a read-only view of Token-2022 token accounts. Shared by the program and the client |
 | `crates/client` | `scope-client` | Address derivation, instruction and v1 transaction builders, payer engine and journal, recipient scan and sweep, RPC and LiteSVM (feature `litesvm`) backends, and spike binaries in `examples/`. Receipts remain planned |
 | `crates/stealth-keygen` | `stealth-keygen` | Recipient keys, HKDF stealth derivation, raw-scalar signing, and protected account-scoped `ct_ikm`. Off-chain |
-| `cli` | `scope-cli`, binary `scope` | Argument parsing and output over `crates/client`. Plain `pay`, recipient `register`, `scan` and `sweep` work; disclose, verify and bench remain stubs |
+| `cli` | `scope-cli`, binary `scope` | Argument parsing and output over `crates/client`. Plain `pay`, recipient `register`, `scan`, `sweep` and `export-sweep-key` work; disclose, verify and bench remain stubs |
 | `docs/` | | Brief, design, client, crypto, privacy, plan, decisions, verification. Start at [docs/README.md](docs/README.md) |
 
 The program and the client depend on `crates/interface`, which depends on nothing. `crates/stealth-keygen` derives stealth keys and account-scoped `ct_ikm`. `scope-client::confidential` converts that material into ElGamal and symmetric keys with the workspace ZK SDK. Q14 implementation is complete; external derivation review remains Q1. Payer-engine stealth rows and receipts remain planned.
