@@ -1,6 +1,6 @@
 ---
 status: verified
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Verification
@@ -23,11 +23,12 @@ Line numbers drift; when bumping a pinned version, re-check the rows that name i
 |---|---|---|
 | V1 | ConfigureAccount checks only that the current owner signed; a keypair or a PDA via invoke_signed both pass | T22 `ct/processor.rs` `process_configure_account` 256-266; `t22/processor.rs` `validate_owner` 2253-2293 |
 | V2 | SetAuthority(AccountOwner) checks only the current owner; it refuses a frozen account, ImmutableOwner and an enabled CpiGuard, and clears the delegate | T22 `t22/processor.rs` 709-770 (frozen 724-727, owner check 730-737, refusals 739-748, delegate cleared 758-759) |
-| V3 | ApplyPendingBalance, confidential Transfer and EmptyAccount authorise against the live owner field, never the original owner or the ElGamal key's origin | token-2022 main read 2026-09-14: `ct/processor.rs` 1213-1220, 848-874, 352-378 |
+| V3 | ApplyPendingBalance, confidential Transfer and EmptyAccount authorise against the live owner field, never the original owner or the ElGamal key's origin | token-2022 main read 2026-09-14: `ct/processor.rs` 1213-1220, 848-874, 352-378; test `token_attacks::only_p_can_apply_transfer_or_empty_after_the_handover` |
 | V4 | CloseAccount authorises `close_authority`, else the owner, and refuses a nonzero public amount (`NonNativeHasBalance`) or nonzero confidential balances | T22 `t22/processor.rs` 1298-1390 (authority 1318-1321, balances 1315-1316 and 1348-1352) |
 | V5 | With CpiGuard enabled, CloseAccount under CPI fails when the destination is not the owner | T22 `t22/processor.rs` `process_close_account` 1328-1334 |
-| V6 | The disabled public-credit flag is checked only in Transfer; MintTo ignores it | T22 `t22/processor.rs` 537 (only call site), `process_mint_to` 1028-1090 |
-| V7 | `maximum_pending_balance_credit_counter` admits exactly that many credits, is written once at configure, and has no later setter | spl-token-2022-interface 3.1.1 `src/extension/confidential_transfer/mod.rs` 161-178; T22 `ct/processor.rs` 291-292 |
+| V6 | The disabled public-credit flag is checked only in Transfer; MintTo ignores it | T22 `t22/processor.rs` 537 (only call site), `process_mint_to` 1028-1090; test `token_attacks::public_credits_are_refused_but_mint_to_lands` |
+| V7 | `maximum_pending_balance_credit_counter` admits exactly that many credits, is written once at configure, and has no later setter | spl-token-2022-interface 3.1.1 `src/extension/confidential_transfer/mod.rs` 161-178; T22 `ct/processor.rs` 291-292; test `token_attacks::the_credit_cap_admits_only_the_payers_credit` |
+| V69 | A confidential credit into an announced account fails with `MintMismatch` when it comes from another mint, and with `ConfidentialTransferAccountNotApproved` on a mint that does not auto-approve; `announce` itself does not check approval, so refusing such mints before setup is the client's job | tests `token_attacks::a_credit_in_another_mint_is_refused`, `token_attacks::a_mint_without_auto_approve_leaves_the_account_unpayable` |
 | V8 | A confidential Transfer requires the new source ciphertext to equal the equality proof's; incoming credits touch only the pending balance | T22 `ct/processor.rs` 848-932 and 935-993 |
 | V9 | InitializeAccount3 initialises every account extension the mint requires and fails if the account is too small | T22 `t22/processor.rs` 219-222 |
 | V10 | A NonTransferable mint forces ImmutableOwner on every account | spl-token-2022-interface 3.1.1 `src/extension/mod.rs` 1299-1302 |
