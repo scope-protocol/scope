@@ -11,6 +11,8 @@ pub mod input;
 pub mod ix;
 pub mod journal;
 pub mod pay;
+pub mod proofs;
+pub mod run_secret;
 pub mod scan;
 pub mod signer;
 pub mod sweep;

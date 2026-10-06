@@ -64,14 +64,15 @@ pub trait Chain {
 
     /// Per-CU prices in micro-lamports paid by landed non-vote transactions in a recent block.
     fn recent_prices(&self) -> Result<Vec<u64>, ChainError>;
+    /// The cluster's genesis hash, which binds stealth confidential keys to one cluster.
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError>;
+    fn rent(&self, space: usize) -> Result<u64, ChainError>;
 }
 
 /// Cluster reads needed by recipient discovery and sweeping.
 pub trait RecipientChain: Chain {
     fn set_deadline(&mut self, deadline: Option<Instant>);
-    fn genesis_hash(&self) -> Result<[u8; 32], ChainError>;
     fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError>;
-    fn rent(&self, space: usize) -> Result<u64, ChainError>;
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError>;
     fn finalized_status(&self, signature: &Signature) -> Result<FinalizedStatus, ChainError>;
 }
@@ -208,6 +209,13 @@ impl Chain for RpcChain {
         ))?;
         Ok(fees::block_prices(block.transactions.unwrap_or_default()))
     }
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        self.call(self.rpc().get_genesis_hash())
+            .map(|h| h.to_bytes())
+    }
+    fn rent(&self, space: usize) -> Result<u64, ChainError> {
+        self.call(self.rpc().get_minimum_balance_for_rent_exemption(space))
+    }
 }
 
 impl RecipientChain for RpcChain {
@@ -232,11 +240,6 @@ impl RecipientChain for RpcChain {
                 None => FinalizedStatus::Unknown,
             },
         )
-    }
-
-    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
-        self.call(self.rpc().get_genesis_hash())
-            .map(|h| h.to_bytes())
     }
 
     fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
@@ -276,10 +279,6 @@ impl RecipientChain for RpcChain {
                 ))
             })
             .collect()
-    }
-
-    fn rent(&self, space: usize) -> Result<u64, ChainError> {
-        self.call(self.rpc().get_minimum_balance_for_rent_exemption(space))
     }
 
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError> {

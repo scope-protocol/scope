@@ -1,13 +1,21 @@
-//! The payer's input file: one `recipient,amount` row per line. `recipient` is the
-//! recipient's configured confidential token account, `amount` is in token units
-//! with at most the mint's decimals. Blank lines and `#` comments are skipped, and
-//! a first line starting with `recipient` is a header.
+//! The payer's input file: one `recipient,amount` row per line. `recipient` is either
+//! the recipient's configured confidential token account (a plain row) or its `scope:`
+//! meta-address (a stealth row); `amount` is in token units with at most the mint's
+//! decimals. Blank lines and `#` comments are skipped, and a first line starting with
+//! `recipient` is a header.
 
 use solana_address::Address;
+use stealth_keygen::RecipientPublicKeys;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Recipient {
+    Plain(Address),
+    Stealth(RecipientPublicKeys),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
-    pub recipient: Address,
+    pub recipient: Recipient,
     pub amount: u64,
 }
 
@@ -23,8 +31,8 @@ pub enum InputError {
         value: String,
         why: &'static str,
     },
-    #[error("line {line}: stealth rows need the stealth-keygen convergence (plan Q14)")]
-    Stealth { line: usize },
+    #[error("line {line}: bad meta-address: {why}")]
+    MetaAddress { line: usize, why: String },
     #[error("no rows")]
     Empty,
 }
@@ -42,15 +50,21 @@ pub fn parse(text: &str, decimals: u8) -> Result<Vec<Row>, InputError> {
         if amount.contains(',') {
             return Err(InputError::Shape { line });
         }
-        let recipient = match recipient.parse::<Address>() {
-            Ok(a) => a,
-            Err(_) if recipient.len() > 44 => return Err(InputError::Stealth { line }),
-            Err(_) => {
-                return Err(InputError::Address {
+        let recipient = if recipient.starts_with("scope:") {
+            RecipientPublicKeys::from_meta_address(recipient)
+                .map(Recipient::Stealth)
+                .map_err(|e| InputError::MetaAddress {
+                    line,
+                    why: format!("{e:?}"),
+                })?
+        } else {
+            recipient
+                .parse::<Address>()
+                .map(Recipient::Plain)
+                .map_err(|_| InputError::Address {
                     line,
                     value: recipient.into(),
-                });
-            }
+                })?
         };
         let amount = parse_amount(amount, decimals).map_err(|why| InputError::Amount {
             line,
@@ -130,11 +144,11 @@ mod tests {
             parse(&text, 6),
             Ok(vec![
                 Row {
-                    recipient: a,
+                    recipient: Recipient::Plain(a),
                     amount: 1_500_000
                 },
                 Row {
-                    recipient: b,
+                    recipient: Recipient::Plain(b),
                     amount: 2_000_000
                 },
             ])
@@ -154,9 +168,31 @@ mod tests {
             parse("nope,1", 6),
             Err(InputError::Address { line: 1, .. })
         ));
+        assert!(matches!(
+            parse("scope:1111,1", 6),
+            Err(InputError::MetaAddress { line: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn parses_stealth_rows_by_meta_address() {
+        let keys = stealth_keygen::RecipientSecretKeys::from_bytes([7; 64])
+            .expect("test secrets")
+            .derive_public_keys();
+        let a = Address::new_unique();
+        let text = format!("{a},1\n{},0.25\n", keys.to_meta_address());
         assert_eq!(
-            parse(&format!("{},1", "x".repeat(90)), 6),
-            Err(InputError::Stealth { line: 1 })
+            parse(&text, 6),
+            Ok(vec![
+                Row {
+                    recipient: Recipient::Plain(a),
+                    amount: 1_000_000
+                },
+                Row {
+                    recipient: Recipient::Stealth(keys),
+                    amount: 250_000
+                },
+            ])
         );
     }
 }

@@ -13,11 +13,13 @@ litesvm = ["dep:litesvm"]
 
 [dependencies]
 curve25519-dalek.workspace = true
+hkdf = "0.13.0"
 litesvm = { workspace = true, optional = true }
 rand.workspace = true
 scope-interface.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.11.0"
 solana-address = { workspace = true, features = ["atomic", "curve25519", "sha2"] }
 solana-commitment-config.workspace = true
 solana-instruction.workspace = true
@@ -40,6 +42,7 @@ stealth-keygen.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 wincode.workspace = true
+zeroize = "1.9.0"
 
 [dev-dependencies]
 base64 = "0.22.1"

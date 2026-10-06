@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Cryptography
@@ -85,4 +85,4 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 
 ## Open questions
 
-Q1 (external review of the tree, including `d`), Q11 (one ephemeral key per run), Q16 (run secret from a payer master secret). Q14's library APIs and protocol context are implemented: `scope_client::confidential::context` pins the program ID and accepts the cluster genesis hash, mint and token account. Owners and recommendations: [plan.md](plan.md).
+Q1 (external review of the tree, including `d`), Q11 (one ephemeral key per run). The run secret is derived from the payer's signature ([client.md](client.md), Run secret). Q14's library APIs and protocol context are implemented: `scope_client::confidential::context` pins the program ID and accepts the cluster genesis hash, mint and token account. Owners and recommendations: [plan.md](plan.md).

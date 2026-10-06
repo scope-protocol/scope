@@ -205,7 +205,8 @@ fn write_recovery(output: &mut impl Write, report: &sweep::SweepReport) -> io::R
 
 #[derive(Debug, Args)]
 struct PayArgs {
-    /// `recipient,amount` rows; recipient is a configured confidential token account.
+    /// `recipient,amount` rows; recipient is a configured confidential token account (plain row)
+    /// or a `scope:` meta-address (stealth row).
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
     input: Option<PathBuf>,
     /// Token-2022 mint with confidential transfers enabled.

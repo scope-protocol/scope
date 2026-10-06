@@ -1,14 +1,19 @@
-//! Payer engine, plain recipients, against LiteSVM.
+//! Payer engine, plain and stealth rows, against LiteSVM.
 
 use scope_client::{
+    address::token_2022,
+    address::token_account_seed_str,
     chain::{AccountData, Chain, ChainError, Commitment},
+    ix::create_prefunded_with_seed,
     journal::{JOURNAL, Record},
     pay::{self, PayError, PayOptions, SourceKeys},
+    scan,
     testkit::{Harness, SOURCE_FUNDS, SvmChain},
 };
 use solana_address::Address;
 use solana_keypair::Keypair;
 use solana_message::Hash;
+use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_zk_sdk::encryption::{
     auth_encryption::AeKey,
@@ -22,6 +27,7 @@ use spl_token_2022_interface::{
     state::Account,
 };
 use std::{cell::Cell, path::PathBuf, time::Duration};
+use stealth_keygen::RecipientSecretKeys;
 
 struct Recipient {
     account: Address,
@@ -323,6 +329,16 @@ impl<C: Chain> Chain for Killer<C> {
         self.alive()?;
         self.inner.recent_prices()
     }
+
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        self.alive()?;
+        self.inner.genesis_hash()
+    }
+
+    fn rent(&self, space: usize) -> Result<u64, ChainError> {
+        self.alive()?;
+        self.inner.rent(space)
+    }
 }
 
 /// Kills a 4-row run at `at`, resumes it, and checks every row was paid exactly once.
@@ -505,4 +521,254 @@ fn a_concurrent_start_is_refused() {
         start(&mut h, &input(&rs), &o),
         Err(PayError::Journal(_))
     ));
+}
+
+fn stealth_recipient(spend: u8) -> RecipientSecretKeys {
+    let mut bytes = [2; 64];
+    bytes[..32].fill(0);
+    bytes[0] = spend;
+    RecipientSecretKeys::from_bytes(bytes).expect("public test secrets")
+}
+
+/// What the recipient's own scan finds: (one-time token account, confidential amount).
+fn found(h: &mut Harness, recipient: &RecipientSecretKeys) -> Vec<(Address, u64)> {
+    scan::scan(&SvmChain::new(&mut h.svm), recipient, None)
+        .expect("scan")
+        .payments
+        .iter()
+        .map(|p| (p.token_account, p.amount))
+        .collect()
+}
+
+/// Rows alternate plain and stealth; row i pays i + 1 whole tokens.
+fn mixed_input(plain: &[Recipient], stealth: &[RecipientSecretKeys]) -> String {
+    let mut s = String::from("recipient,amount\n");
+    for i in 0..plain.len() + stealth.len() {
+        let recipient = if i % 2 == 0 {
+            plain[i / 2].account.to_string()
+        } else {
+            stealth[i / 2].derive_public_keys().to_meta_address()
+        };
+        s += &format!("{recipient},{}\n", i + 1);
+    }
+    s
+}
+
+/// Every row paid exactly once: plain pending balances, and one found payment per
+/// stealth recipient with its row's amount.
+fn assert_mixed_paid_once(h: &mut Harness, plain: &[Recipient], stealth: &[RecipientSecretKeys]) {
+    for (k, r) in plain.iter().enumerate() {
+        assert_eq!(pending(h, r), (2 * k as u64 + 1) * 1_000_000, "plain {k}");
+    }
+    for (k, r) in stealth.iter().enumerate() {
+        let payments = found(h, r);
+        assert_eq!(payments.len(), 1, "stealth {k}: {payments:?}");
+        assert_eq!(payments[0].1, (2 * k as u64 + 2) * 1_000_000, "stealth {k}");
+    }
+}
+
+#[test]
+fn pays_plain_and_stealth_rows_and_each_recipient_finds_its_payment() {
+    let mut h = Harness::new();
+    let plain = recipients(&mut h, 2);
+    let stealth = [stealth_recipient(1), stealth_recipient(2)];
+    let o = opts("mixed");
+    let report = start(&mut h, &mixed_input(&plain, &stealth), &o).expect("run");
+    assert_eq!(report.paid.len(), 4);
+    assert_mixed_paid_once(&mut h, &plain, &stealth);
+    for (k, r) in stealth.iter().enumerate() {
+        let account = found(&mut h, r)[0].0;
+        let paid = report
+            .paid
+            .iter()
+            .find(|p| p.row == 2 * k + 1)
+            .expect("row");
+        assert_eq!(
+            paid.recipient, account,
+            "the report names the one-time account"
+        );
+    }
+}
+
+fn kill_and_resume_mixed(at: KillAt, name: &str) {
+    let mut h = Harness::new();
+    let plain = recipients(&mut h, 2);
+    let stealth = [stealth_recipient(3), stealth_recipient(4)];
+    let o = opts(name);
+    let (mint, source) = (h.mint, h.source);
+    let killed = pay::start(
+        Killer::new(SvmChain::new(&mut h.svm), at),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        mint,
+        source,
+        mixed_input(&plain, &stealth).as_bytes(),
+        &o,
+    );
+    assert!(
+        matches!(killed, Err(PayError::Chain(_))),
+        "killed, got {killed:?}"
+    );
+    let report = pay::resume(
+        SvmChain::new(&mut h.svm),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        &only_run(&o),
+        &o,
+    )
+    .expect("resume");
+    assert_eq!(report.paid.len(), 4);
+    assert_mixed_paid_once(&mut h, &plain, &stealth);
+}
+
+#[test]
+fn stealth_rows_resume_after_kill_before_send() {
+    kill_and_resume_mixed(KillAt::BeforeSend(2), "stealth-kill-before-send");
+}
+
+#[test]
+fn stealth_rows_resume_after_kill_after_send() {
+    kill_and_resume_mixed(KillAt::AfterSend(2), "stealth-kill-after-send");
+}
+
+#[test]
+fn stealth_rows_resume_after_kill_between_rows() {
+    kill_and_resume_mixed(KillAt::Simulate(3), "stealth-kill-between-rows");
+}
+
+#[test]
+fn create_with_seed_refuses_a_prefunded_address_and_the_fallback_does_not() {
+    let mut h = Harness::new();
+    let case = h.stealth_case();
+    h.svm
+        .airdrop(&case.token_account, 1_000_000)
+        .expect("prefund");
+    assert!(
+        h.send(&case.setup, &[]).is_err(),
+        "CreateAccountWithSeed refuses an address holding lamports"
+    );
+    let account =
+        spl_token_2022_interface::extension::ExtensionType::try_calculate_account_len::<Account>(
+            &[spl_token_2022_interface::extension::ExtensionType::ConfidentialTransferAccount],
+        )
+        .expect("len");
+    let mut setup = case.setup.clone();
+    setup.splice(
+        0..1,
+        create_prefunded_with_seed(
+            &h.payer.pubkey(),
+            &case.token_account,
+            &token_account_seed_str(&case.ephemeral),
+            h.svm.minimum_balance_for_rent_exemption(account),
+            1_000_000,
+            account as u64,
+            &token_2022(),
+        ),
+    );
+    h.send(&setup, &[])
+        .expect("the fallback creates and announces it");
+}
+
+/// Loses the first broadcast, then sends SOL to the one-time address it revealed.
+struct Prefunder<'a> {
+    inner: SvmChain<'a>,
+    done: bool,
+}
+
+impl Chain for Prefunder<'_> {
+    fn account(&self, a: &Address, c: Commitment) -> Result<Option<AccountData>, ChainError> {
+        self.inner.account(a, c)
+    }
+    fn blockhash(&self) -> Result<(Hash, u64), ChainError> {
+        self.inner.blockhash()
+    }
+    fn finalized_block_height(&self) -> Result<u64, ChainError> {
+        self.inner.finalized_block_height()
+    }
+    fn simulate(&self, tx: &VersionedTransaction) -> Result<Result<(), String>, ChainError> {
+        self.inner.simulate(tx)
+    }
+    fn send(&mut self, tx: &VersionedTransaction) -> Result<(), ChainError> {
+        if self.done {
+            return self.inner.send(tx);
+        }
+        self.done = true;
+        let keys = tx.message.static_account_keys();
+        let create = &tx.message.instructions()[0];
+        let token_account = keys[usize::from(create.accounts[1])];
+        self.inner
+            .svm
+            .airdrop(&token_account, 1_000_000)
+            .expect("prefund");
+        Ok(())
+    }
+    fn recent_prices(&self) -> Result<Vec<u64>, ChainError> {
+        self.inner.recent_prices()
+    }
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        self.inner.genesis_hash()
+    }
+    fn rent(&self, space: usize) -> Result<u64, ChainError> {
+        self.inner.rent(space)
+    }
+}
+
+#[test]
+fn a_prefunded_one_time_address_still_gets_paid() {
+    let mut h = Harness::new();
+    let alice = stealth_recipient(5);
+    let o = opts("prefunded");
+    let (mint, source) = (h.mint, h.source);
+    let input = format!("{},1\n", alice.derive_public_keys().to_meta_address());
+    let report = pay::start(
+        Prefunder {
+            inner: SvmChain::new(&mut h.svm),
+            done: false,
+        },
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        mint,
+        source,
+        input.as_bytes(),
+        &o,
+    )
+    .expect("run");
+    let attempts = journal(&o, &report.run_id)
+        .iter()
+        .filter(|r| matches!(r, Record::Attempt { .. }))
+        .count();
+    assert_eq!(attempts, 2, "the lost attempt expired and was rebuilt");
+    let payments = found(&mut h, &alice);
+    assert_eq!(payments.len(), 1);
+    assert_eq!(payments[0].1, 1_000_000);
+}
+
+#[test]
+fn refuses_stealth_rows_on_a_mint_that_does_not_auto_approve() {
+    use spl_token_2022_interface::{
+        extension::{
+            BaseStateWithExtensionsMut, StateWithExtensionsMut,
+            confidential_transfer::ConfidentialTransferMint,
+        },
+        state::Mint,
+    };
+    let mut h = Harness::new();
+    let mut mint = h.svm.get_account(&h.mint).expect("mint");
+    {
+        let mut state = StateWithExtensionsMut::<Mint>::unpack(&mut mint.data).expect("unpack");
+        state
+            .get_extension_mut::<ConfidentialTransferMint>()
+            .expect("ct mint")
+            .auto_approve_new_accounts = false.into();
+    }
+    h.svm.set_account(h.mint, mint).expect("patch mint");
+    let input = format!(
+        "{},1\n",
+        stealth_recipient(6).derive_public_keys().to_meta_address()
+    );
+    let result = start(&mut h, &input, &opts("no-auto-approve"));
+    assert!(
+        matches!(result, Err(PayError::Mint { .. })),
+        "got {result:?}"
+    );
 }

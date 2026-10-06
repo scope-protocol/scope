@@ -50,6 +50,30 @@ pub fn reclaim(announcement: &Address, token_account: &Address, payer: &Address)
     }
 }
 
+/// Replaces CreateAccountWithSeed for an address someone already sent `existing`
+/// lamports to, which CreateAccountWithSeed refuses: tops it up to `rent`, then
+/// allocates and assigns it, both signed by `base`.
+pub fn create_prefunded_with_seed(
+    base: &Address,
+    address: &Address,
+    seed: &str,
+    rent: u64,
+    existing: u64,
+    space: u64,
+    owner: &Address,
+) -> Vec<Instruction> {
+    use solana_system_interface::instruction as system;
+    let mut ixs = Vec::new();
+    if rent > existing {
+        ixs.push(system::transfer(base, address, rent - existing));
+    }
+    ixs.push(system::allocate_with_seed(
+        address, base, seed, space, owner,
+    ));
+    ixs.push(system::assign_with_seed(address, base, seed, owner));
+    ixs
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     #[error("proof generation failed: {0}")]

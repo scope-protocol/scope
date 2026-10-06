@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Plan
@@ -24,7 +24,7 @@ The areas meet at two contracts: `crates/interface` (announcement layout, instru
 |---|---|---|---|
 | P0 Foundation | workspace, CI, lints, cargo-deny; interface crate with the Token-2022 account reader cross-checked against spl-token-2022-interface; devnet wallets funded | CI green on every crate; the reader agrees with spl-token-2022-interface 3.1.1 on every field `announce` reads | done, except funded devnet wallets |
 | P1 Prove the design | S1; S3, which builds `announce` and `reclaim` with the decoy test; S4 starts; Q14, then the Q1 request | S1 and S3 green, or the fallback chosen and logged in decisions.md; Q1 request sent | S3 green; S1 green in LiteSVM and on Surfpool, devnet pending; S4 sampler built and first sample taken, multi-day run pending; Q14 code implemented, review pending; Q1 open |
-| P2 First payments | payer engine pays 10 plain recipients on devnet; `announce` on devnet; scan against Surfpool; S6; adversarial tests for `announce` | plain run on devnet; 10 stealth payments announced and found by scan | `scope pay` pays plain recipients, 10 on Surfpool with a kill and resume (V49); devnet run pending; attack tests for `announce` done (V54); recipient CLI, scan and sweep are implemented with local integration and RPC fixture coverage (V64 to V67); provider-scale S6 and Surfpool scan remain open; stealth rows are the next engine work, on the `ct_ikm` export (V53) |
+| P2 First payments | payer engine pays 10 plain recipients on devnet; `announce` on devnet; scan against Surfpool; S6; adversarial tests for `announce` | plain run on devnet; 10 stealth payments announced and found by scan | `scope pay` pays plain recipients, 10 on Surfpool with a kill and resume (V49); devnet run pending; attack tests for `announce` done (V54); recipient CLI, scan and sweep are implemented with local integration and RPC fixture coverage (V64 to V67); provider-scale S6 and Surfpool scan remain open; stealth rows paid and found by the recipient's own scan in LiteSVM, with kill and resume (V72, V73) |
 | P3 Stealth end to end | `reclaim` on devnet; journal and resume; sweep with plain instructions, refusing reused destinations; disclose | one stealth payment end to end on devnet, one transaction per side, rent back with the payer; a run resumes after a kill at three steps; a receipt exists for it | recipient sweep and recovery implemented in LiteSVM (V65); payer resume covered (V48); devnet and disclose remain open |
 | P4 Hardening | chaos harness; rest of the adversarial suite; CU assertions in CI; verify; S5; Q1 findings; registry decision (Q12) and, if built, its on-chain torsion check (S7) | attacks rejected; the harness converges from every kill point of a 20-recipient run; verify accepts the P3 receipt and rejects a forged `ct_ikm` | program attack suite, CU ceilings in CI and S5 done early (V54 to V56) |
 | P5 Ship | 50-recipient run on devnet; measurements published; recorded demo; sRFC-42 write-up with the issuer spec (Q9); status page | three-minute terminal demo, mixed modes, then a receipt verified by a third party; measured numbers replace every [likely] cost | |
@@ -85,4 +85,3 @@ Ids are stable; gaps are questions already closed.
 | Q12 | On-chain registry: build our own in P4, or reuse sRFC-42's | Jmkoy | P4 | if lookup matters, reuse or match sRFC-42's seeds rather than a private layout |
 | Q14 | Finish `crates/stealth-keygen` on the crypto.md tree: `d`, externally supplied ephemeral keys, meta-address parsing; pin `program_id` in `C` | Abhineet, reviewed by Valentyn | before Q1 goes out | implemented: supplied ephemeral keys (V58), public imports (V59), recipient backups (V60), `d` (V61), meta-addresses (V62) and the pinned client context; keep the nonce-from-p construction and the vector generator |
 | Q15 | Receipts for plain payments: the format needs `ct_ikm`, which only stealth payments have | Jmkoy | P3 | stealth receipts in v1; check whether the payer can disclose the opening of the amount commitment; otherwise plain payments rely on the mint auditor key |
-| Q16 | Run secret derived from a payer master secret | Abhineet | P3 | one master secret in an age file or the OS keychain, `run_secret = HKDF(master, "run" \|\| run_id)`: one backup instead of one per run |

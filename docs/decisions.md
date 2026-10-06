@@ -1,12 +1,20 @@
 ---
 status: decided
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Decisions
 
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
+
+## 2026-10-06 Payer stealth rows
+
+- **The run secret comes from the payer's signature (Q16).** `run_secret = HKDF(payer's Ed25519 signature over a fixed label || run_id)`. Signing is deterministic, so the payer keypair, already backed up, rebuilds every run's secret, every R_i and every amount opening; the same pattern as the source keys. Rejected: a master secret in an age file or the keychain (one more backup and storage code for the same result).
+- **Amount openings are derived, not drawn.** The engine builds transfer proofs with the same builders as proof-generation 0.6.1 but takes the two amount openings from the run secret. A payer can then prove any row's amount, plain or stealth, by disclosing that row's openings, with nothing stored. Every attempt for a row moves the same amount, so reusing its openings across attempts reveals nothing. Rejected: random openings stored beside the journal (a secret on disk that the journal rule keeps out).
+- **Send order stays random, recorded in the run header.** Deriving it from the run secret adds nothing the header does not already give resume.
+- **Prefunded one-time addresses are created anyway.** An expired attempt publishes T's address; anyone can then send it lamports, which makes CreateAccountWithSeed fail. The rebuild tops up, allocates and assigns instead. Rejected: halting, which would let one transfer of dust stop a run.
+- **Compute limits per shape and one funding rule for P.** The fee is paid on the header's CU limit, so each shape gets its own limit about 15% above measurement (V70), and the payer funds P with exactly what the sweep needs at the 1,000,000 micro-lamport cap (V71). Rejected: one 600,000 limit for everything, and a funding estimate the sweep did not share.
 
 ## 2026-10-05 Recipient state refresh and discovery
 

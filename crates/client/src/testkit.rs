@@ -454,6 +454,12 @@ impl Chain for SvmChain<'_> {
     fn recent_prices(&self) -> Result<Vec<u64>, ChainError> {
         Ok(self.prices.clone())
     }
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        Ok([42; 32])
+    }
+    fn rent(&self, space: usize) -> Result<u64, ChainError> {
+        Ok(self.svm.minimum_balance_for_rent_exemption(space))
+    }
 }
 
 impl RecipientChain for SvmChain<'_> {
@@ -478,9 +484,6 @@ impl RecipientChain for SvmChain<'_> {
         })
     }
 
-    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
-        Ok([42; 32])
-    }
     fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
         Ok(self
             .svm
@@ -497,9 +500,6 @@ impl RecipientChain for SvmChain<'_> {
                 )
             })
             .collect())
-    }
-    fn rent(&self, space: usize) -> Result<u64, ChainError> {
-        Ok(self.svm.minimum_balance_for_rent_exemption(space))
     }
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError> {
         let priority = match message {
