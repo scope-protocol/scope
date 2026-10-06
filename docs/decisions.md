@@ -1,12 +1,18 @@
 ---
 status: decided
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Decisions
 
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
+
+## 2026-10-06 Recipient outcomes and retry pricing
+
+- **Completion survives metadata failures.** A successful finalized signature is authoritative. Later balance reads are optional and share the remaining deadline; absent observations remain explicit `None` values. Account-state completion similarly survives optional reporting failures. Rejected: returning `Pending` after observing completion or presenting a predicted balance as a measured one.
+
+- **New attempts get current prices.** Preparation and safe rebuilds share the payer's p75-plus-cap policy. Identical resends retain the same fee and signature. Unresolved submission retains its latest send error without treating it as proof of failure. Rejected: reusing stale prices on new attempts or aborting solely on a transport error.
 
 ## 2026-10-05 Recipient state refresh and discovery
 

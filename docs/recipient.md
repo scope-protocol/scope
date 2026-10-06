@@ -1,6 +1,6 @@
 ---
 status: verified
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Recipient client
@@ -46,13 +46,15 @@ A local RPC fixture scans 1,000 canonical seeded announcements and authenticates
 
 The transaction disables confidential credits to the source, applies pending balances, transfers the whole confidential amount, and empties the source. Full cleanup additionally burns public dust and reclaims rent to the payer. If that simulation fails, a separately simulated transfer-only version can leave public dust and rent behind, including for permissioned-burn mints. The recipient retains a rent reserve in P; surplus SOL goes to D_owner when it can receive it without becoming rent-paying. Funding quotes include chain fees, destination deficit and P's reserve (V65).
 
-`submit` resends an identical transaction while its outcome is unresolved. Only a finalized failure or blockhash expiry authorizes rebuilding. At most two transfer-only retries refresh source balances, mint policy, auditor proofs, blockhash, rent deficit and fees. This covers cleanup failure followed by a further credit to a source whose pending counter was already applied. Retry decoding and proving run on a worker with no chain access; expired waiting cannot lead to a later broadcast (V65).
+`submit` resends an identical transaction while its outcome is unresolved. Only a finalized failure or blockhash expiry authorizes rebuilding. At most two transfer-only retries refresh source balances, mint policy, auditor proofs, blockhash, rent deficit and fees. Each new attempt samples the current p75 priority price and enforces `--max-price`; identical resends keep their signed fee. This covers cleanup failure followed by a further credit to a source whose pending counter was already applied. Retry decoding and proving run on a worker with no chain access; expired waiting cannot lead to a later broadcast (V65, V69).
 
-`submit_with_recovery` adds a fallible callback before every new attempt. The CLI writes and flushes destination, owner, P, R and signature through it. A write or flush failure prevents that attempt from being sent. Identical resends reuse the checkpoint; dry runs emit recovery information and send nothing. Callbacks are synchronous and should return promptly (V65, V66).
+`submit_with_recovery` adds a fallible callback before every new attempt. The CLI writes and flushes genesis hash, destination, owner, P, R and signature through it. A write or flush failure prevents that attempt from being sent. Identical resends reuse the checkpoint; dry runs emit recovery information and send nothing. Callbacks are synchronous and should return promptly (V65, V66).
 
 Save the output. Once reclaim closes the announcement, exact R plus the recipient backup reconstructs D_owner and its confidential keys; otherwise R must be recovered from historical payer transactions. `PreparedSweep` retains protected signing material only in memory and exposes only the public report in debug output (V61, V65).
 
-A successful finalized signature proves this attempt's atomic transfer even if accounts are later closed, funded again, or recreated. Without that proof, completion requires an empty or closed source and an authenticated destination. Empty System accounts at closed addresses do not undo reclaim detection. `attempt_signature` names the current attempt; `finalized_signature` is present only with verified success. `amount` describes the most recent prepared attempt. Concurrent completion can leave the amount actually transferred, this attempt's success and burned amount unknown; the CLI labels that amount as prepared. Errors preserve the recovery report and any verified signature (V65).
+A successful finalized signature proves this attempt's atomic transfer even if accounts are later closed, funded again, or recreated. It returns success even if optional balance reads fail or exhaust the deadline. Unavailable SOL and public balances are `None` and displayed as unknown; dry-run values are predictions. Without that proof, completion requires an empty or closed source and an authenticated destination; cleanup status can then be unknown. Empty System accounts at closed addresses do not undo reclaim detection. `attempt_signature` names the current attempt; `finalized_signature` is present only with verified success. `amount` describes the most recent prepared attempt. Concurrent completion can leave the amount actually transferred, this attempt's success and burned amount unknown; the CLI labels that amount as prepared (V65, V69).
+
+Errors preserve the recovery report. Unresolved submission includes the latest send error when available. An RPC rejection or transport failure does not establish whether an earlier send landed (V69).
 
 `--max-price` caps the priority price. `--timeout` starts after initial preparation and the first recovery checkpoint. It bounds RPC futures, HTTP retry waits, retry preparation waits and polling sleeps. No further sends start after the deadline; a submitted transaction can still finalize later (V65).
 

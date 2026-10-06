@@ -164,10 +164,14 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
         report.amount,
         report.destination
     );
-    println!(
-        "SOL remaining\t{} lamports at {}",
-        report.retained_lamports, report.payment_authority
-    );
+    match report.retained_lamports {
+        Some(lamports) => println!(
+            "SOL {}remaining\t{lamports} lamports at {}",
+            if report.dry_run { "predicted " } else { "" },
+            report.payment_authority
+        ),
+        None => println!("SOL remaining\tunknown at {}", report.payment_authority),
+    }
     if !report.dry_run {
         match &report.finalized_signature {
             Some(signature) => println!("finalized_signature\t{signature}"),
@@ -181,17 +185,17 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
             amount
         );
     }
-    if report.public_amount_remaining > 0 {
-        println!(
-            "public balance remaining\t{} base units",
-            report.public_amount_remaining
-        );
+    if let Some(amount) = report.public_amount_remaining.filter(|amount| *amount > 0) {
+        println!("public balance remaining\t{amount} base units");
+    } else if report.public_amount_remaining.is_none() {
+        println!("public balance remaining\tunknown");
     }
     let rent_status = match (report.reclaimed, report.dry_run) {
-        (true, true) => "reclaim simulated",
-        (true, false) => "reclaimed",
-        (false, true) => "reclaim unavailable; simulated sweep omits cleanup",
-        (false, false) => "not reclaimed; funds swept without cleanup",
+        (Some(true), true) => "reclaim simulated",
+        (Some(true), false) => "reclaimed",
+        (Some(false), true) => "reclaim unavailable; simulated sweep omits cleanup",
+        (Some(false), false) => "not reclaimed by this attempt; funds swept without cleanup",
+        (None, _) => "reclaim status unknown",
     };
     println!("rent {rent_status}");
     Ok(())
@@ -322,17 +326,19 @@ mod tests {
     #[test]
     fn recovery_output_must_be_flushed_before_submission() {
         let report = sweep::SweepReport {
+            genesis_hash: [42; 32],
             destination: Address::default(),
             destination_owner: Address::default(),
             payment_authority: Address::default(),
-            retained_lamports: 0,
+            retained_lamports: Some(0),
             ephemeral: [7; 32],
             amount: 1,
             burned_public_amount: Some(0),
-            public_amount_remaining: 0,
+            public_amount_remaining: Some(0),
             attempt_signature: "attempt".into(),
             finalized_signature: None,
-            reclaimed: false,
+            last_send_error: None,
+            reclaimed: Some(false),
             dry_run: false,
         };
         let mut output = RecoveryOutput::default();

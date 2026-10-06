@@ -663,19 +663,12 @@ impl<C: Chain> Engine<'_, C> {
     }
 
     fn price(&self) -> Result<u64, PayError> {
-        let prices = self.chain.recent_prices()?;
-        let price = if prices.is_empty() {
-            0
-        } else {
-            fees::percentile(&prices, 75)
-        };
-        if price > self.opts.max_price_per_cu {
-            return Err(PayError::FeeAboveCap {
-                price,
-                cap: self.opts.max_price_per_cu,
-            });
-        }
-        Ok(price)
+        fees::priority_price(self.chain.recent_prices()?, self.opts.max_price_per_cu).map_err(
+            |error| PayError::FeeAboveCap {
+                price: error.price,
+                cap: error.cap,
+            },
+        )
     }
 
     fn build(&self, row: usize) -> Result<Attempt, PayError> {
