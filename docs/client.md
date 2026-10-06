@@ -6,7 +6,7 @@ last_verified: 2026-10-06
 # Client
 
 TL;DR: one Rust CLI, `scope`, for both sides. The payer engine resends a signed transfer freely and rebuilds it only once the previous attempt is provably dead; the recipient scans by view tag and sweeps with plain Token-2022 instructions signed by the one-time key.
-Today `crates/client` holds address derivation, builders, the LiteSVM test kit, spike binaries, the payer engine for plain and stealth rows, and recipient scan and sweep. The CLI exposes `pay`, `register`, `scan` and `sweep`; receipts remain planned.
+Today `crates/client` holds address derivation, builders, the LiteSVM test kit, spike binaries, the payer engine for plain and stealth rows, and recipient scan and sweep. The CLI exposes `pay`, `register`, `scan`, `sweep`, `disclose` and `verify`.
 
 ## Payer engine
 
@@ -30,7 +30,7 @@ The library supplies `RecipientPublicKeys::to_meta_address()` and `from_meta_add
 
 `lamports_for_P` is `fees::sweep_funding`: D's rent, two signatures at 5,000 lamports, the priority fee at the sweep's 310,000-CU limit and a price cap of 1,000,000 micro-lamports per CU, and the rent reserve the sweep leaves in P. A fixed cap, not the sample, because the recipient may sweep weeks later; the cap is also the sweep's default `--max-price`. A P funded with exactly this sweeps at the cap, and one lamport less is refused as underfunded (verification: V71). P remains rent-exempt so incoming SOL cannot invalidate a fixed drain (verification: V23).
 
-**Proofs.** `crates/client/src/proofs.rs` builds the transfer proofs with the same builders, in the same order, as `transfer_split_proof_data` in `spl-token-confidential-transfer-proof-generation` 0.6.1, but takes the two amount openings from the run secret instead of drawing them, so the payer can later prove an amount (Audit). It uses the mint's auditor key when it has one. Proving is not the bottleneck: 16 ms for the range proof, about 0.2 s for a 50-recipient set (verification: V30).
+**Proofs.** `crates/client/src/proofs.rs` builds the transfer proofs with the same builders, in the same order, as `transfer_split_proof_data` in `spl-token-confidential-transfer-proof-generation` 0.6.1, but takes the two amount openings from the run secret instead of drawing them, so the payer can later prove an amount without storing anything (Audit). It uses the mint's auditor key when it has one. Proving is not the bottleneck: 16 ms for the range proof, about 0.2 s for a 50-recipient set (verification: V30).
 
 Rows are `recipient,amount`, amounts in token units; the recipient is an account address for a plain row or a `scope:` meta-address for a stealth row. The engine preflights each recipient's account (Token-2022, mint, not frozen, approved, confidential credits on, credit counter below the cap) and refuses non-transferable, transfer-fee and transfer-hook mints, all before anything is sent. Stealth rows add the setup, handover and `announce` in [design.md](design.md), and need a mint that approves new confidential accounts itself and does not freeze them, since `announce` does not check approval (verification: V69). `pay --status <run_id>` shows each stealth row as unpaid, open, swept or reclaimed, reading the journal without its lock; `--reclaim` calls `reclaim` for every swept row, which is how rent comes back when a sweep took its transfer-only fallback. Token-2022 refuses to close an account with any balance, so it cannot touch funds (verification: V4, V75).
 
@@ -46,9 +46,14 @@ Commands, backup formats, callback APIs, recovery and supported limits are docum
 
 Works unmodified on mints whose `auto_approve_new_accounts` is true. The client refuses other mints, non-transferable, transfer-fee and transfer-hook mints, and mints that freeze new accounts by default. PYUSD and USDG are Token-2022 with the extension but require their authority's ApproveAccount for every new confidential account; USDC is legacy SPL Token (verification: V14). The issuer path, documented and not built: the payer stays the owner until the issuer approves, then hands over and transfers in a second transaction [likely]. The issuer's side can be one change: point the mint's confidential-transfer authority at the PDA of a small policy program that approves every account, since ApproveAccount needs only that authority's signature (verification: V13).
 
-## Audit (planned)
+## Audit
 
-Disclosure receipt `{R, ct_ikm, payer transaction signature}`. `verify` re-derives the ElGamal and AES keys from `ct_ikm`, checks the ElGamal pubkey against the proof instructions in the referenced transaction, and decrypts the amount. It works after the accounts are closed, and needs an archival RPC and `maxSupportedTransactionVersion: 1` on `getTransaction` (verification: V22). A mint auditor key, where the issuer sets one, is the secondary path (verification: V12). Receipts for plain payments are open (Q15).
+A receipt names one finalized payment transaction and proves the amount it moved, against that transaction's inline ciphertext-validity proof, which Token-2022 verified when it landed. `scope verify <receipt>` needs an archival RPC with `maxSupportedTransactionVersion: 1` on `getTransaction` (verification: V22), checks the receipt's cluster against the node's genesis hash, and works after every account is closed. Two kinds, both in `crates/client/src/receipt.rs`:
+
+- **Payer receipt**, any row, plain or stealth: `{cluster, signature, amount, opening_lo, opening_hi}`. `scope disclose --run <id> --row <i>` re-derives the row's two Pedersen openings from the run secret, so nothing was stored; `verify` checks that they open the transfer's two amount commitments. It reveals that amount and nothing else (verification: V76).
+- **Recipient receipt**, stealth rows: `{cluster, signature, ct_ikm}`. `scope disclose --signature <payment>` with the recipient backup finds R and the tag in the payment's `announce` data, derives `ct_ikm`, and refuses unless its ElGamal key is the transfer's destination key, so a view-tag collision yields no receipt. `verify` derives the key, requires it to be the destination key, which a forged `ct_ikm` fails, and decrypts the amount. It grants read access to that one account (crypto.md) (verification: V77).
+
+A mint auditor key, where the issuer sets one, remains a second path (verification: V12).
 
 ## Testing
 

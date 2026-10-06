@@ -53,9 +53,9 @@ Raw-scalar signing follows RFC 8032 by hand in `crates/stealth-keygen/src/signin
 
 Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is not authenticated on chain, and the payer holds the same AE key. Pending balances decrypt from the ElGamal ciphertexts by table lookup on their 16-bit and 32-bit halves. The available balance is one 64-bit ciphertext that table lookup cannot decrypt, so the client reads the account's AE hint as a claimed value v and checks it: ElGamal decryption returns a `DiscreteLog` whose `target` is public, and `DiscreteLog.target == v·G` confirms v with one scalar multiplication. A mismatch rejects that payment; scan continues with other announcements (verification: V64). The client never uses the hint unchecked.
 
-## Disclosure receipt (planned)
+## Disclosure receipt
 
-`{R, ct_ikm, signature}`. The verifier re-derives the ElGamal and AES keys, checks the ElGamal pubkey against the proof instructions in the referenced transaction, and decrypts the amount. A forged `ct_ikm` fails the pubkey check, not a decryption. Disclosing `ct_ikm` hands over that account's full read access, including further credits or reuse of the same confidential keys. Fresh R per payment separates S and PRK. It reveals nothing about t, the tag, p, b_spend or other payments, given HKDF-Expand is a PRF [likely, pending review].
+`{cluster, signature, ct_ikm}` for a stealth payment. The verifier re-derives the ElGamal key from `ct_ikm`, requires it to be the destination key in the transaction's ciphertext-validity proof, and decrypts the amount. A forged `ct_ikm` fails the key check, not a decryption. Disclosing `ct_ikm` hands over that account's full read access, including further credits or reuse of the same confidential keys. Fresh R per payment separates S and PRK. It reveals nothing about t, the tag, p, b_spend or other payments, given HKDF-Expand is a PRF [likely, pending review]. The payer's receipt needs no `ct_ikm`: it discloses the two Pedersen openings of the amount, derived from the run secret, which reveal that amount only ([client.md](client.md), Audit).
 
 ## Known concerns
 

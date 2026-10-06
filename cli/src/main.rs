@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand};
 use scope_client::{
     chain::RpcChain,
     pay::{self, PayOptions, SourceKeys},
-    scan, sweep,
+    receipt, scan, sweep,
 };
 use solana_address::Address;
 use solana_keypair::read_keypair_file;
@@ -37,9 +37,9 @@ enum Command {
     /// Move a found payment into a fresh account of your own.
     Sweep(SweepArgs),
     /// Produce a receipt that proves one payment's amount.
-    Disclose,
+    Disclose(DiscloseArgs),
     /// Check a receipt against the chain.
-    Verify,
+    Verify(VerifyArgs),
     /// Measure bytes, compute and cost per transaction.
     Bench,
 }
@@ -204,6 +204,83 @@ fn write_recovery(output: &mut impl Write, report: &sweep::SweepReport) -> io::R
 }
 
 #[derive(Debug, Args)]
+struct DiscloseArgs {
+    /// As the payer: the run holding the payment, with --row.
+    #[arg(
+        long,
+        value_name = "RUN_ID",
+        requires = "row",
+        conflicts_with = "signature"
+    )]
+    run: Option<String>,
+    /// The row's position in the run's input file, from 0.
+    #[arg(long)]
+    row: Option<usize>,
+    /// Payer keypair, with --run.
+    #[arg(long, default_value = "~/.config/solana/id.json")]
+    keypair: String,
+    #[arg(long, default_value = "runs")]
+    runs: PathBuf,
+    /// As a stealth recipient: the payment transaction's signature.
+    #[arg(long, required_unless_present = "run")]
+    signature: Option<String>,
+    #[command(flatten)]
+    keys: RecipientKeys,
+    #[arg(long, default_value = "http://127.0.0.1:8899")]
+    url: String,
+}
+
+#[derive(Debug, Args)]
+struct VerifyArgs {
+    /// Receipt file from `scope disclose`.
+    receipt: PathBuf,
+    /// An RPC node that keeps transaction history.
+    #[arg(long, default_value = "http://127.0.0.1:8899")]
+    url: String,
+}
+
+fn run_disclose(args: DiscloseArgs) -> anyhow::Result<()> {
+    let chain = recipient_chain(args.url);
+    let receipt = match (args.run, args.signature) {
+        (Some(run_id), _) => {
+            let keypair_path = expand_home(&args.keypair)?;
+            let payer = read_keypair_file(&keypair_path)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", keypair_path.display()))?;
+            let opts = PayOptions {
+                runs_dir: args.runs,
+                max_price_per_cu: 0,
+                poll: Duration::from_secs(2),
+                again: false,
+                log: |line| eprintln!("{line}"),
+            };
+            pay::disclose(&chain, &payer, &run_id, args.row.context("--row")?, &opts)?
+        }
+        (None, Some(signature)) => {
+            let signature: solana_signature::Signature =
+                signature.parse().context("--signature")?;
+            receipt::disclose_as_recipient(&chain, &args.keys.load()?, &signature)?
+        }
+        (None, None) => bail!("--run or --signature"),
+    };
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
+    Ok(())
+}
+
+fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(&args.receipt)
+        .with_context(|| format!("reading {}", args.receipt.display()))?;
+    let receipt: receipt::Receipt = serde_json::from_str(&text).context("parsing the receipt")?;
+    let verified = receipt::verify(&recipient_chain(args.url), &receipt)?;
+    println!("verified\t{}", verified.signature);
+    println!("amount_base_units\t{}", verified.amount);
+    println!("payer\t{}", verified.payer);
+    println!("source\t{}", verified.source);
+    println!("destination\t{}", verified.destination);
+    println!("mint\t{}", verified.mint);
+    Ok(())
+}
+
+#[derive(Debug, Args)]
 struct PayArgs {
     /// `recipient,amount` rows; recipient is a configured confidential token account (plain row)
     /// or a `scope:` meta-address (stealth row).
@@ -320,6 +397,8 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Scan(args) => run_scan(args),
         Command::Sweep(args) => run_sweep(args),
+        Command::Disclose(args) => run_disclose(args),
+        Command::Verify(args) => run_verify(args),
         other => bail!("{other:?} is not implemented yet"),
     }
 }

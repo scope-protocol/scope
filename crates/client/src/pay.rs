@@ -899,6 +899,72 @@ pub fn reclaim<C: Chain>(
     status(chain, payer, run_id, opts)
 }
 
+/// The payer's receipt for one paid row: its amount and the two openings the run secret
+/// derives for it. Works for plain and stealth rows (docs/client.md, Audit).
+pub fn disclose<C: Chain>(
+    chain: &C,
+    payer: &Keypair,
+    run_id: &str,
+    row: usize,
+    opts: &PayOptions,
+) -> Result<crate::receipt::Receipt, PayError> {
+    let dir = opts.runs_dir.join(run_id);
+    let records = journal::read_unlocked(&dir)?;
+    let corrupt = |why: &str| {
+        PayError::Journal(JournalError::Corrupt {
+            path: dir.join(journal::JOURNAL),
+            line: 1,
+            why: why.into(),
+        })
+    };
+    let Some(Record::Run {
+        input_sha256,
+        mint,
+        payer: journal_payer,
+        ..
+    }) = records.first()
+    else {
+        return Err(corrupt("no run header"));
+    };
+    if *journal_payer != payer.pubkey().to_string() {
+        return Err(corrupt("run belongs to another payer"));
+    }
+    let signature = records
+        .iter()
+        .find_map(|r| match r {
+            Record::Landed {
+                row: landed,
+                signature,
+            } if *landed == row => Some(signature.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| PayError::Halted(format!("row {row} has not landed in run {run_id}")))?;
+    let mint: Address = mint.parse().map_err(|_| corrupt("bad mint"))?;
+    let input_bytes = std::fs::read(dir.join(INPUT_COPY))
+        .map_err(|e| JournalError::Io(dir.join(INPUT_COPY), e))?;
+    if hex(&solana_sha256_hasher::hash(&input_bytes).to_bytes()) != *input_sha256 {
+        return Err(corrupt("input copy does not match the run's hash"));
+    }
+    let info = mint_info(chain, &mint)?;
+    let text = std::str::from_utf8(&input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
+    let rows = input::parse(text, info.decimals)?;
+    let amount = rows
+        .get(row)
+        .ok_or_else(|| PayError::Halted(format!("run {run_id} has no row {row}")))?
+        .amount;
+    let openings = RunSecret::derive(payer, run_id)
+        .map_err(|e| PayError::Keys(e.to_string()))?
+        .openings(run_id, row);
+    Ok(crate::receipt::Receipt::Opening {
+        version: crate::receipt::RECEIPT_VERSION,
+        cluster: hex(&chain.genesis_hash()?),
+        signature,
+        amount,
+        opening_lo: hex(openings.lo.as_bytes()),
+        opening_hi: hex(openings.hi.as_bytes()),
+    })
+}
+
 impl<C: Chain> Engine<'_, C> {
     fn source_state(&self, commitment: Commitment) -> Result<SourceState, PayError> {
         source_state(

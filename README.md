@@ -23,7 +23,7 @@ One cargo workspace.
 | `crates/interface` | `scope-interface` | `no_std`, no dependencies: program id, announcement layout, instruction data, seeds, error codes, a read-only view of Token-2022 token accounts. Shared by the program and the client |
 | `crates/client` | `scope-client` | Address derivation, instruction and v1 transaction builders, payer engine and journal, recipient scan and sweep, RPC and LiteSVM (feature `litesvm`) backends, and spike binaries in `examples/`. Receipts remain planned |
 | `crates/stealth-keygen` | `stealth-keygen` | Recipient keys, HKDF stealth derivation, raw-scalar signing, and protected account-scoped `ct_ikm`. Off-chain |
-| `cli` | `scope-cli`, binary `scope` | Argument parsing and output over `crates/client`. Plain `pay`, recipient `register`, `scan` and `sweep` work; disclose, verify and bench remain stubs |
+| `cli` | `scope-cli`, binary `scope` | Argument parsing and output over `crates/client`. `pay` (plain and stealth rows), `register`, `scan`, `sweep`, `disclose` and `verify` work; `bench` remains a stub |
 | `docs/` | | Brief, design, client, crypto, privacy, plan, decisions, verification. Start at [docs/README.md](docs/README.md) |
 
 The program and the client depend on `crates/interface`, which depends on nothing. `crates/stealth-keygen` derives stealth keys and account-scoped `ct_ikm`. `scope-client::confidential` converts that material into ElGamal and symmetric keys with the workspace ZK SDK. Q14 implementation is complete; external derivation review remains Q1. Payer-engine stealth rows and receipts remain planned.

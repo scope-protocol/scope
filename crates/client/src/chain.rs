@@ -9,7 +9,8 @@ use solana_rpc_client::{
     api::{
         config::{
             RpcAccountInfoConfig, RpcBlockConfig, RpcProgramAccountsConfig,
-            RpcSendTransactionConfig, RpcSimulateTransactionConfig, UiAccountEncoding,
+            RpcSendTransactionConfig, RpcSimulateTransactionConfig, RpcTransactionConfig,
+            UiAccountEncoding,
         },
         filter::{Memcmp, RpcFilterType},
     },
@@ -289,6 +290,40 @@ impl RecipientChain for RpcChain {
             }
         }
         self.call(self.rpc().get_fee_for_message(&WireMessage(message)))
+    }
+}
+
+impl crate::receipt::TransactionArchive for RpcChain {
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        Chain::genesis_hash(self)
+    }
+
+    /// Finalized only; v1 transactions need `maxSupportedTransactionVersion: 1` (V22).
+    fn transaction(
+        &self,
+        signature: &Signature,
+    ) -> Result<crate::receipt::ArchivedTransaction, ChainError> {
+        let found = self.call(self.rpc().get_transaction_with_config(
+            signature,
+            RpcTransactionConfig {
+                encoding: Some(UiTransactionEncoding::Base64),
+                commitment: Some(CommitmentConfig::finalized()),
+                max_supported_transaction_version: Some(1),
+            },
+        ))?;
+        let transaction = found
+            .transaction
+            .transaction
+            .decode()
+            .ok_or_else(|| ChainError(format!("{signature}: transaction does not decode")))?;
+        let succeeded = found
+            .transaction
+            .meta
+            .is_some_and(|meta| meta.err.is_none());
+        Ok(crate::receipt::ArchivedTransaction {
+            transaction,
+            succeeded,
+        })
     }
 }
 

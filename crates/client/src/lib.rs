@@ -12,6 +12,7 @@ pub mod ix;
 pub mod journal;
 pub mod pay;
 pub mod proofs;
+pub mod receipt;
 pub mod run_secret;
 pub mod scan;
 pub mod signer;

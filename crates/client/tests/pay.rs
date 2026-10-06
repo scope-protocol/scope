@@ -523,6 +523,7 @@ fn a_concurrent_start_is_refused() {
     ));
 }
 
+/// Test recipients differ in their spend key and share one scan key.
 fn stealth_recipient(spend: u8) -> RecipientSecretKeys {
     let mut bytes = [2; 64];
     bytes[..32].fill(0);
@@ -987,4 +988,197 @@ fn status_reports_a_row_killed_before_its_send_as_unpaid() {
     let run_id = only_run(&o);
     let rows = pay::status(&SvmChain::new(&mut h.svm), &h.payer, &run_id, &o).expect("status");
     assert_eq!(rows[0].state, pay::StealthState::Unpaid);
+}
+
+/// The run's signed transactions from its journal, with LiteSVM's record of which landed.
+struct JournalArchive(
+    std::collections::HashMap<solana_signature::Signature, (VersionedTransaction, bool)>,
+);
+
+impl JournalArchive {
+    fn new(h: &Harness, o: &PayOptions, run_id: &str) -> Self {
+        let mut map = std::collections::HashMap::new();
+        for record in journal(o, run_id) {
+            if let Record::Attempt { tx, .. } = record {
+                let bytes = scope_client::journal::unhex(&tx).expect("hex");
+                let tx: VersionedTransaction = wincode::deserialize(&bytes).expect("tx");
+                let landed = matches!(h.svm.get_transaction(&tx.signatures[0]), Some(Ok(_)));
+                map.insert(tx.signatures[0], (tx, landed));
+            }
+        }
+        Self(map)
+    }
+}
+
+impl scope_client::receipt::TransactionArchive for JournalArchive {
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        Ok([42; 32])
+    }
+    fn transaction(
+        &self,
+        signature: &solana_signature::Signature,
+    ) -> Result<scope_client::receipt::ArchivedTransaction, ChainError> {
+        let (transaction, succeeded) = self
+            .0
+            .get(signature)
+            .cloned()
+            .ok_or_else(|| ChainError("not found".into()))?;
+        Ok(scope_client::receipt::ArchivedTransaction {
+            transaction,
+            succeeded,
+        })
+    }
+}
+
+/// A mixed run's plain and stealth rows, their recipients, and the archive of its transactions.
+fn paid_run(
+    name: &str,
+) -> (
+    Harness,
+    PayOptions,
+    String,
+    Vec<Recipient>,
+    RecipientSecretKeys,
+) {
+    let mut h = Harness::new();
+    let plain = recipients(&mut h, 1);
+    let alice = stealth_recipient(11);
+    let o = opts(name);
+    let input = format!(
+        "{},1.25\n{},3.5\n",
+        plain[0].account,
+        alice.derive_public_keys().to_meta_address()
+    );
+    let run_id = start(&mut h, &input, &o).expect("pay").run_id;
+    (h, o, run_id, plain, alice)
+}
+
+#[test]
+fn payer_receipts_prove_plain_and_stealth_amounts() {
+    use scope_client::receipt::{self, Receipt, ReceiptError};
+    let (mut h, o, run_id, plain, alice) = paid_run("receipt-payer");
+    let archive = JournalArchive::new(&h, &o, &run_id);
+    let disclose = |h: &mut Harness, row| {
+        pay::disclose(&SvmChain::new(&mut h.svm), &h.payer, &run_id, row, &o).expect("disclose")
+    };
+
+    let plain_receipt = disclose(&mut h, 0);
+    let verified = receipt::verify(&archive, &plain_receipt).expect("plain receipt");
+    assert_eq!(verified.amount, 1_250_000);
+    assert_eq!(verified.destination, plain[0].account);
+    assert_eq!(verified.payer, h.payer.pubkey());
+
+    let stealth_receipt = disclose(&mut h, 1);
+    let verified = receipt::verify(&archive, &stealth_receipt).expect("stealth receipt");
+    assert_eq!(verified.amount, 3_500_000);
+    assert_eq!(verified.destination, found(&mut h, &alice)[0].0);
+
+    let Receipt::Opening { amount, .. } = &stealth_receipt else {
+        panic!("payer receipts carry openings");
+    };
+    let mut inflated = stealth_receipt.clone();
+    if let Receipt::Opening { amount: a, .. } = &mut inflated {
+        *a = amount + 1;
+    }
+    assert!(matches!(
+        receipt::verify(&archive, &inflated),
+        Err(ReceiptError::Opening)
+    ));
+    let mut elsewhere = stealth_receipt.clone();
+    if let Receipt::Opening { cluster, .. } = &mut elsewhere {
+        *cluster = "00".repeat(32);
+    }
+    assert!(matches!(
+        receipt::verify(&archive, &elsewhere),
+        Err(ReceiptError::Cluster)
+    ));
+}
+
+#[test]
+fn recipient_receipts_prove_a_stealth_amount_and_reject_forged_keys() {
+    use scope_client::receipt::{self, Receipt, ReceiptError};
+    let (mut h, o, run_id, _, alice) = paid_run("receipt-recipient");
+    let archive = JournalArchive::new(&h, &o, &run_id);
+    let signature: solana_signature::Signature = journal(&o, &run_id)
+        .iter()
+        .find_map(|r| match r {
+            Record::Landed { row: 1, signature } => Some(signature.parse().expect("sig")),
+            _ => None,
+        })
+        .expect("stealth row landed");
+
+    let mine = receipt::disclose_as_recipient(&archive, &alice, &signature).expect("disclose");
+    let verified = receipt::verify(&archive, &mine).expect("recipient receipt");
+    assert_eq!(verified.amount, 3_500_000);
+    assert_eq!(verified.destination, found(&mut h, &alice)[0].0);
+
+    let mut forged = mine.clone();
+    if let Receipt::AccountKey { ct_ikm, .. } = &mut forged {
+        *ct_ikm = "11".repeat(32);
+    }
+    assert!(matches!(
+        receipt::verify(&archive, &forged),
+        Err(ReceiptError::Key)
+    ));
+    let stranger_keys = RecipientSecretKeys::from_bytes([5; 64]).expect("other scan key");
+    let stranger = receipt::disclose_as_recipient(&archive, &stranger_keys, &signature);
+    assert!(
+        matches!(stranger, Err(ReceiptError::NotOurs)),
+        "{stranger:?}"
+    );
+
+    // About 1 in 256 strangers matches the 1-byte view tag; the derived key still refuses them.
+    let address = found_announcement(&mut h, &alice);
+    let announcement = h.svm.get_account(&address).expect("announcement");
+    let note = stealth_keygen::PaymentAnnouncement {
+        ephemeral_public_key: announcement.data[4..36].try_into().expect("R"),
+        discovery_tag: announcement.data[2],
+    };
+    let mut collisions = 0;
+    for n in 0..2_000_u32 {
+        let mut bytes = [3; 64];
+        bytes[32..36].copy_from_slice(&n.to_le_bytes());
+        let stranger = RecipientSecretKeys::from_bytes(bytes).expect("stranger");
+        if matches!(
+            stealth_keygen::recover_payment(&stranger, &note),
+            Ok(Some(_))
+        ) {
+            collisions += 1;
+        }
+        assert!(matches!(
+            receipt::disclose_as_recipient(&archive, &stranger, &signature),
+            Err(ReceiptError::NotOurs)
+        ));
+    }
+    assert!(collisions > 0, "the tag-collision path ran");
+}
+
+#[test]
+fn receipts_still_verify_after_the_sweep_closes_every_account() {
+    use scope_client::{
+        receipt,
+        sweep::{self, SweepOptions},
+    };
+    let (mut h, o, run_id, _, alice) = paid_run("receipt-after-sweep");
+    let announcement = found_announcement(&mut h, &alice);
+    sweep::sweep(
+        &mut SvmChain::new(&mut h.svm),
+        &alice,
+        &announcement,
+        &SweepOptions {
+            poll: Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect("sweep and reclaim");
+    assert!(found(&mut h, &alice).is_empty(), "nothing left to scan");
+    let payer_receipt =
+        pay::disclose(&SvmChain::new(&mut h.svm), &h.payer, &run_id, 1, &o).expect("disclose");
+    let archive = JournalArchive::new(&h, &o, &run_id);
+    assert_eq!(
+        receipt::verify(&archive, &payer_receipt)
+            .expect("verify")
+            .amount,
+        3_500_000
+    );
 }
