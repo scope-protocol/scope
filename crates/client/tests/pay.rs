@@ -772,3 +772,59 @@ fn refuses_stealth_rows_on_a_mint_that_does_not_auto_approve() {
         "got {result:?}"
     );
 }
+
+#[test]
+fn a_paid_stealth_row_sweeps_to_the_recipient_and_returns_both_rents_to_the_payer() {
+    use scope_client::sweep::{self, SweepOptions};
+    use solana_zk_sdk::encryption::derivation::derive_confidential_keys;
+    let mut h = Harness::new();
+    let alice = stealth_recipient(7);
+    let o = opts("end-to-end");
+    let input = format!("{},2.5\n", alice.derive_public_keys().to_meta_address());
+    start(&mut h, &input, &o).expect("pay");
+
+    let found = scan::scan(&SvmChain::new(&mut h.svm), &alice, None).expect("scan");
+    let payment = &found.payments[0];
+    let lamports = |h: &Harness, a: &Address| h.svm.get_account(a).map_or(0, |a| a.lamports);
+    let rents = lamports(&h, &payment.token_account) + lamports(&h, &payment.announcement);
+    let payer_before = lamports(&h, &h.payer.pubkey());
+
+    let report = sweep::sweep(
+        &mut SvmChain::new(&mut h.svm),
+        &alice,
+        &payment.announcement,
+        &SweepOptions {
+            poll: Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect("sweep");
+    assert!(report.reclaimed);
+    assert!(report.finalized_signature.is_some());
+    assert_eq!(
+        lamports(&h, &h.payer.pubkey()),
+        payer_before + rents,
+        "the payer gets back the rent of both accounts"
+    );
+
+    let seed = alice
+        .derive_sweep_destination(&payment.ephemeral)
+        .expect("destination seed");
+    let owner = Keypair::new_from_array(*seed.as_bytes());
+    assert_eq!(owner.pubkey(), report.destination_owner);
+    let (keys, _) = derive_confidential_keys(&owner, b"").expect("wallet keys");
+    let account = h.svm.get_account(&report.destination).expect("D");
+    let state = StateWithExtensions::<Account>::unpack(&account.data).expect("unpack");
+    let ext = state
+        .get_extension::<ConfidentialTransferAccount>()
+        .expect("ct");
+    let lo: ElGamalCiphertext = ext.pending_balance_lo.try_into().expect("lo");
+    let hi: ElGamalCiphertext = ext.pending_balance_hi.try_into().expect("hi");
+    let lo = keys.secret().decrypt_u32(&lo).expect("lo");
+    let hi = keys.secret().decrypt_u32(&hi).expect("hi");
+    assert_eq!(
+        lo + (hi << 16),
+        2_500_000,
+        "D holds the amount, under the owner's wallet keys"
+    );
+}
