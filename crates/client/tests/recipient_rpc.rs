@@ -130,6 +130,8 @@ fn scan_authenticates_payments_over_rpc_among_one_thousand_announcements() {
                 }
                 Err(error) => panic!("accept: {error}"),
             };
+            // On macOS an accepted socket inherits the listener's O_NONBLOCK; Linux's does not.
+            stream.set_nonblocking(false).expect("blocking");
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("timeout");

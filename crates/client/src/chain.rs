@@ -384,9 +384,13 @@ mod tests {
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .expect("read timeout");
                 let mut request = [0; 4096];
-                assert!(stream.read(&mut request).expect("request") > 0);
+                // Under load the client's deadline can fire before it writes; that is the
+                // behavior under test, so there is nothing left to serve.
+                if stream.read(&mut request).unwrap_or(0) == 0 {
+                    return;
+                }
                 if rate_limited {
-                    stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("rate limit");
+                    let _ = stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                 } else {
                     std::thread::sleep(Duration::from_millis(500));
                 }
