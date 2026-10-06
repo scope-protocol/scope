@@ -337,6 +337,8 @@ pub struct SvmChain<'a> {
     pub sent_signatures: Vec<solana_signature::Signature>,
     pub failed_status_lag: Cell<usize>,
     pub height_delay: std::time::Duration,
+    /// What `recent_prices` returns; empty by default, as on an idle cluster.
+    pub prices: Vec<u64>,
     sent: bool,
 }
 
@@ -361,6 +363,7 @@ impl<'a> SvmChain<'a> {
             sent_signatures: Vec::new(),
             failed_status_lag: Cell::new(0),
             height_delay: std::time::Duration::ZERO,
+            prices: Vec::new(),
             sent: false,
         }
     }
@@ -449,7 +452,7 @@ impl Chain for SvmChain<'_> {
     }
 
     fn recent_prices(&self) -> Result<Vec<u64>, ChainError> {
-        Ok(Vec::new())
+        Ok(self.prices.clone())
     }
 }
 
@@ -503,7 +506,7 @@ impl RecipientChain for SvmChain<'_> {
             solana_message::VersionedMessage::V1(m) => m.config.priority_fee.unwrap_or(0),
             _ => 0,
         };
-        (u64::from(message.header().num_required_signatures) * 5_000)
+        (u64::from(message.header().num_required_signatures) * crate::fees::LAMPORTS_PER_SIGNATURE)
             .checked_add(priority)
             .ok_or_else(|| ChainError("fee overflow".into()))
     }

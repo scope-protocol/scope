@@ -91,7 +91,8 @@ struct SweepArgs {
     announcement: Address,
     #[arg(long, default_value = "http://127.0.0.1:8899")]
     url: String,
-    #[arg(long, default_value_t = 1_000_000)]
+    /// Highest priority price paid, micro-lamports per CU; the payer funds P for this cap.
+    #[arg(long, default_value_t = scope_client::fees::SWEEP_PRICE_CAP)]
     max_price: u64,
     /// Maximum wait for finalization, in seconds.
     #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]

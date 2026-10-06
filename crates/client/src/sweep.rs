@@ -55,7 +55,7 @@ pub struct SweepOptions {
 impl Default for SweepOptions {
     fn default() -> Self {
         Self {
-            max_price_per_cu: 1_000_000,
+            max_price_per_cu: fees::SWEEP_PRICE_CAP,
             poll: Duration::from_secs(2),
             timeout: Duration::from_secs(120),
             dry_run: false,

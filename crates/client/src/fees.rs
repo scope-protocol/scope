@@ -65,6 +65,23 @@ pub fn priority_fee_lamports(price_per_cu: u64, compute_unit_limit: u32) -> u64 
     (u128::from(price_per_cu) * u128::from(compute_unit_limit)).div_ceil(1_000_000) as u64
 }
 
+/// Agave's default base fee per signature (solana-fee-structure 4.1.0, `src/lib.rs` 125).
+pub const LAMPORTS_PER_SIGNATURE: u64 = 5_000;
+
+/// The highest per-CU price, in micro-lamports, a payer funds P's sweep for, and the
+/// sweep's default `--max-price`. The recipient may sweep weeks after the payment.
+pub const SWEEP_PRICE_CAP: u64 = 1_000_000;
+
+/// Lamports P needs to sweep at any price up to `price_cap`: D's rent, two signatures,
+/// the priority fee at the sweep's compute-unit limit, and the rent reserve the sweep
+/// leaves in P. The payer funds P with exactly this.
+pub fn sweep_funding(destination_rent: u64, reserve: u64, price_cap: u64) -> u64 {
+    destination_rent
+        + 2 * LAMPORTS_PER_SIGNATURE
+        + priority_fee_lamports(price_cap, crate::tx::SWEEP_CU_LIMIT)
+        + reserve
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1730,3 +1730,47 @@ fn full_recipient_transaction_fits_the_v1_wire_and_compute_budgets() {
         simulation.meta.compute_units_consumed
     );
 }
+
+#[test]
+fn a_payment_authority_funded_by_the_payer_rule_sweeps_at_the_price_cap() {
+    use scope_client::{
+        fees::{self, SWEEP_PRICE_CAP},
+        sweep::{self, SweepError, SweepOptions},
+    };
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, _, _) = fund(&mut h, &alice, 3);
+    let opts = SweepOptions {
+        poll: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let authority = sweep::prepare(&SvmChain::new(&mut h.svm), &alice, &announcement, &opts)
+        .expect("prepare")
+        .report()
+        .payment_authority;
+    let space = ExtensionType::try_calculate_account_len::<Account>(&[
+        ExtensionType::ConfidentialTransferAccount,
+    ])
+    .expect("space");
+    let funding = fees::sweep_funding(
+        h.svm.minimum_balance_for_rent_exemption(space),
+        h.svm.minimum_balance_for_rent_exemption(0),
+        SWEEP_PRICE_CAP,
+    );
+
+    set_funding(&mut h, authority, funding - 1);
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.prices = vec![SWEEP_PRICE_CAP];
+    let error = sweep::prepare(&chain, &alice, &announcement, &opts).expect_err("one short");
+    assert!(
+        matches!(error, SweepError::Underfunded { short: 1, .. }),
+        "{error}"
+    );
+
+    set_funding(&mut h, authority, funding);
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.prices = vec![SWEEP_PRICE_CAP];
+    let report = sweep::sweep(&mut chain, &alice, &announcement, &opts)
+        .expect("a P funded by the rule sweeps at the cap");
+    assert!(report.reclaimed);
+}
