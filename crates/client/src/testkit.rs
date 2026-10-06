@@ -2,7 +2,7 @@
 
 use crate::{
     address::*,
-    chain::{AccountData, Chain, ChainError, Commitment},
+    chain::{AccountData, Chain, ChainError, Commitment, FinalizedStatus, RecipientChain},
     ix::*,
     tx::v1_transaction,
 };
@@ -100,6 +100,14 @@ impl Harness {
     }
 
     pub fn with_auditor(auditor: Option<&ElGamalPubkey>) -> Self {
+        Self::with_mint_policy(auditor, false)
+    }
+
+    pub fn with_permissioned_burn() -> Self {
+        Self::with_mint_policy(None, true)
+    }
+
+    fn with_mint_policy(auditor: Option<&ElGamalPubkey>, permissioned_burn: bool) -> Self {
         let mut svm = LiteSVM::new();
         svm.add_program_from_file(program_id(), program_elf())
             .expect("load program");
@@ -116,7 +124,7 @@ impl Harness {
             source_ae: AeKey::new_rand(),
             source_balance: 0,
         };
-        h.create_mint(auditor);
+        h.create_mint(auditor, permissioned_burn);
         h.create_funded_source();
         h
     }
@@ -130,14 +138,15 @@ impl Harness {
         result
     }
 
-    fn create_mint(&mut self, auditor: Option<&ElGamalPubkey>) {
+    fn create_mint(&mut self, auditor: Option<&ElGamalPubkey>, permissioned_burn: bool) {
         let mint = Keypair::new();
         let t22 = token_2022();
-        let space = ExtensionType::try_calculate_account_len::<Mint>(&[
-            ExtensionType::ConfidentialTransferMint,
-        ])
-        .expect("len");
-        let ixs = [
+        let mut types = vec![ExtensionType::ConfidentialTransferMint];
+        if permissioned_burn {
+            types.push(ExtensionType::PermissionedBurn);
+        }
+        let space = ExtensionType::try_calculate_account_len::<Mint>(&types).expect("len");
+        let mut ixs = vec![
             solana_system_interface::instruction::create_account(
                 &self.payer.pubkey(),
                 &mint.pubkey(),
@@ -162,6 +171,17 @@ impl Harness {
             )
             .expect("mint"),
         ];
+        if permissioned_burn {
+            ixs.insert(
+                1,
+                spl_token_2022_interface::extension::permissioned_burn::instruction::initialize(
+                    &t22,
+                    &mint.pubkey(),
+                    &self.mint_authority.pubkey(),
+                )
+                .expect("permissioned burn"),
+            );
+        }
         self.send(&ixs, &[&mint]).expect("create mint");
         self.mint = mint.pubkey();
     }
@@ -296,13 +316,34 @@ impl Default for Harness {
     }
 }
 
+pub type SendHook = Box<dyn FnMut(&mut LiteSVM, &VersionedTransaction)>;
+
 /// [`Chain`] over LiteSVM. Every call to `finalized_block_height` advances the
 /// height by `HEIGHT_STEP`, so a dropped transaction expires after a few polls.
 pub struct SvmChain<'a> {
     pub svm: &'a mut LiteSVM,
     height: Cell<u64>,
+    pub account_reads: Cell<usize>,
     /// Sends to swallow before executing any, to model lost transactions.
     pub drop_sends: usize,
+    /// Model a source that has not appeared in finalized reads yet.
+    pub finalized_missing_until_send: Option<Address>,
+    pub fail_finalized_after_send: bool,
+    pub fail_status_after_send: bool,
+    pub finalized_read_delay: std::time::Duration,
+    pub unavailable_finalized_account: Option<Address>,
+    pub send_error: Option<String>,
+    pub price_samples: Vec<Vec<u64>>,
+    pub price_reads: Cell<usize>,
+    pub lag_finalized_reads: bool,
+    pub lag_finalized_status: bool,
+    pub before_send: Option<VersionedTransaction>,
+    pub before_send_hook: Option<SendHook>,
+    pub after_send: Option<VersionedTransaction>,
+    pub sent_signatures: Vec<solana_signature::Signature>,
+    pub failed_status_lag: Cell<usize>,
+    pub height_delay: std::time::Duration,
+    sent: bool,
 }
 
 const HEIGHT_STEP: u64 = 40;
@@ -314,13 +355,55 @@ impl<'a> SvmChain<'a> {
         Self {
             svm,
             height: Cell::new(0),
+            account_reads: Cell::new(0),
             drop_sends: 0,
+            finalized_missing_until_send: None,
+            fail_finalized_after_send: false,
+            fail_status_after_send: false,
+            finalized_read_delay: std::time::Duration::ZERO,
+            unavailable_finalized_account: None,
+            send_error: None,
+            price_samples: Vec::new(),
+            price_reads: Cell::new(0),
+            lag_finalized_reads: false,
+            lag_finalized_status: false,
+            before_send: None,
+            before_send_hook: None,
+            after_send: None,
+            sent_signatures: Vec::new(),
+            failed_status_lag: Cell::new(0),
+            height_delay: std::time::Duration::ZERO,
+            sent: false,
         }
     }
 }
 
 impl Chain for SvmChain<'_> {
-    fn account(&self, address: &Address, _: Commitment) -> Result<Option<AccountData>, ChainError> {
+    fn account(
+        &self,
+        address: &Address,
+        commitment: Commitment,
+    ) -> Result<Option<AccountData>, ChainError> {
+        self.account_reads.set(self.account_reads.get() + 1);
+        if commitment == Commitment::Finalized {
+            if self.unavailable_finalized_account == Some(*address) {
+                return Err(ChainError("RPC account read unavailable".into()));
+            }
+            if self.sent {
+                std::thread::sleep(self.finalized_read_delay);
+            }
+            if self.fail_finalized_after_send && self.sent {
+                return Err(ChainError("RPC disconnected after send".into()));
+            }
+            if self.lag_finalized_reads {
+                return Ok(None);
+            }
+        }
+        if commitment == Commitment::Finalized
+            && self.finalized_missing_until_send == Some(*address)
+        {
+            return Ok(None);
+        }
         Ok(self
             .svm
             .get_account(address)
@@ -340,6 +423,7 @@ impl Chain for SvmChain<'_> {
     }
 
     fn finalized_block_height(&self) -> Result<u64, ChainError> {
+        std::thread::sleep(self.height_delay);
         self.height.set(self.height.get() + HEIGHT_STEP);
         Ok(self.height.get())
     }
@@ -353,11 +437,32 @@ impl Chain for SvmChain<'_> {
     }
 
     fn send(&mut self, tx: &VersionedTransaction) -> Result<(), ChainError> {
+        self.sent_signatures.push(tx.signatures[0]);
+        if let Some(error) = &self.send_error {
+            return Err(ChainError(error.clone()));
+        }
         if self.drop_sends > 0 {
             self.drop_sends -= 1;
             return Ok(());
         }
+        if let Some(before) = self.before_send.take() {
+            self.svm
+                .send_transaction(before)
+                .map_err(|failed| ChainError(format!("{:?}", failed.err)))?;
+        }
+        if let Some(hook) = &mut self.before_send_hook {
+            hook(self.svm, tx);
+        }
         let result = self.svm.send_transaction(tx.clone());
+        if result.is_ok() {
+            self.finalized_missing_until_send = None;
+            self.sent = true;
+            if let Some(after) = self.after_send.take() {
+                self.svm
+                    .send_transaction(after)
+                    .map_err(|failed| ChainError(format!("{:?}", failed.err)))?;
+            }
+        }
         self.svm.expire_blockhash();
         result
             .map(|_| ())
@@ -365,7 +470,73 @@ impl Chain for SvmChain<'_> {
     }
 
     fn recent_prices(&self) -> Result<Vec<u64>, ChainError> {
-        Ok(Vec::new())
+        let reads = self.price_reads.get();
+        self.price_reads.set(reads + 1);
+        Ok(self
+            .price_samples
+            .get(reads)
+            .or_else(|| self.price_samples.last())
+            .cloned()
+            .unwrap_or_default())
+    }
+}
+
+impl RecipientChain for SvmChain<'_> {
+    fn set_deadline(&mut self, _deadline: Option<std::time::Instant>) {}
+
+    fn finalized_status(
+        &self,
+        signature: &solana_signature::Signature,
+    ) -> Result<FinalizedStatus, ChainError> {
+        if self.fail_status_after_send && self.sent {
+            return Err(ChainError("RPC disconnected after send".into()));
+        }
+        Ok(if self.lag_finalized_status {
+            FinalizedStatus::Unknown
+        } else {
+            match self.svm.get_transaction(signature) {
+                Some(Ok(_)) => FinalizedStatus::Succeeded,
+                Some(Err(_)) if self.failed_status_lag.get() > 0 => {
+                    self.failed_status_lag.set(self.failed_status_lag.get() - 1);
+                    FinalizedStatus::Unknown
+                }
+                Some(Err(_)) => FinalizedStatus::Failed,
+                None => FinalizedStatus::Unknown,
+            }
+        })
+    }
+
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        Ok([42; 32])
+    }
+    fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        Ok(self
+            .svm
+            .get_program_accounts(&program_id())
+            .into_iter()
+            .map(|(address, a)| {
+                (
+                    address,
+                    AccountData {
+                        owner: a.owner,
+                        lamports: a.lamports,
+                        data: a.data,
+                    },
+                )
+            })
+            .collect())
+    }
+    fn rent(&self, space: usize) -> Result<u64, ChainError> {
+        Ok(self.svm.minimum_balance_for_rent_exemption(space))
+    }
+    fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError> {
+        let priority = match message {
+            solana_message::VersionedMessage::V1(m) => m.config.priority_fee.unwrap_or(0),
+            _ => 0,
+        };
+        (u64::from(message.header().num_required_signatures) * 5_000)
+            .checked_add(priority)
+            .ok_or_else(|| ChainError("fee overflow".into()))
     }
 }
 

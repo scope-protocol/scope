@@ -1,12 +1,62 @@
 ---
 status: decided
-last_verified: 2026-10-04
+last_verified: 2026-10-06
 ---
 
 # Decisions
 
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
+
+## 2026-10-06 Recipient outcomes and retry pricing
+
+- **Completion survives metadata failures.** A successful finalized signature is authoritative. Later balance reads are optional and share the remaining deadline; absent observations remain explicit `None` values. Account-state completion similarly survives optional reporting failures. Rejected: returning `Pending` after observing completion or presenting a predicted balance as a measured one.
+
+- **New attempts get current prices.** Preparation and safe rebuilds share the payer's p75-plus-cap policy. Identical resends retain the same fee and signature. Unresolved submission retains its latest send error without treating it as proof of failure. Rejected: reusing stale prices on new attempts or aborting solely on a transport error.
+
+- **Recovery is durable and the destination is usable.** Every non-dry-run attempt is synchronized to a private, locked recovery journal before stdout and broadcast. Public R and the backup can export D_owner as a standard private keypair file; its wallet keys can apply and spend D's pending balance. New directory entries are synchronized, and incomplete journal tails are repaired under the lock. Historical transaction discovery remains Q17. Rejected: relying on terminal output alone, exporting secrets to stdout, overwriting key files, or changing the derivations.
+
+## 2026-10-05 Recipient state refresh and discovery
+
+- **Two safe retries refresh the full snapshot.** An applied source can accept a further credit, and a mint auditor can change. Each rebuild refreshes source balances, mint policy, proofs, funding and rent; two retries cover cleanup followed by one additional credit. Work remains bounded by the deadline and funding floor. Rejected: treating the pending-credit cap as a lifetime limit or reusing stale proofs.
+
+- **Proof preparation cannot authorize a late send.** Retry decoding and proving run on a worker with no chain access; the caller stops waiting at its deadline. A successful finalized signature remains an immutable outcome proof even when the payer recreates accounts. Rejected: inferring failure from later account state.
+
+- **Discovery streams validated results.** Scan exposes a fallible per-result callback and the CLI flushes rows immediately. RPC fetches only the announcement layout, and malformed binary transport data returns an error. Public all-zero ciphertexts skip unnecessary decoding. Rejected: withholding every result until the final scan or adding a new cryptographic decoding algorithm.
+
+## 2026-10-05 Recipient sweep reliability
+
+- **Destination creation tolerates concurrent prefunding.** Every build reads the current rent deficit and uses transfer, allocation and assignment with D_owner as the signing base. Rejected: a creation instruction or cached rent requirement invalidated by an incoming SOL transfer.
+
+- **Recovery checkpoints precede every new attempt.** The CLI flushes each changed signature through a fallible callback; an output failure stops that attempt. Closed addresses funded again are classified by owner and data, so System placeholders do not undo completion or reclaim reporting.
+
+- **Submission has one shared deadline.** RPC futures, including HTTP retries, and polling sleeps share the submission deadline; preparation precedes it. Rejected: checking elapsed time only between blocking calls or sending after a slow height query overruns the limit.
+
+- **A safe retry omits cleanup.** State can change after simulation. One fresh transfer-only attempt is permitted after a finalized failure or blockhash expiry, with updated funding and simulation. Signing material remains protected in memory and is excluded from debug output. Rejected: rebuilding while the earlier attempt may still land or resending stale cleanup indefinitely.
+
+- **Swept sources reject further confidential credits.** Sweep disables credits atomically with applying and emptying balances, including when cleanup is omitted. Rejected: relying on a credit counter that apply resets.
+
+- **Backup filenames are synchronized.** Registration syncs both the file and its parent directory, using the current directory for a bare filename. Rejected: treating an empty parent path as a reason to skip directory synchronization.
+
+- **Cleanup is optional and signatures are explicit.** The fallback omits both public dust burning and reclaim, including for permissioned-burn mints. It reports the public balance left behind. Completion from account state does not prove a specific transaction landed; the report separates the attempt signature from its verified finalized signature. Rejected: letting cleanup prevent a valid confidential transfer or reporting an unexecuted signature as successful.
+
+- **P retains a rent reserve.** Sweep quotes fees, destination rent and P's reserve exactly. Incoming SOL cannot turn a zero drain into a rent-paying balance. Small surplus stays in P unless D_owner can receive it without becoming rent-paying. The recipient retains control of this SOL. Rejected: draining P to an exact zero based on a stale balance snapshot.
+
+- **Recovery precedes broadcast.** Preparation and submission are separate APIs. The CLI flushes public recovery details before submission, and timeout or status errors retain the report. Rejected: returning recovery details only after successful finalization.
+
+## 2026-10-05 Scan error isolation
+
+- **Invalid payments do not abort discovery.** Scan returns valid payments and skipped validation errors; the CLI reports skipped accounts on stderr. A sender can announce a matching payment authority with an unrelated ElGamal key using only public recipient keys. Rejected: aborting every payment's discovery on that entry or silently hiding its validation error. Chain errors remain fatal and sweep still rejects invalid payments. Evidence: V64.
+
+## 2026-10-04 Recipient client integration
+
+- **CLI backup files have explicit protection.** Register creates an owner-only 64-byte raw backup, or streams it into age encryption; scan and sweep optionally stream age decryption into protected memory. Existing files are never overwritten and symlinked or group/world-readable key files are rejected. The CLI delegates discovery and transaction logic to the client. Rejected: secret arguments, plaintext temporary files, or a new encryption scheme. Sweep prints public R for later owner reconstruction after the announcement is closed.
+
+- **Atomic sweep into a deterministic fresh account.** D uses D_owner as the signing base and fixed seed `scope-sweep/v1`; its confidential keys use the SDK's wallet derivation so the owner can reconstruct them. Preparation reads rent and message fees, simulates, and refuses reused token accounts. Only identical signed transactions are resent. A separately simulated version without reclaim keeps failed rent cleanup from blocking funds. Rejected: partial sweeps, guessed fees, or rebuilding while an earlier transaction may still land. Counterparty destinations remain follow-up work.
+
+- **Discovery checks tags locally.** Each tag needs its announcement's R; a fixed recipient memcmp filter would miss payments. Scan validates announcement PDAs and token authorities, then authenticates the derived ElGamal key and balance hint before reporting amounts. Rejected: trusting a tag match or the payer-writable balance hint. RPC capacity remains S6.
+
+- **One protocol context and a scalar signer adapter.** `confidential::context` pins SCOPE's program ID and binds the genesis hash, mint and account. `PaymentSigner` delegates to the crypto crate's existing nonce-safe raw-scalar signing; a fallible v1 builder accepts any Solana signer. Existing keypair builders retain their API. Rejected: treating the recovered scalar as an Ed25519 seed or duplicating signing in the client.
 
 ## 2026-10-04 Recipient key interoperability
 

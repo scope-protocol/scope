@@ -49,18 +49,36 @@ fn build(
     blockhash: solana_message::Hash,
     priority_fee: Option<u64>,
 ) -> VersionedTransaction {
+    let signers: Vec<&dyn Signer> = extra_signers.iter().map(|s| *s as &dyn Signer).collect();
+    signed_v1_transaction(fee_payer, &signers, ixs, blockhash, priority_fee)
+        .expect("instructions compile and all signers are present")
+}
+
+/// Build a v1 transaction with standard keypairs or a recovered payment signer.
+pub fn signed_v1_transaction(
+    fee_payer: &dyn Signer,
+    extra_signers: &[&dyn Signer],
+    ixs: &[Instruction],
+    blockhash: solana_message::Hash,
+    priority_fee: Option<u64>,
+) -> Result<VersionedTransaction, String> {
     let mut config = TransactionConfig::empty()
         .with_compute_unit_limit(COMPUTE_UNIT_LIMIT)
         .with_loaded_accounts_data_size_limit(LOADED_ACCOUNTS_DATA_SIZE_LIMIT);
     if let Some(fee) = priority_fee.filter(|f| *f > 0) {
         config = config.with_priority_fee(fee);
     }
-    let message = Message::try_compile_with_config(&fee_payer.pubkey(), ixs, blockhash, config)
-        .expect("instructions compile");
-    let mut signers: Vec<&Keypair> = vec![fee_payer];
+    let message = Message::try_compile_with_config(
+        &fee_payer.try_pubkey().map_err(|e| e.to_string())?,
+        ixs,
+        blockhash,
+        config,
+    )
+    .map_err(|e| e.to_string())?;
+    let mut signers: Vec<&dyn Signer> = vec![fee_payer];
     signers.extend_from_slice(extra_signers);
     VersionedTransaction::try_new(VersionedMessage::V1(message), &signers)
-        .expect("all signers present")
+        .map_err(|e| e.to_string())
 }
 
 /// Serialized size of a v1 transaction: version byte, signatures, message.

@@ -3,8 +3,11 @@
 /.surfpool
 # Payer run journals and input copies: payroll data.
 /runs
+*.sweeps.jsonl
 
 # Keypairs never enter this public repo.
 *keypair*.json
 id.json
 .env
+*.key
+*.age

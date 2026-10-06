@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 ---
 
 # Cryptography
@@ -27,7 +27,7 @@ prefix = SHA512(len(label) || label || p)[32..64]  ->  nonce prefix for raw-scal
 d      = HKDF-SHA512(salt = "stealth-dest/v1", ikm = canonical_bytes(b_spend), info = "d-owner" || R, len = 32)  ->  Ed25519 seed for D_owner
 ```
 
-Why: RFC 5869 says distinct `info` under a PRF gives computationally independent outputs; that is the whole argument for the three shared-secret leaves, the same pattern as a TLS 1.3 key schedule. Every expansion carries the exact R bytes, so encodings of R that X25519 maps to the same S still give different outputs. `C` ties the confidential keys to one account on one cluster, so a repeated R on another cluster or mint does not repeat the keys. In `C`, `chain_id` is the cluster's genesis hash and `program_id` is the SCOPE program id `EwbfwDdaRdxzF6wJFBKQmqcGoh93wNFL7FMo31eK9V2H` [proposed: no client code builds `C` yet; the payer engine's stealth rows fix it].
+Why: RFC 5869 says distinct `info` under a PRF gives computationally independent outputs; that is the whole argument for the three shared-secret leaves, the same pattern as a TLS 1.3 key schedule. Every expansion carries the exact R bytes, so encodings of R that X25519 maps to the same S still give different outputs. `C` ties the confidential keys to one account on one cluster, so a repeated R on another cluster or mint does not repeat the keys. In `C`, `chain_id` is the cluster's genesis hash and `program_id` is the SCOPE program id `EwbfwDdaRdxzF6wJFBKQmqcGoh93wNFL7FMo31eK9V2H`. `scope-client::confidential::context` builds this context for recipient discovery and sweeping (verification: V63); payer-engine stealth rows remain planned.
 
 `derive_confidential_keys_from_ikm(ikm: &[u8]) -> Result<(ElGamalKeypair, AeKey), ElGamalError>` in solana-zk-sdk 7.0.1 runs a second HKDF-SHA512 (salt `solana-conf-bal/v1`, info `ae` and `elgamal`), unchanged in 8.0.0 (verification: V28). Feeding it `ct_ikm` rather than raw S keeps the stages separate. The crypto crate exports `ct_ikm` as `ConfidentialKeyMaterial`, a zeroizing 32-byte secret with no `Debug`, `Clone` or `Copy`, and has no Solana SDK dependency; `scope-client::confidential::derive_confidential_keys` makes the SDK call.
 
@@ -51,17 +51,17 @@ Raw-scalar signing follows RFC 8032 by hand in `crates/stealth-keygen/src/signin
 
 ## Balance cache
 
-Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is not authenticated on chain, and the payer holds the same AE key. Pending balances decrypt from the ElGamal ciphertexts by table lookup on their 16-bit and 32-bit halves. The available balance is one 64-bit ciphertext that table lookup cannot decrypt, so the client reads the AE hint it wrote itself as a claimed value v and checks it: ElGamal decryption returns a `DiscreteLog` whose `target` is public, and `DiscreteLog.target == v·G` confirms v with one scalar multiplication. A mismatch halts. The client never uses the hint unchecked.
+Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is not authenticated on chain, and the payer holds the same AE key. Pending balances decrypt from the ElGamal ciphertexts by table lookup on their 16-bit and 32-bit halves. The available balance is one 64-bit ciphertext that table lookup cannot decrypt, so the client reads the account's AE hint as a claimed value v and checks it: ElGamal decryption returns a `DiscreteLog` whose `target` is public, and `DiscreteLog.target == v·G` confirms v with one scalar multiplication. A mismatch rejects that payment; scan continues with other announcements (verification: V64). The client never uses the hint unchecked.
 
-## Disclosure receipt
+## Disclosure receipt (planned)
 
-`{R, ct_ikm, signature}`. The verifier re-derives the ElGamal and AES keys, checks the ElGamal pubkey against the proof instructions in the referenced transaction, and decrypts the amount. A forged `ct_ikm` fails the pubkey check, not a decryption. Disclosing `ct_ikm` hands over that one account's full read access: one credit, one sweep, nothing else, because every payment has its own S and PRK. It reveals nothing about t, the tag, p, b_spend or other payments, given HKDF-Expand is a PRF [likely, pending review].
+`{R, ct_ikm, signature}`. The verifier re-derives the ElGamal and AES keys, checks the ElGamal pubkey against the proof instructions in the referenced transaction, and decrypts the amount. A forged `ct_ikm` fails the pubkey check, not a decryption. Disclosing `ct_ikm` hands over that account's full read access, including further credits or reuse of the same confidential keys. Fresh R per payment separates S and PRK. It reveals nothing about t, the tag, p, b_spend or other payments, given HKDF-Expand is a PRF [likely, pending review].
 
 ## Known concerns
 
 | Concern | Assessment |
 |---|---|
-| Payer holds the account's ElGamal and AES keys permanently | Cannot move funds: the account is owned by P after the handover, and p needs b_spend, which never touches S. Learns only the amount it paid and the public sweep. The account is one-time by Token-2022's own credit counter. Accepted. |
+| Payer holds the account's ElGamal and AES keys permanently | Cannot move funds: the account is owned by P after the handover, and p needs b_spend, which never touches S. Learns only the amount it paid and the public sweep. The credit counter limits pending credits; sweep disables incoming credits while emptying the source atomically. Payers must use fresh R values; the client refuses existing token destinations. Accepted. |
 | Payer can follow the funds it paid | True on any public ledger. What must not leak is the recipient's other income; that holds as long as payer-visible accounts are never merged with accounts other payers can see. |
 | Does the ElGamal key leak p or b_spend | No: distinct Expand labels; b_spend is independent of S |
 | Does the key-validity proof bind an owner | No: it proves knowledge of the ElGamal secret only; Token-2022 separately requires the owner's signature (verification: V1) |
@@ -85,4 +85,4 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 
 ## Open questions
 
-Q1 (external review of the tree, including `d`), Q11 (one ephemeral key per run), Q14 (remaining integration: pinning `program_id` in the client's context; meta-address parsing is implemented, V62), Q16 (run secret from a payer master secret). Owners and recommendations: [plan.md](plan.md).
+Q1 (external review of the tree, including `d`), Q11 (one ephemeral key per run), Q16 (run secret from a payer master secret). Q14's library APIs and protocol context are implemented: `scope_client::confidential::context` pins the program ID and accepts the cluster genesis hash, mint and token account. Owners and recommendations: [plan.md](plan.md).

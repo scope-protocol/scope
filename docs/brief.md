@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-09-28
+last_verified: 2026-10-05
 ---
 
 # Brief
@@ -52,9 +52,9 @@ Buyers: stablecoin payroll and B2B settlement platforms serving payers who are p
 - **Private from the public, not from the payer.** The payer sees where its payment is swept and can follow that account's later counterparties, amounts hidden, as any payer can on a public ledger. What the rail protects is the recipient's other income, as long as the recipient never merges accounts that different payers can see.
 - **Payer shields once.** The payer must hold a confidential balance; converting treasury into it shows an amount that one time. The recipient's fresh account never goes through a public balance.
 - **Merging re-links.** Sweeping several payments into one account clusters them. Rule: sweep each into a fresh account. Unlinkable consolidation is out of scope [open, Q8].
-- **Payer holds that one account's decryption keys.** It learns only the amount it paid: the account takes one credit (verification: V7), is emptied in one transaction, and only the recipient holds the owning key. A partial spend straight from that account shows the payer the split.
+- **Payer holds that one account's decryption keys.** It learns only the amount it paid: the pending-credit cap is 1 (verification: V7), and the recipient disables incoming credits while emptying it in one transaction (V65), and only the recipient holds the owning key. A partial spend straight from that account shows the payer the split.
 - **Mint policy decides where it works.** The rail works unmodified on mints that auto-approve new confidential accounts. PYUSD and USDG require the issuer to approve every account, plain or stealth, and USDC is not a Token-2022 mint (verification: V14). Issuer-approved mints need an approver run by or for the issuer; specified, not built.
-- **Cost.** Per stealth payment the payer locks 4,013,200 lamports of rent, refunded at sweep, and sends the recipient about 0.0035 SOL for its account and fees (verification: V23; the P allowance is [likely]). The payer's net cost is fees, of which the priority fee on a 200,000 CU range proof (verification: V27) is the only part that grows with congestion. Batching amortises operations, not chain cost.
+- **Cost.** Per stealth payment the payer locks 4,013,200 lamports of rent, refunded at sweep, and funds the recipient's destination account, fees and retained SOL reserve (verification: V23; the P allowance is [likely]). The payer's net cost is fees, of which the priority fee on a 200,000 CU range proof (verification: V27) is the only part that grows with congestion. Batching amortises operations, not chain cost.
 - **Audit access.** Either party can disclose a stealth payment's receipt, verifiable against the chain without trusting the discloser. A mint auditor key, where the issuer sets one, is the secondary path (verification: V12). A receipt for plain payments is not designed yet [open, Q15].
 - **Regulatory exposure.** FinCEN's 2023 proposed mixing definition lists single-use addresses on their own (verification: V47); whether it was finalized is [unverified]. Counter: visible payer, no pool, recoverable amounts. No agency has drawn the line. Self-hosted transfers are outside EU TFR scope by its text (verification: V47).
 - **Adoption we do not control.** No wallet shows confidential balances [unverified]. The rail is useful only as far as confidential balances are.

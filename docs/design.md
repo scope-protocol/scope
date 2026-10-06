@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-10-04
+last_verified: 2026-10-06
 ---
 
 # Design
@@ -17,7 +17,7 @@ Marks: [verified] backed by a row in [verification.md](verification.md); [likely
 | Program `scope-program` | on-chain, Pinocchio 0.11.2, `no_std`, id `EwbfwDdaRdxzF6wJFBKQmqcGoh93wNFL7FMo31eK9V2H` | `announce` verifies a payer's setup and writes the announcement; `reclaim` returns rent to the payer |
 | Token-2022 and the ZK ElGamal proof program | Solana's, unchanged | confidential balances, proof verification, auditor key; live on mainnet-beta and devnet (verification: V15) |
 | `scope-interface` | `no_std`, no dependencies | account layout, instruction data, seeds, errors, Token-2022 account reader; shared by program and client |
-| CLI `scope` | off-chain, Rust | payer: pay, bench; recipient: register (prints an encoded meta-address; the on-chain registry is P4), scan, sweep; either: disclose, verify |
+| CLI `scope` | off-chain, Rust | payer: pay; recipient: register (prints an encoded meta-address; the on-chain registry is P4), scan, sweep, export-sweep-key; bench, disclose and verify remain planned |
 
 No relayer, no indexer, no second program, no on-chain registry in v1.
 
@@ -57,9 +57,9 @@ Recipe and checks: [crypto.md](crypto.md). Each payment has its own R, so one R 
 | 4 | R | 32 |
 | 36 | payer, receives every rent refund | 32 |
 
-P and the mint are not stored: P is the token account's owner and the mint is in the token account. Scan filter: `dataSize = 68`, `memcmp(0, [1])`, `memcmp(2, [tag])`; the scanner then derives the token account from (payer, R).
+P and the mint are not stored: P is the token account's owner and the mint is in the token account. The scanner fetches program-owned announcements and checks tags locally after reading R; there is no fixed recipient tag for an RPC filter. It derives the token account from (payer, R) and verifies both the authority and confidential keys.
 
-**P.** A system account with no data, funded in the payer transaction and drained to zero in the sweep (verification: V24).
+**P.** A system account with no data, funded in the payer transaction and kept rent-exempt by the sweep (verification: V24).
 
 Every field is a byte array read by copy. Layout, seeds, instruction data, error codes and the Token-2022 account reader live in `crates/interface`. In the program each instruction is one module under `programs/scope/src/instructions/`: an accounts struct checks count, signer and program ids when it is built, and `process` holds the rest.
 
@@ -119,21 +119,25 @@ ConfigureAccount and SetAuthority check only the current owner's signature, so t
 One transaction, signed by P (fee payer) and D_owner:
 
 ```
-VerifyPubkeyValidity for D
-System CreateAccountWithSeed (base D_owner, P pays), InitializeAccount3 (owner D_owner), ConfigureAccount, DisableNonConfidentialCredits
+System Transfer any rent deficit from P to D
+System AllocateWithSeed and AssignWithSeed (base D_owner, owner Token-2022)
+T22 InitializeAccount3 (owner D_owner), ConfigureAccount
+VerifyPubkeyValidity for D                inline
+T22 DisableNonConfidentialCredits         D_owner signs
+T22 DisableConfidentialCredits           prevents credits after a transfer-only sweep
 T22 ApplyPendingBalance                   P signs
 T22 Transfer, full balance to D           three proofs
 T22 EmptyAccount                          zero-ciphertext proof
 T22 Burn of any public balance            only if the public amount is nonzero
 reclaim                                   rent of both accounts to the payer
-System Transfer of P's remainder to D_owner
+System Transfer of P's surplus to D_owner, retaining P's rent reserve
 ```
 
-The core (apply, transfer, empty, reclaim, with D created beforehand) is 2,759 bytes and 256,800 CU in LiteSVM (verification: V56); the full shape above is estimated at about 3,300 bytes [likely]. The zero-ciphertext proof is over the new source ciphertext from the transfer's equality proof: Transfer sets the available balance to exactly that ciphertext (verification: V8). Burn removes public dust a mint authority can mint in, since MintTo ignores the disabled public-credit flag and a nonzero public amount blocks CloseAccount (verification: V4, V6). If reclaim fails, the client drops it and resends, so our program can never block funds. D and D_owner are derived per payment; nothing is persisted on the recipient side.
+The core (apply, transfer, empty, reclaim, with D created beforehand) is 2,759 bytes and 256,800 CU in LiteSVM (verification: V56); the full client sweep with an auditor and public dust measures 3,350 bytes and 268,049 CU in LiteSVM (verification: V68). The zero-ciphertext proof is over the new source ciphertext from the transfer's equality proof: Transfer sets the available balance to exactly that ciphertext (verification: V8). Burn removes public dust a mint authority can mint in, since MintTo ignores the disabled public-credit flag and a nonzero public amount blocks CloseAccount (verification: V4, V6). If full simulation fails, the client separately simulates a version without burn and reclaim. If cleanup fails after simulation, submission waits for a finalized failure or blockhash expiry before building and simulating up to two transfer-only retries with fresh source balances, mint policy, proofs, funding, destination rent deficit and fees (verification: V65, V69). The retry uses the same deterministic destination and remains subject to the submission deadline and available funding. D and D_owner are derived per payment without a local counter. The CLI persists public recovery identifiers before broadcast; the backup and exact R reconstruct a standard owner keypair (verification: V70, V71).
 
-With the credit cap at 1, the payer's transfer is the only credit that can land (verification: V7), and apply, transfer and empty share one transaction, so there is no boundary for a second credit.
+The credit cap of 1 limits outstanding pending credits (verification: V7). If a balance was applied before handover, one further credit can arrive; a safe retry refreshes its balance and proofs (V65). The sweep disables confidential credits atomically with apply, transfer and empty; resetting the counter during apply therefore does not reopen a source left behind by the transfer-only fallback (verification: V65).
 
-Failure model: both transactions are atomic. Payer side: an announcement at `["ann", token_account]` means the payment landed, and only the payer can have created it. Recipient side: the announcement is gone means swept and reclaimed.
+Failure model: both transactions are atomic. Payer side: a canonical announcement proves setup and handover by the payer, not a positive token balance. The atomic payer transaction includes the transfer, and scan verifies the resulting balance. Recipient side: an empty source and authenticated destination mean swept; closing the announcement additionally means reclaimed. Account state alone does not identify which attempt succeeded.
 
 ## Money
 
@@ -145,12 +149,12 @@ Rent is `(size + 128) x 5,080` lamports today, read from the Rent sysvar at run 
 | Token account, mint with no account extensions | 465 | 3,012,440 |
 | P, minimum while nonzero | 0 | 650,240 |
 
-The payer locks 4,008,120 lamports per stealth payment and sends P enough for D's rent, two signatures and a priority allowance ([client.md](client.md)). The refund goes only to the payer, but whether it happens depends on P: only P can empty the account.
+The payer locks 4,008,120 lamports per stealth payment and sends P enough for D's rent, two signatures, a priority allowance and P's rent reserve ([client.md](client.md)). The refund goes only to the payer, but whether it happens depends on P: only P can empty the account.
 
 ## Limitations
 
 - A payer that never calls `announce` makes the payment invisible to scan. The payment is real and can be disclosed, but the recipient depends on the payer to learn of it.
-- A mint authority can freeze the account or mint public dust into it; the sweep burns dust, a freeze blocks the sweep.
+- A mint authority can freeze the account or mint public dust into it. The sweep attempts dust cleanup and can fall back to transfer-only; a freeze still blocks the transfer.
 - Rent needs P's cooperation. P must empty the account, and must not enable CpiGuard, which blocks reclaim's CPI close to the payer (verification: V5). P cannot close the account itself, since CloseAccount needs the close authority, the announcement PDA (verification: V4).
 - The client refuses mints that are non-transferable (they force ImmutableOwner) or freeze new accounts by default (SetAuthority fails on a frozen account) (verification: V10, V2).
 
@@ -160,7 +164,7 @@ The program holds no authority over tokens: the announcement PDA is only a close
 
 ## Registry
 
-Deferred to P4 ([plan.md](plan.md), Q12). v1 passes `scope:` followed by Base58Check of `0x01 || B_spend || B_scan`; version 1 identifies the key layout and current payment schedule, and the checksum is four bytes of double-SHA256. `RecipientPublicKeys::to_meta_address` and `from_meta_address` implement this format and validate the decoded keys (verification: V59, V62). The CLI's register and stealth-row parsing remain planned. Until a registry exists, the small-order and mixed-order rejection in `stealth-keygen` is the only check on B_spend (verification: V42).
+Deferred to P4 ([plan.md](plan.md), Q12). v1 passes `scope:` followed by Base58Check of `0x01 || B_spend || B_scan`; version 1 identifies the key layout and current payment schedule, and the checksum is four bytes of double-SHA256. `RecipientPublicKeys::to_meta_address` and `from_meta_address` implement this format and validate the decoded keys (verification: V59, V62). The CLI's `register` creates a recipient backup and prints its meta-address; payer-engine stealth-row parsing remains planned. Until a registry exists, the small-order and mixed-order rejection in `stealth-keygen` is the only check on B_spend (verification: V42).
 
 ## Fallback
 

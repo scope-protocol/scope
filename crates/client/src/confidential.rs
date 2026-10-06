@@ -1,5 +1,6 @@
 //! Convert account-scoped stealth material into Token-2022 encryption keys.
 
+use solana_address::Address;
 use solana_zk_sdk::{
     encryption::{
         auth_encryption::AeKey, derivation::derive_confidential_keys_from_ikm,
@@ -7,7 +8,17 @@ use solana_zk_sdk::{
     },
     errors::ElGamalError,
 };
-use stealth_keygen::ConfidentialKeyMaterial;
+use stealth_keygen::{ConfidentialContext, ConfidentialKeyMaterial};
+
+/// The protocol context shared by the payer and recipient on this cluster.
+pub fn context(chain_id: [u8; 32], mint: &Address, token_account: &Address) -> ConfidentialContext {
+    ConfidentialContext {
+        chain_id,
+        program_id: scope_interface::ID,
+        mint: mint.to_bytes(),
+        token_account: token_account.to_bytes(),
+    }
+}
 
 /// Derive the account's ElGamal keypair and symmetric balance key with the SDK.
 /// A receipt verifier must check the derived public key against the referenced

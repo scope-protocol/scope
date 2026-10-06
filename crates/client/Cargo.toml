@@ -27,6 +27,7 @@ solana-message.workspace = true
 solana-rpc-client.workspace = true
 solana-sha256-hasher = { workspace = true, features = ["sha2"] }
 solana-signer.workspace = true
+solana-signature.workspace = true
 solana-system-interface.workspace = true
 solana-transaction.workspace = true
 solana-transaction-error.workspace = true
@@ -37,9 +38,11 @@ spl-token-confidential-transfer-proof-extraction.workspace = true
 spl-token-confidential-transfer-proof-generation.workspace = true
 stealth-keygen.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 wincode.workspace = true
 
 [dev-dependencies]
+base64 = "0.22.1"
 proptest.workspace = true
 rand_core = "0.10.1"
 # The engine tests run on the LiteSVM test kit.
