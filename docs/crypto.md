@@ -67,6 +67,7 @@ Token-2022 stores an AE-encrypted copy of the available balance as a hint. It is
 | Does the key-validity proof bind an owner | No: it proves knowledge of the ElGamal secret only; Token-2022 separately requires the owner's signature (verification: V1) |
 | View tag leaks a byte of S | Accepted, standard (Monero, ERC-5564); domain-separated from the tweak |
 | HKDF domain separation | Recipe above; needs external review [open] |
+| The payer's run secret is a signature over a public message | A signature is not a secret to whatever obtains it: software that can make the payer's wallet sign `scope-run-secret/v1` and a run id learns every R_i and amount opening of that run, so which one-time accounts it paid and how much. The same holds for the source keys spl-token-cli derives from a signature (V50). Accepted with a rule: the payer key signs for this CLI only, never in a wallet that signs arbitrary messages for websites |
 
 ## Alternatives
 

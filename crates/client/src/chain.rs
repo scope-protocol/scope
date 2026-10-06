@@ -352,10 +352,13 @@ impl crate::receipt::TransactionArchive for RpcChain {
             .transaction
             .decode()
             .ok_or_else(|| ChainError(format!("{signature}: transaction does not decode")))?;
+        // Some history providers drop the status of old transactions; unknown is not failed.
         let succeeded = found
             .transaction
             .meta
-            .is_some_and(|meta| meta.err.is_none());
+            .ok_or_else(|| ChainError(format!("{signature}: the node returned no status")))?
+            .err
+            .is_none();
         Ok(crate::receipt::ArchivedTransaction {
             transaction,
             succeeded,

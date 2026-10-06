@@ -3,7 +3,7 @@ use scope_client::{
     address::announcement_address,
     ix::reclaim,
     testkit::*,
-    tx::{PLAIN_TRANSFER_CU_LIMIT, STEALTH_PAYMENT_CU_LIMIT},
+    tx::{PLAIN_TRANSFER_CU_LIMIT, RECLAIM_CU_LIMIT, STEALTH_PAYMENT_CU_LIMIT},
 };
 use solana_keypair::Keypair;
 use solana_signer::Signer;
@@ -150,4 +150,19 @@ fn register_stays_within_budget() {
     println!("register CU {used:?}");
     assert_eq!(used.len(), 1);
     assert!(used[0] <= REGISTER_CU_MAX, "register used {}", used[0]);
+}
+
+/// The payer's reclaim backstop sends `reclaim` alone; at bump 255.
+#[test]
+fn reclaim_transaction_keeps_headroom_under_its_limit() {
+    let mut h = Harness::new();
+    let case = case_at_bump_255(&h);
+    h.send(&case.setup, &[]).expect("announce");
+    let ix = reclaim(&case.announcement, &case.token_account, &h.payer.pubkey());
+    let meta = h.send(&[ix], &[]).expect("reclaim");
+    assert_headroom(
+        "reclaim transaction",
+        meta.compute_units_consumed,
+        RECLAIM_CU_LIMIT,
+    );
 }

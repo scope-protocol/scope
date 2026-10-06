@@ -25,6 +25,10 @@ pub enum Record {
         payer: String,
         /// Send order: a random permutation of row indexes, so it does not mirror the file.
         order: Vec<usize>,
+        /// Amount openings come from the run secret, so receipts can be rebuilt. False in
+        /// runs that predate it.
+        #[serde(default)]
+        derived_openings: bool,
     },
     Attempt {
         row: usize,

@@ -92,14 +92,24 @@ pub const LAMPORTS_PER_SIGNATURE: u64 = 5_000;
 /// sweep's default `--max-price`. The recipient may sweep weeks after the payment.
 pub const SWEEP_PRICE_CAP: u64 = 1_000_000;
 
-/// Lamports P needs to sweep at any price up to `price_cap`: D's rent, two signatures,
-/// the priority fee at the sweep's compute-unit limit, and the rent reserve the sweep
-/// leaves in P. The payer funds P with exactly this.
+/// One sweep attempt's fee at `price`: two signatures and the priority fee at the sweep's
+/// compute-unit limit.
+pub fn sweep_attempt_fee(price: u64) -> u64 {
+    2 * LAMPORTS_PER_SIGNATURE + priority_fee_lamports(price, crate::tx::SWEEP_CU_LIMIT)
+}
+
+/// What the sweep requires P to hold for one attempt at `price`: D's rent, the attempt's
+/// fee, and the rent reserve the sweep leaves in P.
+pub fn sweep_requirement(destination_rent: u64, reserve: u64, price: u64) -> u64 {
+    destination_rent + sweep_attempt_fee(price) + reserve
+}
+
+/// What the payer funds P with: the requirement at `price_cap`, plus the fee of every
+/// rebuild the sweep may make, since an attempt that lands and fails is still charged.
+/// Whatever is left goes to D_owner with the sweep.
 pub fn sweep_funding(destination_rent: u64, reserve: u64, price_cap: u64) -> u64 {
-    destination_rent
-        + 2 * LAMPORTS_PER_SIGNATURE
-        + priority_fee_lamports(price_cap, crate::tx::SWEEP_CU_LIMIT)
-        + reserve
+    sweep_requirement(destination_rent, reserve, price_cap)
+        + crate::sweep::MAX_RETRIES as u64 * sweep_attempt_fee(price_cap)
 }
 
 #[cfg(test)]

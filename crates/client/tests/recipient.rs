@@ -1736,7 +1736,7 @@ fn full_recipient_transaction_fits_the_v1_wire_and_compute_budgets() {
 }
 
 #[test]
-fn a_payment_authority_funded_by_the_payer_rule_sweeps_at_the_price_cap() {
+fn the_sweep_requirement_is_exact_at_the_price_cap_and_the_payer_funds_retries_on_top() {
     use scope_client::{
         fees::{self, SWEEP_PRICE_CAP},
         sweep::{self, SweepError, SweepOptions},
@@ -1756,10 +1756,15 @@ fn a_payment_authority_funded_by_the_payer_rule_sweeps_at_the_price_cap() {
         ExtensionType::ConfidentialTransferAccount,
     ])
     .expect("space");
-    let funding = fees::sweep_funding(
+    let (rent, reserve) = (
         h.svm.minimum_balance_for_rent_exemption(space),
         h.svm.minimum_balance_for_rent_exemption(0),
-        SWEEP_PRICE_CAP,
+    );
+    let funding = fees::sweep_requirement(rent, reserve, SWEEP_PRICE_CAP);
+    assert_eq!(
+        fees::sweep_funding(rent, reserve, SWEEP_PRICE_CAP),
+        funding + 2 * fees::sweep_attempt_fee(SWEEP_PRICE_CAP),
+        "the payer adds the fee of each rebuild"
     );
 
     set_funding(&mut h, authority, funding - 1);
@@ -1775,7 +1780,7 @@ fn a_payment_authority_funded_by_the_payer_rule_sweeps_at_the_price_cap() {
     let mut chain = SvmChain::new(&mut h.svm);
     chain.price_samples = vec![vec![SWEEP_PRICE_CAP]];
     let report = sweep::sweep(&mut chain, &alice, &announcement, &opts)
-        .expect("a P funded by the rule sweeps at the cap");
+        .expect("a P holding the requirement sweeps at the cap");
     assert_eq!(report.reclaimed, Some(true));
 }
 

@@ -23,7 +23,8 @@ use crate::{
     proofs::transfer_proofs,
     run_secret::RunSecret,
     tx::{
-        PLAIN_TRANSFER_CU_LIMIT, STEALTH_PAYMENT_CU_LIMIT, v1_transaction, v1_transaction_with_fee,
+        PLAIN_TRANSFER_CU_LIMIT, RECLAIM_CU_LIMIT, STEALTH_PAYMENT_CU_LIMIT,
+        v1_transaction_with_fee,
     },
 };
 use core::num::NonZeroI8;
@@ -119,6 +120,15 @@ pub enum PayError {
     Simulation { row: usize, logs: String },
     #[error("halted: {0}; the journal is intact, inspect before resuming")]
     Halted(String),
+}
+
+impl From<fees::FeeAboveCap> for PayError {
+    fn from(e: fees::FeeAboveCap) -> Self {
+        Self::FeeAboveCap {
+            price: e.price,
+            cap: e.cap,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -308,6 +318,77 @@ fn plain_rows<C: Chain>(
         .collect()
 }
 
+/// A run as its journal header and input copy describe it, checked against the payer and
+/// the input hash.
+struct LoadedRun {
+    mint: Address,
+    source: Address,
+    order: Vec<usize>,
+    derived_openings: bool,
+    rows: Vec<Row>,
+    info: MintInfo,
+}
+
+fn load_run<C: Chain>(
+    chain: &C,
+    payer: &Keypair,
+    dir: &Path,
+    records: &[Record],
+) -> Result<LoadedRun, PayError> {
+    let corrupt = |why: &str| {
+        PayError::Journal(JournalError::Corrupt {
+            path: dir.join(journal::JOURNAL),
+            line: 1,
+            why: why.into(),
+        })
+    };
+    let Some(Record::Run {
+        input_sha256,
+        mint,
+        source,
+        payer: journal_payer,
+        order,
+        derived_openings,
+        ..
+    }) = records.first()
+    else {
+        return Err(corrupt("no run header"));
+    };
+    if *journal_payer != payer.pubkey().to_string() {
+        return Err(corrupt("run belongs to another payer"));
+    }
+    let mint: Address = mint.parse().map_err(|_| corrupt("bad mint"))?;
+    let source: Address = source.parse().map_err(|_| corrupt("bad source"))?;
+    let input_bytes = std::fs::read(dir.join(INPUT_COPY))
+        .map_err(|e| JournalError::Io(dir.join(INPUT_COPY), e))?;
+    if hex(&solana_sha256_hasher::hash(&input_bytes).to_bytes()) != *input_sha256 {
+        return Err(corrupt("input copy does not match the run's hash"));
+    }
+    let info = mint_info(chain, &mint)?;
+    let text = std::str::from_utf8(&input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
+    let rows = input::parse(text, info.decimals)?;
+    Ok(LoadedRun {
+        mint,
+        source,
+        order: order.clone(),
+        derived_openings: *derived_openings,
+        rows,
+        info,
+    })
+}
+
+/// Rent of a stealth row's token account and of P's reserve, read once per run.
+fn stealth_rents<C: Chain>(
+    chain: &C,
+    stealth: &HashMap<usize, Stealth>,
+    space: usize,
+) -> Result<(u64, u64), PayError> {
+    if stealth.is_empty() {
+        return Ok((0, 0));
+    }
+    Ok((chain.rent(space)?, chain.rent(0)?))
+}
+
 /// The account a row pays: the recipient's own for a plain row, the one-time one otherwise.
 fn paid_to(rows: &[Row], stealth: &HashMap<usize, Stealth>, row: usize) -> Address {
     match &rows[row].recipient {
@@ -467,6 +548,8 @@ struct Engine<'a, C: Chain> {
     run_secret: RunSecret,
     /// Size of each stealth row's token account, from the mint.
     space: usize,
+    /// Rent of that account and of P's reserve.
+    rents: (u64, u64),
     current: [u8; 64],
     balance: u64,
     paid: Vec<Paid>,
@@ -522,6 +605,7 @@ pub fn start<C: Chain>(
         RunSecret::derive(payer, &run_id).map_err(|e| PayError::Keys(e.to_string()))?;
     check_stealth_mint(&rows, &mint, &info)?;
     let stealth = stealth_rows(&chain, &rows, &run_secret, &run_id, &payer.pubkey(), &mint)?;
+    let rents = stealth_rents(&chain, &stealth, info.space)?;
     let plain = plain_rows(&chain, &rows, &HashSet::new(), &mint)?;
 
     let dir = opts.runs_dir.join(&run_id);
@@ -535,6 +619,7 @@ pub fn start<C: Chain>(
         source: source.to_string(),
         payer: payer.pubkey().to_string(),
         order: order.clone(),
+        derived_openings: true,
     })?;
     (opts.log)(&format!("run {run_id}: {} rows", rows.len()));
     let mut engine = Engine {
@@ -551,6 +636,7 @@ pub fn start<C: Chain>(
         stealth,
         run_secret,
         space: info.space,
+        rents,
         current: state.available,
         balance,
         paid: Vec::new(),
@@ -576,33 +662,18 @@ pub fn resume<C: Chain>(
             why: why.into(),
         })
     };
-    let Some(Record::Run {
-        input_sha256,
+    let LoadedRun {
         mint,
         source,
-        payer: journal_payer,
         order,
+        rows,
+        info,
         ..
-    }) = records.first().cloned()
-    else {
-        return Err(corrupt("no run header"));
-    };
-    if journal_payer != payer.pubkey().to_string() {
-        return Err(corrupt("run belongs to another payer"));
-    }
-    let mint: Address = mint.parse().map_err(|_| corrupt("bad mint"))?;
-    let source: Address = source.parse().map_err(|_| corrupt("bad source"))?;
-    let input_bytes = std::fs::read(dir.join(INPUT_COPY))
-        .map_err(|e| JournalError::Io(dir.join(INPUT_COPY), e))?;
-    if hex(&solana_sha256_hasher::hash(&input_bytes).to_bytes()) != input_sha256 {
-        return Err(corrupt("input copy does not match the run's hash"));
-    }
-    let info = mint_info(&chain, &mint)?;
-    let text = std::str::from_utf8(&input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
-    let rows = input::parse(text, info.decimals)?;
+    } = load_run(&chain, payer, &dir, &records)?;
     let run_secret = RunSecret::derive(payer, run_id).map_err(|e| PayError::Keys(e.to_string()))?;
     check_stealth_mint(&rows, &mint, &info)?;
     let stealth = stealth_rows(&chain, &rows, &run_secret, run_id, &payer.pubkey(), &mint)?;
+    let rents = stealth_rents(&chain, &stealth, info.space)?;
 
     let mut landed = HashSet::new();
     let mut open: Option<Record> = None;
@@ -664,6 +735,7 @@ pub fn resume<C: Chain>(
         stealth,
         run_secret,
         space: info.space,
+        rents,
         current: state.available,
         balance,
         paid,
@@ -720,11 +792,17 @@ pub fn resume<C: Chain>(
     engine.run(&order, &landed)
 }
 
+/// Expired attempts per row before `reclaim` gives up; it is a backstop, safe to rerun.
+const RECLAIM_ATTEMPTS: usize = 3;
+
 /// Where one stealth row of a run stands, read from the chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StealthState {
     /// The run has not paid this row.
     Unpaid,
+    /// The run attempted this row and never recorded the outcome, and no announcement is
+    /// open; resuming the run settles it from the source ciphertext.
+    Unresolved,
     /// Paid and announced; the recipient has not swept it yet.
     Open,
     /// Swept: both balances are empty, so `reclaim` returns the rent to the payer.
@@ -751,52 +829,43 @@ pub fn status<C: Chain>(
 ) -> Result<Vec<StealthStatus>, PayError> {
     let dir = opts.runs_dir.join(run_id);
     let records = journal::read_unlocked(&dir)?;
-    let corrupt = |why: &str| {
-        PayError::Journal(JournalError::Corrupt {
-            path: dir.join(journal::JOURNAL),
-            line: 1,
-            why: why.into(),
-        })
+    let run = load_run(chain, payer, &dir, &records)?;
+    let rows_with = |pick: fn(&Record) -> Option<usize>| -> HashSet<usize> {
+        records.iter().filter_map(pick).collect()
     };
-    let Some(Record::Run {
-        input_sha256,
-        mint,
-        payer: journal_payer,
-        ..
-    }) = records.first()
-    else {
-        return Err(corrupt("no run header"));
-    };
-    if *journal_payer != payer.pubkey().to_string() {
-        return Err(corrupt("run belongs to another payer"));
-    }
-    let mint: Address = mint.parse().map_err(|_| corrupt("bad mint"))?;
-    let input_bytes = std::fs::read(dir.join(INPUT_COPY))
-        .map_err(|e| JournalError::Io(dir.join(INPUT_COPY), e))?;
-    if hex(&solana_sha256_hasher::hash(&input_bytes).to_bytes()) != *input_sha256 {
-        return Err(corrupt("input copy does not match the run's hash"));
-    }
-    let info = mint_info(chain, &mint)?;
-    let text = std::str::from_utf8(&input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
-    let rows = input::parse(text, info.decimals)?;
-    let landed: HashSet<usize> = records
-        .iter()
-        .filter_map(|r| match r {
-            Record::Landed { row, .. } => Some(*row),
-            _ => None,
-        })
-        .collect();
+    let landed = rows_with(|r| match r {
+        Record::Landed { row, .. } => Some(*row),
+        _ => None,
+    });
+    let attempted = rows_with(|r| match r {
+        Record::Attempt { row, .. } => Some(*row),
+        _ => None,
+    });
     let secret = RunSecret::derive(payer, run_id).map_err(|e| PayError::Keys(e.to_string()))?;
-    let stealth = stealth_rows(chain, &rows, &secret, run_id, &payer.pubkey(), &mint)?;
+    let stealth = stealth_rows(
+        chain,
+        &run.rows,
+        &secret,
+        run_id,
+        &payer.pubkey(),
+        &run.mint,
+    )?;
     let mut out = stealth
         .iter()
         .map(|(&row, s)| {
             let (announcement, _) = announcement_address(&s.token_account);
+            let journaled = if landed.contains(&row) {
+                Journaled::Landed
+            } else if attempted.contains(&row) {
+                Journaled::Attempted
+            } else {
+                Journaled::Nothing
+            };
             Ok(StealthStatus {
                 row,
                 token_account: s.token_account,
                 announcement,
-                state: stealth_state(chain, landed.contains(&row), s, &announcement)?,
+                state: stealth_state(chain, journaled, s, &announcement)?,
             })
         })
         .collect::<Result<Vec<_>, PayError>>()?;
@@ -804,11 +873,20 @@ pub fn status<C: Chain>(
     Ok(out)
 }
 
+/// What the journal says about a row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Journaled {
+    Nothing,
+    Attempted,
+    Landed,
+}
+
 /// An open announcement means paid, whatever the journal says: a run killed after a
-/// send has no `landed` record for a row that landed.
+/// send has no `landed` record for a row that landed. Without an announcement, a row the
+/// run attempted but never recorded may have landed and been swept and reclaimed since.
 fn stealth_state<C: Chain>(
     chain: &C,
-    landed: bool,
+    journaled: Journaled,
     s: &Stealth,
     announcement: &Address,
 ) -> Result<StealthState, PayError> {
@@ -816,10 +894,10 @@ fn stealth_state<C: Chain>(
         .account(announcement, Commitment::Confirmed)?
         .is_some_and(|a| a.owner == program_id());
     if !open {
-        return Ok(if landed {
-            StealthState::Reclaimed
-        } else {
-            StealthState::Unpaid
+        return Ok(match journaled {
+            Journaled::Landed => StealthState::Reclaimed,
+            Journaled::Attempted => StealthState::Unresolved,
+            Journaled::Nothing => StealthState::Unpaid,
         });
     }
     let empty = match chain.account(&s.token_account, Commitment::Confirmed)? {
@@ -847,7 +925,8 @@ fn stealth_state<C: Chain>(
 
 /// Calls `reclaim` for every swept stealth row of the run, then returns the new status.
 /// Token-2022 refuses to close an account with any balance (verification: V4), so this
-/// cannot touch funds; it pays only the base fee, since nothing here is urgent.
+/// cannot touch funds. Each attempt pays the sampled priority price under `--max-price`;
+/// after `RECLAIM_ATTEMPTS` expired attempts for a row it stops and says so.
 pub fn reclaim<C: Chain>(
     chain: &mut C,
     payer: &Keypair,
@@ -866,9 +945,25 @@ pub fn reclaim<C: Chain>(
                 .is_none_or(|a| a.owner != program_id()))
         };
         // Anyone may call reclaim, so another caller can win the race; that is success too.
+        let mut attempts = 0;
         'attempts: while !closed(chain)? {
+            if attempts == RECLAIM_ATTEMPTS {
+                return Err(PayError::Halted(format!(
+                    "row {}: reclaim did not land in {RECLAIM_ATTEMPTS} attempts; try again later",
+                    s.row
+                )));
+            }
+            attempts += 1;
+            let price = fees::priority_price(chain.recent_prices()?, opts.max_price_per_cu)?;
             let (blockhash, last_valid_block_height) = chain.blockhash()?;
-            let tx = v1_transaction(payer, &[], std::slice::from_ref(&ix), blockhash);
+            let tx = v1_transaction_with_fee(
+                payer,
+                &[],
+                std::slice::from_ref(&ix),
+                blockhash,
+                RECLAIM_CU_LIMIT,
+                fees::priority_fee_lamports(price, RECLAIM_CU_LIMIT),
+            );
             if let Err(logs) = chain.simulate(&tx)? {
                 if closed(chain)? {
                     break;
@@ -910,24 +1005,15 @@ pub fn disclose<C: Chain>(
 ) -> Result<crate::receipt::Receipt, PayError> {
     let dir = opts.runs_dir.join(run_id);
     let records = journal::read_unlocked(&dir)?;
-    let corrupt = |why: &str| {
-        PayError::Journal(JournalError::Corrupt {
-            path: dir.join(journal::JOURNAL),
-            line: 1,
-            why: why.into(),
-        })
-    };
-    let Some(Record::Run {
-        input_sha256,
-        mint,
-        payer: journal_payer,
+    let LoadedRun {
+        rows,
+        derived_openings,
         ..
-    }) = records.first()
-    else {
-        return Err(corrupt("no run header"));
-    };
-    if *journal_payer != payer.pubkey().to_string() {
-        return Err(corrupt("run belongs to another payer"));
+    } = load_run(chain, payer, &dir, &records)?;
+    if !derived_openings {
+        return Err(PayError::Halted(format!(
+            "run {run_id} predates derived amount openings; its receipts cannot be rebuilt"
+        )));
     }
     let signature = records
         .iter()
@@ -939,15 +1025,6 @@ pub fn disclose<C: Chain>(
             _ => None,
         })
         .ok_or_else(|| PayError::Halted(format!("row {row} has not landed in run {run_id}")))?;
-    let mint: Address = mint.parse().map_err(|_| corrupt("bad mint"))?;
-    let input_bytes = std::fs::read(dir.join(INPUT_COPY))
-        .map_err(|e| JournalError::Io(dir.join(INPUT_COPY), e))?;
-    if hex(&solana_sha256_hasher::hash(&input_bytes).to_bytes()) != *input_sha256 {
-        return Err(corrupt("input copy does not match the run's hash"));
-    }
-    let info = mint_info(chain, &mint)?;
-    let text = std::str::from_utf8(&input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
-    let rows = input::parse(text, info.decimals)?;
     let amount = rows
         .get(row)
         .ok_or_else(|| PayError::Halted(format!("run {run_id} has no row {row}")))?
@@ -1051,12 +1128,10 @@ impl<C: Chain> Engine<'_, C> {
     }
 
     fn price(&self) -> Result<u64, PayError> {
-        fees::priority_price(self.chain.recent_prices()?, self.opts.max_price_per_cu).map_err(
-            |error| PayError::FeeAboveCap {
-                price: error.price,
-                cap: error.cap,
-            },
-        )
+        Ok(fees::priority_price(
+            self.chain.recent_prices()?,
+            self.opts.max_price_per_cu,
+        )?)
     }
 
     /// The setup, handover and `announce` for a stealth row, in front of its transfer.
@@ -1074,7 +1149,7 @@ impl<C: Chain> Engine<'_, C> {
                 )));
             }
         };
-        let rent = self.chain.rent(self.space)?;
+        let (rent, reserve) = self.rents;
         let payer = self.payer.pubkey();
         let mut ixs = ix::stealth_setup(&StealthSetup {
             payer,
@@ -1087,11 +1162,7 @@ impl<C: Chain> Engine<'_, C> {
             rent_lamports: rent,
             space: self.space as u64,
             // D is the same size as this account, so its rent is `rent` too.
-            lamports_for_owner: fees::sweep_funding(
-                rent,
-                self.chain.rent(0)?,
-                fees::SWEEP_PRICE_CAP,
-            ),
+            lamports_for_owner: fees::sweep_funding(rent, reserve, fees::SWEEP_PRICE_CAP),
         })
         .map_err(|e| PayError::Proof(e.to_string()))?;
         // An expired attempt made the address public; anyone may have sent it lamports since.

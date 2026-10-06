@@ -970,27 +970,45 @@ fn status_shows_an_unswept_row_as_open_and_cannot_reclaim_it() {
 }
 
 #[test]
-fn status_reports_a_row_killed_before_its_send_as_unpaid() {
+fn status_tells_unpaid_from_unresolved_and_resume_settles_it() {
     let mut h = Harness::new();
-    let o = opts("status-unpaid");
     let input = format!(
         "{},1\n",
         stealth_recipient(10).derive_public_keys().to_meta_address()
     );
     let (mint, source) = (h.mint, h.source);
-    let killed = pay::start(
-        Killer::new(SvmChain::new(&mut h.svm), KillAt::BeforeSend(1)),
-        &h.payer,
-        keys(&h.source_elgamal, &h.source_ae),
-        mint,
-        source,
-        input.as_bytes(),
-        &o,
-    );
-    assert!(killed.is_err());
-    let run_id = only_run(&o);
-    let rows = pay::status(&SvmChain::new(&mut h.svm), &h.payer, &run_id, &o).expect("status");
-    assert_eq!(rows[0].state, pay::StealthState::Unpaid);
+    for (at, expected) in [
+        (KillAt::Simulate(1), pay::StealthState::Unpaid),
+        (KillAt::BeforeSend(1), pay::StealthState::Unresolved),
+    ] {
+        let o = opts(&format!("status-kill-at-{expected:?}"));
+        let killed = pay::start(
+            Killer::new(SvmChain::new(&mut h.svm), at),
+            &h.payer,
+            keys(&h.source_elgamal, &h.source_ae),
+            mint,
+            source,
+            input.as_bytes(),
+            &o,
+        );
+        assert!(killed.is_err());
+        let run_id = only_run(&o);
+        let rows = pay::status(&SvmChain::new(&mut h.svm), &h.payer, &run_id, &o).expect("status");
+        assert_eq!(rows[0].state, expected, "killed at the {expected:?} point");
+        if expected == pay::StealthState::Unresolved {
+            pay::resume(
+                SvmChain::new(&mut h.svm),
+                &h.payer,
+                keys(&h.source_elgamal, &h.source_ae),
+                &run_id,
+                &o,
+            )
+            .expect("resume");
+            let rows =
+                pay::status(&SvmChain::new(&mut h.svm), &h.payer, &run_id, &o).expect("status");
+            assert_eq!(rows[0].state, pay::StealthState::Open, "resume paid it");
+        }
+    }
 }
 
 /// The run's signed transactions from its journal, with LiteSVM's record of which landed.
@@ -1230,4 +1248,95 @@ fn chaos_converges_from_every_kill_point_of_a_20_row_run() {
         assert_eq!(report.paid.len(), ROWS, "point {i}");
         assert_mixed_paid_once(&mut h, &plain, &stealth);
     }
+}
+
+#[test]
+fn status_reports_a_landed_but_unrecorded_row_that_was_swept_as_unresolved() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = stealth_recipient(13);
+    let o = opts("status-unresolved");
+    let input = format!("{},1\n", alice.derive_public_keys().to_meta_address());
+    let (mint, source) = (h.mint, h.source);
+    let killed = pay::start(
+        Killer::new(SvmChain::new(&mut h.svm), KillAt::AfterSend(1)),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        mint,
+        source,
+        input.as_bytes(),
+        &o,
+    );
+    assert!(
+        killed.is_err(),
+        "the payment landed, its landed record never written"
+    );
+    let announcement = found_announcement(&mut h, &alice);
+    sweep::sweep(
+        &mut SvmChain::new(&mut h.svm),
+        &alice,
+        &announcement,
+        &SweepOptions {
+            poll: Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect("full sweep closes the announcement");
+    let run_id = only_run(&o);
+    let rows = pay::status(&SvmChain::new(&mut h.svm), &h.payer, &run_id, &o).expect("status");
+    assert_eq!(
+        rows[0].state,
+        pay::StealthState::Unresolved,
+        "not unpaid: paying it again would pay twice"
+    );
+}
+
+#[test]
+fn disclose_refuses_a_run_from_before_derived_openings() {
+    let mut h = Harness::new();
+    let plain = recipients(&mut h, 1);
+    let o = opts("old-run");
+    let run_id = start(&mut h, &input(&plain), &o).expect("pay").run_id;
+    let path = o.runs_dir.join(&run_id).join(JOURNAL);
+    let text = std::fs::read_to_string(&path).expect("journal");
+    let (header, rest) = text.split_once('\n').expect("header line");
+    let mut header: serde_json::Value = serde_json::from_str(header).expect("json");
+    header
+        .as_object_mut()
+        .expect("object")
+        .remove("derived_openings");
+    std::fs::write(&path, format!("{header}\n{rest}")).expect("rewrite as an older run");
+    let refused = pay::disclose(&SvmChain::new(&mut h.svm), &h.payer, &run_id, 0, &o);
+    assert!(
+        matches!(&refused, Err(PayError::Halted(why)) if why.contains("predates")),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn reclaim_stops_after_three_lost_attempts() {
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let alice = stealth_recipient(14);
+    let o = opts("reclaim-lost");
+    let input = format!("{},1\n", alice.derive_public_keys().to_meta_address());
+    let run_id = start(&mut h, &input, &o).expect("pay").run_id;
+    let announcement = found_announcement(&mut h, &alice);
+    sweep::sweep(
+        &mut NoReclaim(SvmChain::new(&mut h.svm)),
+        &alice,
+        &announcement,
+        &SweepOptions {
+            poll: Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect("transfer-only sweep");
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.drop_sends = usize::MAX;
+    let stopped = pay::reclaim(&mut chain, &h.payer, &run_id, &o);
+    assert!(
+        matches!(&stopped, Err(PayError::Halted(why)) if why.contains("3 attempts")),
+        "{stopped:?}"
+    );
 }

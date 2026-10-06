@@ -43,7 +43,8 @@ use std::{
 use stealth_keygen::{RecipientSecretKeys, RecoveredPayment};
 
 const DESTINATION_SEED: &str = "scope-sweep/v1";
-const MAX_RETRIES: usize = 2;
+/// Transfer-only rebuilds after the first attempt; each can cost a fee.
+pub const MAX_RETRIES: usize = 2;
 
 pub struct SweepOptions {
     pub max_price_per_cu: u64,

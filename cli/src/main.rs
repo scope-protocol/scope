@@ -474,6 +474,7 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
         for s in rows {
             let state = match s.state {
                 pay::StealthState::Unpaid => "unpaid",
+                pay::StealthState::Unresolved => "unresolved, resume the run",
                 pay::StealthState::Open => "open",
                 pay::StealthState::Swept => "swept",
                 pay::StealthState::Reclaimed => "reclaimed",

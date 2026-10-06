@@ -14,6 +14,7 @@ use solana_transaction::versioned::VersionedTransaction;
 pub const PLAIN_TRANSFER_CU_LIMIT: u32 = 275_000; // measured 237,792
 pub const STEALTH_PAYMENT_CU_LIMIT: u32 = 295_000; // measured 254,565 at bump 255
 pub const SWEEP_CU_LIMIT: u32 = 310_000; // measured 268,049 with dust burn and reclaim
+pub const RECLAIM_CU_LIMIT: u32 = 3_800; // measured 3,260
 /// For transactions outside those shapes, which pay no priority fee: setup, tests, spikes.
 pub const DEFAULT_CU_LIMIT: u32 = 600_000;
 
