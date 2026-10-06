@@ -1,6 +1,6 @@
 ---
 status: verified
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Recipient client
@@ -64,4 +64,4 @@ A successful finalized signature proves this attempt's atomic transfer even if a
 - Payers must use a fresh R per payment to the same recipient. Reusing R reconstructs the same D; an existing token destination is refused, and closing it does not erase its public history. Another client can spend the source through the raw-scalar signer adapter. D_owner uses the standard SDK wallet schedule (V61, V63).
 - An announcement proves setup and handover, not a positive payment amount. Unpaid and already-retired accounts can appear with zero confidential balance; sweep refuses them. Public dust cleanup is separate (V64, V65).
 
-Counterparty destinations, reuse overrides, receipts, registry work and payer-engine stealth rows remain planned. Local validation does not replace external review of the derivations (Q1).
+A recipient can publish its meta-address under a wallet with `scope publish` and disclose a payment with `scope disclose --signature` ([client.md](client.md), Audit). Counterparty destinations and reuse overrides remain planned. Local validation does not replace external review of the derivations (Q1).

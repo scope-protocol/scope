@@ -11,7 +11,8 @@ It joins two existing pieces that were never combined, stealth addresses and Tok
 - Spike S3 green end to end: payer setup, handover and payment in one transaction, the recipient's sweep and rent refund in another.
 - Spike S1 green on Surfpool; the devnet run is pending.
 - `scope pay` pays plain and stealth recipients, resumably, in LiteSVM; a stealth row takes the recipient's `scope:` meta-address. Phases and gates: [docs/plan.md](docs/plan.md).
-- `scope register`, `scan`, and `sweep` support recipient backups, authenticated discovery, and full-balance sweeps into fresh confidential accounts. The flow is tested in LiteSVM; live-cluster validation remains pending. Usage: [docs/recipient.md](docs/recipient.md).
+- `scope register`, `scan`, and `sweep` support recipient backups, authenticated discovery, and full-balance sweeps into fresh confidential accounts; `publish` and `lookup` use the optional registry. The flow is tested in LiteSVM; live-cluster validation remains pending. Usage: [docs/recipient.md](docs/recipient.md).
+- `scope disclose` and `scope verify` prove one payment's amount: the payer for any row, a stealth recipient for its own.
 
 ## Layout
 
@@ -21,7 +22,7 @@ One cargo workspace.
 |---|---|---|
 | `programs/scope` | `scope-program` | The Pinocchio program: `announce`, `reclaim`, and the registry's `register` and `deregister`. Its LiteSVM tests and the S1 and S3 spikes live in `tests/it/` |
 | `crates/interface` | `scope-interface` | `no_std`, no dependencies: program id, announcement and registry entry layouts, instruction data, seeds, error codes, a read-only view of Token-2022 token accounts. Shared by the program and the client |
-| `crates/client` | `scope-client` | Address derivation, instruction and v1 transaction builders, payer engine and journal, recipient scan and sweep, RPC and LiteSVM (feature `litesvm`) backends, and spike binaries in `examples/`. Receipts remain planned |
+| `crates/client` | `scope-client` | Address derivation, instruction and v1 transaction builders, payer engine and journal, recipient scan and sweep, receipts, registry lookup, RPC and LiteSVM (feature `litesvm`) backends, and spike binaries in `examples/` |
 | `crates/stealth-keygen` | `stealth-keygen` | Recipient keys, HKDF stealth derivation, raw-scalar signing, and protected account-scoped `ct_ikm`. Off-chain |
 | `cli` | `scope-cli`, binary `scope` | Argument parsing and output over `crates/client`. `pay` (plain and stealth rows), `register`, `scan`, `sweep`, `disclose` and `verify` work; `bench` remains a stub |
 | `docs/` | | Brief, design, client, crypto, privacy, plan, decisions, verification. Start at [docs/README.md](docs/README.md) |
