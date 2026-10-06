@@ -193,7 +193,7 @@ fn mint_info<C: Chain>(chain: &C, mint: &Address) -> Result<MintInfo, PayError> 
         .map(|key| ElGamalPubkey::try_from(key.0.as_slice()))
         .transpose()
         .map_err(|_| bad("bad auditor key"))?;
-    // `announce` does not check approval (verification: V69), so this is the client's job.
+    // `announce` does not check approval (verification: V72), so this is the client's job.
     let frozen_by_default = state
         .get_extension::<DefaultAccountState>()
         .is_ok_and(|s| s.state == AccountState::Frozen as u8);

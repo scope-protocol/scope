@@ -38,7 +38,7 @@ The payer knows S and every leaf of PRK. `d` is derived from `b_spend`, which ne
 ## Curve25519 checks
 
 - X25519 clamping neutralises low-order points; still reject S = 0 on both sides.
-- Ed25519 has cofactor 8: B_spend must satisfy `L·B_spend = identity`. In v1 the client checks it: `stealth-keygen` rejects small-order and mixed-order keys and an identity P (verification: V42), and the CLI does not let a user skip that. `register` checks it on chain too, with the curve25519 syscalls, before a key enters the registry ([design.md](design.md), Registry; verification: V79). A blacklist of the eight small-order encodings is not a substitute: it misses mixed-order points.
+- Ed25519 has cofactor 8: B_spend must satisfy `L·B_spend = identity`. In v1 the client checks it: `stealth-keygen` rejects small-order and mixed-order keys and an identity P (verification: V42), and the CLI does not let a user skip that. `register` checks it on chain too, with the curve25519 syscalls, before a key enters the registry ([design.md](design.md), Registry; verification: V82). A blacklist of the eight small-order encodings is not a substitute: it misses mixed-order points.
 - Keep B_spend (Edwards) and B_scan (Montgomery) as separate keys. Converting one key between representations has a sign ambiguity.
 - Reducing 512 bits mod ℓ leaves a bias below 2^-260.
 - The payer's client checks that P decompresses before sending; a bad P only wastes the payer's money. No instruction of ours checks P.
