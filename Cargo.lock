@@ -2985,6 +2985,7 @@ dependencies = [
  "solana-keypair",
  "solana-rpc-client",
  "solana-signature",
+ "solana-signer",
  "stealth-keygen",
  "zeroize",
 ]

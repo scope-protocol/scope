@@ -12,6 +12,7 @@ use scope_client::{
 use solana_address::Address;
 use solana_keypair::read_keypair_file;
 use solana_rpc_client::rpc_client::RpcClient;
+use solana_signer::Signer;
 use std::{
     io::{self, Write},
     path::PathBuf,
@@ -32,6 +33,10 @@ enum Command {
     Register(RegisterArgs),
     /// Pay a batch of plain and stealth recipients.
     Pay(PayArgs),
+    /// Publish your meta-address under a wallet in the on-chain registry, or remove it.
+    Publish(PublishArgs),
+    /// Print the meta-addresses wallets published, fetched in one query.
+    Lookup(LookupArgs),
     /// Find payments addressed to you.
     Scan(ScanArgs),
     /// Move a found payment into a fresh account of your own.
@@ -201,6 +206,62 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
 fn write_recovery(output: &mut impl Write, report: &sweep::SweepReport) -> io::Result<()> {
     writeln!(output, "{report}")?;
     output.flush()
+}
+
+#[derive(Debug, Args)]
+struct PublishArgs {
+    #[command(flatten)]
+    keys: RecipientKeys,
+    /// Wallet the entry is published under; it signs and pays the entry's rent.
+    #[arg(long, default_value = "~/.config/solana/id.json")]
+    keypair: String,
+    /// Remove the wallet's entry and return its rent instead.
+    #[arg(long)]
+    remove: bool,
+    #[arg(long, default_value = "http://127.0.0.1:8899")]
+    url: String,
+}
+
+#[derive(Debug, Args)]
+struct LookupArgs {
+    #[arg(required = true)]
+    wallets: Vec<Address>,
+    #[arg(long, default_value = "http://127.0.0.1:8899")]
+    url: String,
+}
+
+fn run_publish(args: PublishArgs) -> anyhow::Result<()> {
+    let keypair_path = expand_home(&args.keypair)?;
+    let wallet = read_keypair_file(&keypair_path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", keypair_path.display()))?;
+    let ix = if args.remove {
+        scope_client::ix::deregister(&wallet.pubkey())
+    } else {
+        scope_client::ix::register(&wallet.pubkey(), &args.keys.load()?.derive_public_keys())
+    };
+    let rpc = RpcClient::new_with_commitment(
+        args.url,
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    );
+    let tx = scope_client::tx::v1_transaction(&wallet, &[], &[ix], rpc.get_latest_blockhash()?);
+    let signature = rpc.send_and_confirm_transaction(&tx)?;
+    let (entry, _) = scope_client::address::meta_entry_address(&wallet.pubkey());
+    println!(
+        "{}\t{entry}\t{signature}",
+        if args.remove { "removed" } else { "published" }
+    );
+    Ok(())
+}
+
+fn run_lookup(args: LookupArgs) -> anyhow::Result<()> {
+    for (wallet, keys) in scope_client::registry::lookup(&recipient_chain(args.url), &args.wallets)?
+    {
+        match keys {
+            Some(keys) => println!("{wallet}\t{}", keys.to_meta_address()),
+            None => println!("{wallet}\tnot published"),
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Args)]
@@ -395,6 +456,8 @@ fn main() -> anyhow::Result<()> {
             eprintln!("recipient backup: {}", path.display());
             Ok(())
         }
+        Command::Publish(args) => run_publish(args),
+        Command::Lookup(args) => run_lookup(args),
         Command::Scan(args) => run_scan(args),
         Command::Sweep(args) => run_sweep(args),
         Command::Disclose(args) => run_disclose(args),

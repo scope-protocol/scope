@@ -501,6 +501,27 @@ impl RecipientChain for SvmChain<'_> {
             })
             .collect())
     }
+    fn registry_entries(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        Ok(self
+            .svm
+            .get_program_accounts(&program_id())
+            .into_iter()
+            .filter(|(_, a)| {
+                a.data.len() == scope_interface::state::META_ENTRY_LEN
+                    && a.data[..8] == scope_interface::state::META_ENTRY_DISCRIMINATOR
+            })
+            .map(|(address, a)| {
+                (
+                    address,
+                    AccountData {
+                        owner: a.owner,
+                        lamports: a.lamports,
+                        data: a.data,
+                    },
+                )
+            })
+            .collect())
+    }
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError> {
         let priority = match message {
             solana_message::VersionedMessage::V1(m) => m.config.priority_fee.unwrap_or(0),

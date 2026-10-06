@@ -74,6 +74,8 @@ pub trait Chain {
 pub trait RecipientChain: Chain {
     fn set_deadline(&mut self, deadline: Option<Instant>);
     fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError>;
+    /// Every registry entry, in one query, so lookups are picked locally.
+    fn registry_entries(&self) -> Result<Vec<(Address, AccountData)>, ChainError>;
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError>;
     fn finalized_status(&self, signature: &Signature) -> Result<FinalizedStatus, ChainError>;
 }
@@ -256,6 +258,40 @@ impl RecipientChain for RpcChain {
                         0,
                         &[ANNOUNCEMENT_DISCRIMINATOR, ANNOUNCEMENT_VERSION],
                     )),
+                ]),
+                account_config: RpcAccountInfoConfig {
+                    encoding: Some(UiAccountEncoding::Base64),
+                    commitment: Some(CommitmentConfig::confirmed()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))?;
+        accounts
+            .into_iter()
+            .map(|(address, a)| {
+                Ok((
+                    address,
+                    AccountData {
+                        owner: a.owner.parse().map_err(rpc_err)?,
+                        lamports: a.lamports,
+                        data: a.data.decode().ok_or_else(|| {
+                            ChainError(format!("invalid RPC account encoding for {address}"))
+                        })?,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    fn registry_entries(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        use scope_interface::state::{META_ENTRY_DISCRIMINATOR, META_ENTRY_LEN};
+        let accounts = self.call(self.rpc().get_program_ui_accounts_with_config(
+            &crate::address::program_id(),
+            RpcProgramAccountsConfig {
+                filters: Some(vec![
+                    RpcFilterType::DataSize(META_ENTRY_LEN as u64),
+                    RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &META_ENTRY_DISCRIMINATOR)),
                 ]),
                 account_config: RpcAccountInfoConfig {
                     encoding: Some(UiAccountEncoding::Base64),

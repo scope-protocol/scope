@@ -109,3 +109,45 @@ fn stealth_payment_keeps_headroom_under_its_limit() {
         STEALTH_PAYMENT_CU_LIMIT,
     );
 }
+
+/// Measured 2026-10-06 at bump 255: 8,728, S7 included. Ceiling about 20% above.
+const REGISTER_CU_MAX: u64 = 10_500;
+
+#[test]
+fn register_stays_within_budget() {
+    use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT as B, scalar::Scalar};
+    use scope_interface::{instruction::RegisterData, state::META_SCHEME_V1};
+    let mut h = Harness::new();
+    let owner = loop {
+        let k = Keypair::new();
+        if scope_client::address::meta_entry_address(&k.pubkey()).1 == 255 {
+            break k;
+        }
+    };
+    h.svm.airdrop(&owner.pubkey(), 1_000_000_000).expect("fund");
+    let (entry, _) = scope_client::address::meta_entry_address(&owner.pubkey());
+    let data = RegisterData {
+        scheme_id: META_SCHEME_V1,
+        version: 1,
+        spend: (B * Scalar::from(11u64)).compress().to_bytes(),
+        scan: [9; 32],
+        flags: 0,
+    };
+    let ix = solana_instruction::Instruction {
+        program_id: scope_client::address::program_id(),
+        accounts: vec![
+            solana_instruction::AccountMeta::new(owner.pubkey(), true),
+            solana_instruction::AccountMeta::new(entry, false),
+            solana_instruction::AccountMeta::new_readonly(
+                solana_address::Address::default(),
+                false,
+            ),
+        ],
+        data: data.to_bytes().to_vec(),
+    };
+    let meta = h.send(&[ix], &[&owner]).expect("register");
+    let used = program_compute_units(&meta.logs);
+    println!("register CU {used:?}");
+    assert_eq!(used.len(), 1);
+    assert!(used[0] <= REGISTER_CU_MAX, "register used {}", used[0]);
+}

@@ -1,8 +1,12 @@
 use crate::address::{
-    announcement_address, program_id, token_2022, token_account_address, token_account_seed_str,
+    announcement_address, meta_entry_address, program_id, token_2022, token_account_address,
+    token_account_seed_str,
 };
 use core::num::NonZeroI8;
-use scope_interface::instruction::{AnnounceData, RECLAIM_DATA};
+use scope_interface::{
+    instruction::{AnnounceData, RECLAIM_DATA, RegisterData, deregister_data},
+    state::{META_SCHEME_V1, META_VERSION},
+};
 use solana_address::Address;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_zk_sdk::{
@@ -16,6 +20,7 @@ use spl_token_2022_interface::{
     instruction::{AuthorityType, initialize_account3, set_authority},
 };
 use spl_token_confidential_transfer_proof_extraction::instruction::ProofLocation;
+use stealth_keygen::RecipientPublicKeys;
 
 pub fn announce(payer: &Address, e: &[u8; 32], view_tag: u8) -> Instruction {
     let token_account = token_account_address(payer, e);
@@ -47,6 +52,41 @@ pub fn reclaim(announcement: &Address, token_account: &Address, payer: &Address)
             AccountMeta::new_readonly(token_2022(), false),
         ],
         data: RECLAIM_DATA.to_vec(),
+    }
+}
+
+/// Publishes `keys` under `registrant`; the registrant signs and pays the entry's rent.
+pub fn register(registrant: &Address, keys: &RecipientPublicKeys) -> Instruction {
+    let (entry, _) = meta_entry_address(registrant);
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*registrant, true),
+            AccountMeta::new(entry, false),
+            AccountMeta::new_readonly(Address::default(), false),
+        ],
+        data: RegisterData {
+            scheme_id: META_SCHEME_V1,
+            version: META_VERSION,
+            spend: keys.spend_public_key_bytes(),
+            scan: keys.scan_public_key_bytes(),
+            flags: 0,
+        }
+        .to_bytes()
+        .to_vec(),
+    }
+}
+
+/// Closes the registrant's entry and returns its rent.
+pub fn deregister(registrant: &Address) -> Instruction {
+    let (entry, _) = meta_entry_address(registrant);
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*registrant, true),
+            AccountMeta::new(entry, false),
+        ],
+        data: deregister_data(META_SCHEME_V1).to_vec(),
     }
 }
 

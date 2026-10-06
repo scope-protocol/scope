@@ -22,7 +22,7 @@ Built in `crates/client/src/pay.rs` for plain and stealth rows. A stealth row's 
 
 **Source.** Keys are per wallet, `derive_confidential_keys(payer, b"")`, as spl-token-cli 5.6 derives them, so a source set up with that CLI works; the engine refuses a source whose ElGamal key differs (verification: V50). The engine reads the AE hint and confirms it against the ElGamal ciphertext ([crypto.md](crypto.md), Balance cache), then proves from that verified value. It spends only the available balance; pending balance is applied before a run, with spl-token-cli 5.6 or later, never during one.
 
-**Privacy.** Send order is a random permutation recorded in the run header, so it does not mirror the file order. Meta-addresses come from the input file in v1; once a registry exists, they are fetched in one query and picked locally.
+**Privacy.** Send order is a random permutation recorded in the run header, so it does not mirror the file order. Meta-addresses come from the input file; `scope lookup <wallet>...` finds published ones, fetching every registry entry in one query and picking locally (crates/client/src/registry.rs).
 
 The library supplies `RecipientPublicKeys::to_meta_address()` and `from_meta_address(&str)`: a `scope:` Base58Check string containing a version and both public keys. The parser validates the checksum, version and keys before the payer derives a payment (verification: V62). `scope pay` reads a meta-address in a row's recipient column as a stealth row.
 

@@ -20,9 +20,16 @@ pub enum ScopeError {
     AnnouncementInUse = 15,
     NotAnnouncement = 16,
     PayerMismatch = 17,
+    RegistrantNotSigner = 18,
+    UnsupportedMetaAddress = 19,
+    MetaAddressMismatch = 20,
+    MetaAddressInUse = 21,
+    InvalidSpendKey = 22,
+    NotMetaAddressEntry = 23,
+    RegistrantMismatch = 24,
 }
 
-const ALL: [ScopeError; 18] = [
+const ALL: [ScopeError; 25] = [
     ScopeError::InvalidInstruction,
     ScopeError::InvalidInstructionData,
     ScopeError::PayerNotSigner,
@@ -41,6 +48,13 @@ const ALL: [ScopeError; 18] = [
     ScopeError::AnnouncementInUse,
     ScopeError::NotAnnouncement,
     ScopeError::PayerMismatch,
+    ScopeError::RegistrantNotSigner,
+    ScopeError::UnsupportedMetaAddress,
+    ScopeError::MetaAddressMismatch,
+    ScopeError::MetaAddressInUse,
+    ScopeError::InvalidSpendKey,
+    ScopeError::NotMetaAddressEntry,
+    ScopeError::RegistrantMismatch,
 ];
 
 impl ScopeError {

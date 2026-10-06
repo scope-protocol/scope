@@ -1,12 +1,12 @@
 ---
 status: decided
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Design
 
 TL;DR: the payer creates each one-time confidential account itself, configures it as its temporary owner, pins the close authority to our announcement PDA and hands ownership to the recipient's one-time key, all at top level in one transaction.
-Our Pinocchio program has two instructions, `announce` and `reclaim`, and is never in the funds path; the off-chain side is in [client.md](client.md).
+Our Pinocchio program has four instructions, `announce` and `reclaim` for payments and `register` and `deregister` for an optional registry, and is never in the funds path; the off-chain side is in [client.md](client.md).
 
 Marks: [verified] backed by a row in [verification.md](verification.md); [likely] arithmetic over verified facts; [open] pending a spike or review in [plan.md](plan.md).
 
@@ -14,12 +14,12 @@ Marks: [verified] backed by a row in [verification.md](verification.md); [likely
 
 | Component | Where | Role |
 |---|---|---|
-| Program `scope-program` | on-chain, Pinocchio 0.11.2, `no_std`, id `EwbfwDdaRdxzF6wJFBKQmqcGoh93wNFL7FMo31eK9V2H` | `announce` verifies a payer's setup and writes the announcement; `reclaim` returns rent to the payer |
+| Program `scope-program` | on-chain, Pinocchio 0.11.2, `no_std`, id `EwbfwDdaRdxzF6wJFBKQmqcGoh93wNFL7FMo31eK9V2H` | `announce` verifies a payer's setup and writes the announcement; `reclaim` returns rent to the payer; `register` and `deregister` keep a meta-address under a wallet |
 | Token-2022 and the ZK ElGamal proof program | Solana's, unchanged | confidential balances, proof verification, auditor key; live on mainnet-beta and devnet (verification: V15) |
 | `scope-interface` | `no_std`, no dependencies | account layout, instruction data, seeds, errors, Token-2022 account reader; shared by program and client |
-| CLI `scope` | off-chain, Rust | payer: pay, bench; recipient: register (prints an encoded meta-address; the on-chain registry is P4), scan, sweep; either: disclose, verify |
+| CLI `scope` | off-chain, Rust | payer: pay, lookup, bench; recipient: register (creates a backup and prints its meta-address), publish, scan, sweep; either: disclose, verify |
 
-No relayer, no indexer, no second program, no on-chain registry in v1.
+No relayer, no indexer, no second program. The registry is optional: a meta-address string passed out of band works without it.
 
 ## Keys
 
@@ -65,7 +65,7 @@ Every field is a byte array read by copy. Layout, seeds, instruction data, error
 
 ## Instructions
 
-The first data byte selects the instruction: 0 `announce`, 1 `reclaim`. Errors are `Custom(code)` from `ScopeError`, codes append-only.
+The first data byte selects the instruction: 0 `announce`, 1 `reclaim`, 2 `register`, 3 `deregister`. Errors are `Custom(code)` from `ScopeError`, codes append-only.
 
 ### announce
 
@@ -164,7 +164,13 @@ The program holds no authority over tokens: the announcement PDA is only a close
 
 ## Registry
 
-Deferred to P4 ([plan.md](plan.md), Q12). v1 passes `scope:` followed by Base58Check of `0x01 || B_spend || B_scan`; version 1 identifies the key layout and current payment schedule, and the checksum is four bytes of double-SHA256. `RecipientPublicKeys::to_meta_address` and `from_meta_address` implement this format and validate the decoded keys (verification: V59, V62). The CLI's `register` creates a recipient backup and prints its meta-address; payer-engine stealth-row parsing remains planned. Until a registry exists, the small-order and mixed-order rejection in `stealth-keygen` is the only check on B_spend (verification: V42).
+A recipient can publish its meta-address under a wallet; a payer looks it up with `scope lookup`, which fetches every entry in one query and picks locally, then pastes the meta-address into the payroll file, so the file records exactly whom it paid. A meta-address string passed out of band works without it: `scope:` followed by Base58Check of `0x01 || B_spend || B_scan`, a four-byte double-SHA256 checksum (verification: V59, V62).
+
+The entry matches sRFC-42 v1 byte for byte, so code that reads those entries reads ours: PDA `["meta", wallet, scheme_id as u16 LE]`, 109 bytes: Anchor's discriminator `sha256("account:MetaAddressEntry")[..8]`, registrant 32, scheme id 2, bump 1, version 1, B_spend 32, B_scan 32, flags 1 (susruth/slnt a958ece, `programs/registry/src/lib.rs` 117-130). Its PDA differs from slnt's, which derives from slnt's program id.
+
+**register.** Accounts: registrant (signer, writable), entry (writable), System program. Data after the discriminator, in sRFC-42's order: scheme id, version, B_spend, B_scan, flags, 68 bytes. Checks, in this order: data length; scheme 1, version 1, flags 0; the registrant signed; the System program id; the entry is the canonical PDA; the entry has no data and is owned by System; B_spend is the canonical encoding of a prime-order point (S7). Then the program creates the entry as it creates an announcement, so a pre-funded address still works, and writes it. B_spend is checked with the curve25519 syscalls, which multiply only by canonical scalars, so L itself is out of reach: with Q = (L-1)·B_spend, a prime-order point gives Q + B_spend = identity and Q ≠ identity, and -Q re-encoded must equal the input, which also refuses non-canonical encodings. A torsion part makes Q + B_spend nonzero, since L is odd and torsion orders divide 8. Cost: 8,728 CU at bump 255 (verification: V78, V79).
+
+**deregister.** Accounts: registrant (signer, writable), entry (writable). Data: the scheme id. Checks: data length; the registrant signed; the entry is ours and parses; its stored registrant is the signer; its scheme and address match. The entry's lamports go to the registrant and it is closed (verification: V78).
 
 ## Fallback
 

@@ -875,6 +875,9 @@ impl scope_client::chain::RecipientChain for NoReclaim<'_> {
     fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
         self.0.announcements()
     }
+    fn registry_entries(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        self.0.registry_entries()
+    }
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError> {
         self.0.fee(message)
     }
@@ -1127,30 +1130,26 @@ fn recipient_receipts_prove_a_stealth_amount_and_reject_forged_keys() {
         "{stranger:?}"
     );
 
-    // About 1 in 256 strangers matches the 1-byte view tag; the derived key still refuses them.
+    // About 1 in 256 strangers matches the 1-byte view tag; search for one, since R is
+    // random per run, and check the derived key still refuses it.
     let address = found_announcement(&mut h, &alice);
     let announcement = h.svm.get_account(&address).expect("announcement");
     let note = stealth_keygen::PaymentAnnouncement {
         ephemeral_public_key: announcement.data[4..36].try_into().expect("R"),
         discovery_tag: announcement.data[2],
     };
-    let mut collisions = 0;
-    for n in 0..2_000_u32 {
-        let mut bytes = [3; 64];
-        bytes[32..36].copy_from_slice(&n.to_le_bytes());
-        let stranger = RecipientSecretKeys::from_bytes(bytes).expect("stranger");
-        if matches!(
-            stealth_keygen::recover_payment(&stranger, &note),
-            Ok(Some(_))
-        ) {
-            collisions += 1;
-        }
-        assert!(matches!(
-            receipt::disclose_as_recipient(&archive, &stranger, &signature),
-            Err(ReceiptError::NotOurs)
-        ));
-    }
-    assert!(collisions > 0, "the tag-collision path ran");
+    let colliding = (0u32..)
+        .map(|n| {
+            let mut bytes = [3; 64];
+            bytes[32..36].copy_from_slice(&n.to_le_bytes());
+            RecipientSecretKeys::from_bytes(bytes).expect("stranger")
+        })
+        .find(|s| matches!(stealth_keygen::recover_payment(s, &note), Ok(Some(_))))
+        .expect("a stranger whose tag matches");
+    assert!(matches!(
+        receipt::disclose_as_recipient(&archive, &colliding, &signature),
+        Err(ReceiptError::NotOurs)
+    ));
 }
 
 #[test]

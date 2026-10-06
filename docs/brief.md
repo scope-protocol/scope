@@ -62,7 +62,7 @@ Buyers: stablecoin payroll and B2B settlement platforms serving payers who are p
 
 ## Scope
 
-Build: one Pinocchio program (`announce`, `reclaim`; an on-chain registry in P4 if Q12 says so), one Rust CLI (pay, scan, sweep, disclose, verify, bench), a privacy model, adversarial tests, a chaos harness for the payer engine, a devnet demo, a write-up posted to the sRFC-42 discussion.
+Build: one Pinocchio program (`announce`, `reclaim`, and `register` and `deregister` for an optional registry in sRFC-42's layout), one Rust CLI (pay, lookup, publish, scan, sweep, disclose, verify, bench), a privacy model, adversarial tests, a chaos harness for the payer engine, a devnet demo, a write-up posted to the sRFC-42 discussion.
 
 Do not build: wallet integration, a web app beyond a status page, our own proof system, unlinkable consolidation, an indexer beyond demo scale, an issuer approver (a one-page spec ships in the write-up), mobile.
 
