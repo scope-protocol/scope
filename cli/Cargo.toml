@@ -18,13 +18,14 @@ clap.workspace = true
 getrandom = { version = "0.4.3", features = ["std", "sys_rng"] }
 libc = "0.2"
 scope-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 solana-address.workspace = true
 solana-commitment-config.workspace = true
 solana-keypair.workspace = true
 solana-rpc-client.workspace = true
 solana-signature.workspace = true
 solana-signer.workspace = true
-serde_json.workspace = true
 stealth-keygen.workspace = true
 zeroize = "1.9.0"
 

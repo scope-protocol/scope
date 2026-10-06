@@ -11,6 +11,26 @@ const VOTE_PROGRAM: Address =
     Address::from_str_const("Vote111111111111111111111111111111111111111");
 const SET_COMPUTE_UNIT_PRICE_TAG: u8 = 3;
 
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("priority price {price} is above the cap {cap}")]
+pub struct FeeAboveCap {
+    pub price: u64,
+    pub cap: u64,
+}
+
+pub fn priority_price(mut prices: Vec<u64>, cap: u64) -> Result<u64, FeeAboveCap> {
+    prices.sort_unstable();
+    let price = if prices.is_empty() {
+        0
+    } else {
+        percentile(&prices, 75)
+    };
+    if price > cap {
+        return Err(FeeAboveCap { price, cap });
+    }
+    Ok(price)
+}
+
 /// Nearest-rank percentile of a sorted, non-empty slice.
 pub fn percentile(sorted: &[u64], pct: usize) -> u64 {
     let n = sorted.len();
@@ -133,5 +153,15 @@ mod tests {
         assert_eq!(priority_fee_lamports(1, 600_000), 1);
         assert_eq!(priority_fee_lamports(1_000_000, 600_000), 600_000);
         assert_eq!(priority_fee_lamports(0, 600_000), 0);
+    }
+
+    #[test]
+    fn priority_price_sorts_samples_and_enforces_the_cap() {
+        assert_eq!(priority_price(Vec::new(), 0), Ok(0));
+        assert_eq!(priority_price(vec![3, 0, 1, 2], 2), Ok(2));
+        assert_eq!(
+            priority_price(vec![3, 0, 1, 2], 1),
+            Err(FeeAboveCap { price: 2, cap: 1 })
+        );
     }
 }

@@ -2979,6 +2979,7 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
  "scope-client",
+ "serde",
  "serde_json",
  "solana-address 2.6.1",
  "solana-commitment-config",

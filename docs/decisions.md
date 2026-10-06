@@ -18,6 +18,14 @@ Docs describe the present; this file holds the why. Design history from before t
 - **Prefunded one-time addresses are created anyway.** An expired attempt publishes T's address; anyone can then send it lamports, which makes CreateAccountWithSeed fail. The rebuild tops up, allocates and assigns instead. Rejected: halting, which would let one transfer of dust stop a run.
 - **Compute limits per shape and one funding rule for P.** The fee is paid on the header's CU limit, so each shape gets its own limit about 15% above measurement (V73), and the payer funds P with exactly what the sweep needs at the 1,000,000 micro-lamport cap (V74). Rejected: one 600,000 limit for everything, and a funding estimate the sweep did not share.
 
+## 2026-10-06 Recipient outcomes and retry pricing
+
+- **Completion survives metadata failures.** A successful finalized signature is authoritative. Later balance reads are optional and share the remaining deadline; absent observations remain explicit `None` values. Account-state completion similarly survives optional reporting failures. Rejected: returning `Pending` after observing completion or presenting a predicted balance as a measured one.
+
+- **New attempts get current prices.** Preparation and safe rebuilds share the payer's p75-plus-cap policy. Identical resends retain the same fee and signature. Unresolved submission retains its latest send error without treating it as proof of failure. Rejected: reusing stale prices on new attempts or aborting solely on a transport error.
+
+- **Recovery is durable and the destination is usable.** Every non-dry-run attempt is synchronized to a private, locked recovery journal before stdout and broadcast. Public R and the backup can export D_owner as a standard private keypair file; its wallet keys can apply and spend D's pending balance. New directory entries are synchronized, and incomplete journal tails are repaired under the lock. Historical transaction discovery remains Q17. Rejected: relying on terminal output alone, exporting secrets to stdout, overwriting key files, or changing the derivations.
+
 ## 2026-10-05 Recipient state refresh and discovery
 
 - **Two safe retries refresh the full snapshot.** An applied source can accept a further credit, and a mint auditor can change. Each rebuild refreshes source balances, mint policy, proofs, funding and rent; two retries cover cleanup followed by one additional credit. Work remains bounded by the deadline and funding floor. Rejected: treating the pending-credit cap as a lifetime limit or reusing stale proofs.

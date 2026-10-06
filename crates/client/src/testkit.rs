@@ -329,6 +329,12 @@ pub struct SvmChain<'a> {
     /// Model a source that has not appeared in finalized reads yet.
     pub finalized_missing_until_send: Option<Address>,
     pub fail_finalized_after_send: bool,
+    pub fail_status_after_send: bool,
+    pub finalized_read_delay: std::time::Duration,
+    pub unavailable_finalized_account: Option<Address>,
+    pub send_error: Option<String>,
+    pub price_samples: Vec<Vec<u64>>,
+    pub price_reads: Cell<usize>,
     pub lag_finalized_reads: bool,
     pub lag_finalized_status: bool,
     pub before_send: Option<VersionedTransaction>,
@@ -337,8 +343,6 @@ pub struct SvmChain<'a> {
     pub sent_signatures: Vec<solana_signature::Signature>,
     pub failed_status_lag: Cell<usize>,
     pub height_delay: std::time::Duration,
-    /// What `recent_prices` returns; empty by default, as on an idle cluster.
-    pub prices: Vec<u64>,
     sent: bool,
 }
 
@@ -355,6 +359,12 @@ impl<'a> SvmChain<'a> {
             drop_sends: 0,
             finalized_missing_until_send: None,
             fail_finalized_after_send: false,
+            fail_status_after_send: false,
+            finalized_read_delay: std::time::Duration::ZERO,
+            unavailable_finalized_account: None,
+            send_error: None,
+            price_samples: Vec::new(),
+            price_reads: Cell::new(0),
             lag_finalized_reads: false,
             lag_finalized_status: false,
             before_send: None,
@@ -363,7 +373,6 @@ impl<'a> SvmChain<'a> {
             sent_signatures: Vec::new(),
             failed_status_lag: Cell::new(0),
             height_delay: std::time::Duration::ZERO,
-            prices: Vec::new(),
             sent: false,
         }
     }
@@ -377,6 +386,12 @@ impl Chain for SvmChain<'_> {
     ) -> Result<Option<AccountData>, ChainError> {
         self.account_reads.set(self.account_reads.get() + 1);
         if commitment == Commitment::Finalized {
+            if self.unavailable_finalized_account == Some(*address) {
+                return Err(ChainError("RPC account read unavailable".into()));
+            }
+            if self.sent {
+                std::thread::sleep(self.finalized_read_delay);
+            }
             if self.fail_finalized_after_send && self.sent {
                 return Err(ChainError("RPC disconnected after send".into()));
             }
@@ -423,6 +438,9 @@ impl Chain for SvmChain<'_> {
 
     fn send(&mut self, tx: &VersionedTransaction) -> Result<(), ChainError> {
         self.sent_signatures.push(tx.signatures[0]);
+        if let Some(error) = &self.send_error {
+            return Err(ChainError(error.clone()));
+        }
         if self.drop_sends > 0 {
             self.drop_sends -= 1;
             return Ok(());
@@ -452,7 +470,14 @@ impl Chain for SvmChain<'_> {
     }
 
     fn recent_prices(&self) -> Result<Vec<u64>, ChainError> {
-        Ok(self.prices.clone())
+        let reads = self.price_reads.get();
+        self.price_reads.set(reads + 1);
+        Ok(self
+            .price_samples
+            .get(reads)
+            .or_else(|| self.price_samples.last())
+            .cloned()
+            .unwrap_or_default())
     }
     fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
         Ok([42; 32])
@@ -469,6 +494,9 @@ impl RecipientChain for SvmChain<'_> {
         &self,
         signature: &solana_signature::Signature,
     ) -> Result<FinalizedStatus, ChainError> {
+        if self.fail_status_after_send && self.sent {
+            return Err(ChainError("RPC disconnected after send".into()));
+        }
         Ok(if self.lag_finalized_status {
             FinalizedStatus::Unknown
         } else {

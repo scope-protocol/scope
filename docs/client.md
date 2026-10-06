@@ -6,7 +6,7 @@ last_verified: 2026-10-06
 # Client
 
 TL;DR: one Rust CLI, `scope`, for both sides. The payer engine resends a signed transfer freely and rebuilds it only once the previous attempt is provably dead; the recipient scans by view tag and sweeps with plain Token-2022 instructions signed by the one-time key.
-Today `crates/client` holds address derivation, builders, the LiteSVM test kit, spike binaries, the payer engine for plain and stealth rows, and recipient scan and sweep. The CLI exposes `pay`, `register`, `scan`, `sweep`, `disclose` and `verify`.
+Today `crates/client` holds address derivation, builders, the LiteSVM test kit, spike binaries, the payer engine for plain and stealth rows, recipient scan and sweep, receipts and registry lookup. The CLI exposes `pay`, `lookup`, `register`, `publish`, `scan`, `sweep`, `export-sweep-key`, `disclose` and `verify`.
 
 ## Payer engine
 
@@ -36,7 +36,7 @@ Rows are `recipient,amount`, amounts in token units; the recipient is an account
 
 ## Recipient flow
 
-`scope register`, `scan` and `sweep` implement the recipient side: protected backups, streaming authenticated discovery and whole-balance v1 transfers into a fresh deterministic destination. Preparation and each safe rebuild simulate before sending. Recovery is flushed before every new attempt, and submission shares one deadline across RPC waits, retry preparation and polling. Source and mint state are refreshed on safe retries; a finalized successful signature proves the atomic outcome (verification: V64 to V67).
+`scope register`, `scan` and `sweep` implement the recipient side: protected backups, streaming authenticated discovery and whole-balance v1 transfers into a fresh deterministic destination. Preparation and each safe rebuild simulate before sending. Recovery is synchronized to a private journal and flushed to stdout before every new attempt. Submission shares one deadline across RPC waits, retry preparation and polling. Safe retries refresh source, mint and fee state; a finalized successful signature proves the atomic outcome even if optional metadata reads fail. `export-sweep-key` reconstructs a standard owner keypair from the backup and R so existing Token-2022 tools can apply and spend the destination balance (verification: V64 to V71).
 
 ## Recipient commands
 
@@ -51,7 +51,7 @@ Works unmodified on mints whose `auto_approve_new_accounts` is true. The client 
 A receipt names one finalized payment transaction and proves the amount it moved, against that transaction's inline ciphertext-validity proof, which Token-2022 verified when it landed. `scope verify <receipt>` needs an archival RPC with `maxSupportedTransactionVersion: 1` on `getTransaction` (verification: V22), checks the receipt's cluster against the node's genesis hash, and works after every account is closed. Two kinds, both in `crates/client/src/receipt.rs`:
 
 - **Payer receipt**, any row, plain or stealth: `{cluster, signature, amount, opening_lo, opening_hi}`. `scope disclose --run <id> --row <i>` re-derives the row's two Pedersen openings from the run secret, so nothing was stored; `verify` checks that they open the transfer's two amount commitments. It reveals that amount and nothing else (verification: V79).
-- **Recipient receipt**, stealth rows: `{cluster, signature, ct_ikm}`. `scope disclose --signature <payment>` with the recipient backup finds R and the tag in the payment's `announce` data, derives `ct_ikm`, and refuses unless its ElGamal key is the transfer's destination key, so a view-tag collision yields no receipt. `verify` derives the key, requires it to be the destination key, which a forged `ct_ikm` fails, and decrypts the amount. It grants read access to that one account (crypto.md) (verification: V80).
+- **Recipient receipt**, stealth rows: `{cluster, signature, ct_ikm}`. `scope disclose --signature <payment>` with the recipient backup finds R and the tag in the payment's `announce` data; after a sweep, the payment is the earliest successful transaction involving P, which the recovery journal records. It derives `ct_ikm` and refuses unless its ElGamal key is the transfer's destination key, so a view-tag collision yields no receipt. `verify` derives the key, requires it to be the destination key, which a forged `ct_ikm` fails, and decrypts the amount. It grants read access to that one account (crypto.md) (verification: V80).
 
 A mint auditor key, where the issuer sets one, remains a second path (verification: V12).
 

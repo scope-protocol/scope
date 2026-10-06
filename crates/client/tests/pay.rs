@@ -800,7 +800,7 @@ fn a_paid_stealth_row_sweeps_to_the_recipient_and_returns_both_rents_to_the_paye
         },
     )
     .expect("sweep");
-    assert!(report.reclaimed);
+    assert_eq!(report.reclaimed, Some(true));
     assert!(report.finalized_signature.is_some());
     assert_eq!(
         lamports(&h, &h.payer.pubkey()),
@@ -927,7 +927,7 @@ fn status_and_reclaim_follow_a_stealth_row_from_paid_to_reclaimed() {
         },
     )
     .expect("transfer-only sweep");
-    assert!(!report.reclaimed);
+    assert_eq!(report.reclaimed, Some(false));
     assert_eq!(states(&mut h), [(1, Swept)]);
 
     let lamports = |h: &Harness, a: &Address| h.svm.get_account(a).map_or(0, |a| a.lamports);
