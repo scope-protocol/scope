@@ -60,7 +60,11 @@ fn sweep_destination_seed_builds_a_solana_signer() {
 
 #[test]
 fn recovered_payment_signs_a_solana_transaction_with_the_protocol_context() {
-    use scope_client::{confidential::context, signer::PaymentSigner, tx::signed_v1_transaction};
+    use scope_client::{
+        confidential::context,
+        signer::PaymentSigner,
+        tx::{DEFAULT_CU_LIMIT, signed_v1_transaction},
+    };
     use solana_address::Address;
     let recipient = RecipientSecretKeys::generate(&mut TestRng(1)).expect("recipient");
     let sent = derive_payment(&recipient.derive_public_keys(), &mut TestRng(3)).expect("payment");
@@ -79,8 +83,15 @@ fn recovered_payment_signs_a_solana_transaction_with_the_protocol_context() {
     let destination = Keypair::new();
     let ix =
         solana_system_interface::instruction::transfer(&signer.pubkey(), &destination.pubkey(), 1);
-    let tx = signed_v1_transaction(&signer, &[], &[ix], solana_message::Hash::default(), None)
-        .expect("transaction");
+    let tx = signed_v1_transaction(
+        &signer,
+        &[],
+        &[ix],
+        solana_message::Hash::default(),
+        DEFAULT_CU_LIMIT,
+        None,
+    )
+    .expect("transaction");
     assert!(tx.signatures[0].verify(signer.pubkey().as_ref(), &tx.message.serialize()));
     let wrong_message = b"another transaction";
     assert!(!tx.signatures[0].verify(signer.pubkey().as_ref(), wrong_message));

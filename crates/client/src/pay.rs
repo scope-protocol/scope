@@ -15,7 +15,7 @@ use crate::{
     fees,
     input::{self, InputError, Row},
     journal::{self, INPUT_COPY, Journal, JournalError, Record, hex, unhex},
-    tx::{COMPUTE_UNIT_LIMIT, v1_transaction_with_fee},
+    tx::{PLAIN_TRANSFER_CU_LIMIT, v1_transaction_with_fee},
 };
 use core::num::NonZeroI8;
 use curve25519_dalek::scalar::Scalar;
@@ -710,11 +710,18 @@ impl<C: Chain> Engine<'_, C> {
             ProofLocation::InstructionOffset(offset(3), &proofs.range_proof_data),
         )
         .map_err(|e| PayError::Proof(e.to_string()))?;
-        let fee = fees::priority_fee_lamports(self.price()?, COMPUTE_UNIT_LIMIT);
+        let fee = fees::priority_fee_lamports(self.price()?, PLAIN_TRANSFER_CU_LIMIT);
         let (blockhash, last_valid_block_height) = self.chain.blockhash()?;
         Ok(Attempt {
             row,
-            tx: v1_transaction_with_fee(self.payer, &[], &ixs, blockhash, fee),
+            tx: v1_transaction_with_fee(
+                self.payer,
+                &[],
+                &ixs,
+                blockhash,
+                PLAIN_TRANSFER_CU_LIMIT,
+                fee,
+            ),
             last_valid_block_height,
             pre: self.current,
             post: proofs.equality_proof_data.context.ciphertext.0,

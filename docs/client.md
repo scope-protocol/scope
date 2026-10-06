@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 ---
 
 # Client
@@ -26,7 +26,7 @@ Built for plain recipients in `crates/client/src/pay.rs`; stealth rows come next
 
 The library supplies `RecipientPublicKeys::to_meta_address()` and `from_meta_address(&str)`: a `scope:` Base58Check string containing a version and both public keys. The parser validates the checksum, version and keys before the payer derives a payment (verification: V62). Register output is available in the CLI; payer stealth-row input wiring remains planned.
 
-**Fees.** Each attempt samples the per-CU price landed non-vote transactions actually paid in the latest confirmed block: ComputeBudget price for legacy and v0, header `priority_fee` over its compute unit limit for v1. It takes p75; above `--max-price` the run stops, resumable. `getRecentPrioritizationFees` is not used: unfiltered it returns each slot's minimum and reads near zero (verification: V39). The header carries the fee as total lamports (verification: V20). `tx::COMPUTE_UNIT_LIMIT` remains a fixed 600,000 and the loaded-accounts limit 4 MiB; the full recipient sweep fits that budget in LiteSVM (V68).
+**Fees.** Each attempt samples the per-CU price landed non-vote transactions actually paid in the latest confirmed block: ComputeBudget price for legacy and v0, header `priority_fee` over its compute unit limit for v1. It takes p75; above `--max-price` the run stops, resumable. `getRecentPrioritizationFees` is not used: unfiltered it returns each slot's minimum and reads near zero (verification: V39). The header carries the fee as total lamports (verification: V20). Each transaction shape has its own compute-unit limit, about 15% above its measurement, since the fee is paid on the limit: plain transfer 275,000, stealth payment 295,000, sweep 310,000 (verification: V70). The loaded-accounts limit is 4 MiB.
 
 `lamports_for_P` uses a fixed high price, not the sample, because the recipient may sweep weeks later: D's rent, two signatures and 600,000 CU at 1,000,000 micro-lamports per CU, plus a rent reserve in P. The recipient computes the exact requirement from the chain; the earlier allowance estimate must include this reserve. P remains rent-exempt so incoming SOL cannot invalidate a fixed drain (verification: V23).
 

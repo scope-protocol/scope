@@ -43,8 +43,9 @@ fn assert_token_error(result: TransactionResult, index: u8, expected: TokenError
 }
 
 /// A confidential Transfer of `AMOUNT` from a payer-owned source, with its three proofs.
+/// `auditor` must be the mint's auditor key, if it has one.
 #[allow(clippy::too_many_arguments)]
-fn transfer_ixs(
+pub(crate) fn transfer_ixs(
     h: &Harness,
     source: &Address,
     keys: &ElGamalKeypair,
@@ -53,6 +54,7 @@ fn transfer_ixs(
     mint: &Address,
     to: &Address,
     to_key: &ElGamalPubkey,
+    auditor: Option<&ElGamalPubkey>,
 ) -> Vec<Instruction> {
     let account = h.svm.get_account(source).expect("source");
     let state = StateWithExtensions::<Account>::unpack(&account.data).expect("unpack");
@@ -67,7 +69,7 @@ fn transfer_ixs(
         keys,
         ae,
         to_key,
-        None,
+        auditor,
     )
     .expect("proofs");
     let validity = &proofs.ciphertext_validity_proof_data_with_ciphertext;
@@ -235,6 +237,7 @@ fn the_credit_cap_admits_only_the_payers_credit() {
         &h.mint,
         &case.token_account,
         case.elgamal.pubkey(),
+        None,
     );
     assert_token_error(
         h.send(&ixs, &[]),
@@ -257,6 +260,7 @@ fn a_credit_in_another_mint_is_refused() {
         &h.mint,
         &case.token_account,
         case.elgamal.pubkey(),
+        None,
     );
     assert_token_error(h.send(&ixs, &[]), 0, TokenError::MintMismatch);
 }
@@ -304,6 +308,7 @@ fn a_mint_without_auto_approve_leaves_the_account_unpayable() {
         &mint,
         &case.token_account,
         case.elgamal.pubkey(),
+        None,
     );
     assert_token_error(
         h.send(&ixs, &[]),

@@ -6,7 +6,7 @@ use crate::{
     fees, ix,
     scan::{self, OwnedPayment, PaymentInfo, ScanError},
     signer::PaymentSigner,
-    tx::{COMPUTE_UNIT_LIMIT, signed_v1_transaction, v1_wire_size},
+    tx::{SWEEP_CU_LIMIT, signed_v1_transaction, v1_wire_size},
 };
 use core::num::NonZeroI8;
 use curve25519_dalek::scalar::Scalar;
@@ -464,6 +464,7 @@ impl SweepPlan {
             &[&self.owner],
             &ixs,
             blockhash,
+            SWEEP_CU_LIMIT,
             Some(self.priority),
         )
         .map_err(invalid)?;
@@ -500,6 +501,7 @@ impl SweepPlan {
             &[&self.owner],
             &ixs,
             blockhash,
+            SWEEP_CU_LIMIT,
             Some(self.priority),
         )
         .map_err(invalid)?;
@@ -561,7 +563,7 @@ pub fn prepare<C: RecipientChain>(
             opts.max_price_per_cu
         )));
     }
-    let priority = fees::priority_fee_lamports(price, COMPUTE_UNIT_LIMIT);
+    let priority = fees::priority_fee_lamports(price, SWEEP_CU_LIMIT);
     let info = payment.info.clone();
     let elgamal = *destination.keys.pubkey();
     let address = destination.address;

@@ -1689,7 +1689,7 @@ fn sweep_refuses_a_mint_that_now_requires_destination_approval() {
 fn full_recipient_transaction_fits_the_v1_wire_and_compute_budgets() {
     use scope_client::{
         sweep::{self, SweepOptions},
-        tx::{COMPUTE_UNIT_LIMIT, v1_wire_size},
+        tx::{SWEEP_CU_LIMIT, v1_wire_size},
     };
     let auditor = ElGamalKeypair::new_rand();
     let mut h = Harness::with_auditor(Some(auditor.pubkey()));
@@ -1719,7 +1719,11 @@ fn full_recipient_transaction_fits_the_v1_wire_and_compute_budgets() {
         .svm
         .simulate_transaction(transaction.clone())
         .expect("simulate");
-    assert!(simulation.meta.compute_units_consumed <= u64::from(COMPUTE_UNIT_LIMIT));
+    let used = simulation.meta.compute_units_consumed;
+    assert!(
+        used * 10 <= u64::from(SWEEP_CU_LIMIT) * 9,
+        "full sweep used {used} CU, over 90% of its {SWEEP_CU_LIMIT} limit"
+    );
     println!(
         "full sweep with auditor and dust: {} bytes, {} CU",
         bytes.len(),
