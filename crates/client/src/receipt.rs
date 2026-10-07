@@ -1,4 +1,4 @@
-//! Disclosure receipts (docs/client.md, Audit). A receipt names one finalized payment
+//! Disclosure receipts (docs/audit.md). A receipt names one finalized payment
 //! transaction and proves the amount it moved, checked against that transaction's own
 //! inline ciphertext-validity proof, which Token-2022 verified when it landed.
 //!

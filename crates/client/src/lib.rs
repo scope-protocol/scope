@@ -1,4 +1,4 @@
-//! Off-chain side of SCOPE (docs/client.md): address derivation, instruction and
+//! Off-chain side of SCOPE (docs/payer.md, docs/recipient.md): address derivation, instruction and
 //! transaction builders, and later the payer engine, scan, sweep and receipts.
 
 #![forbid(unsafe_code)]

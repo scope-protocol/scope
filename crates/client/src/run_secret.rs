@@ -1,4 +1,4 @@
-//! The payer's per-run secret (docs/client.md, Run secret). It is derived from the
+//! The payer's per-run secret (docs/crypto.md, Run secret and amount openings). It is derived from the
 //! payer's Ed25519 signature over a fixed message, and Ed25519 signing is
 //! deterministic, so the payer keypair alone rebuilds every stealth row's R and every
 //! row's amount openings. Nothing secret is stored.

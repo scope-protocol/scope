@@ -1,6 +1,6 @@
-//! Payer engine (docs/client.md, Payer engine): plain rows pay a configured confidential
+//! Payer engine (docs/payer.md): plain rows pay a configured confidential
 //! account; stealth rows create, hand over and announce a one-time account and pay it,
-//! all in one transaction (docs/design.md, One stealth payment, payer side).
+//! all in one transaction (docs/protocol.md, The picture).
 //!
 //! One source account per run, one attempt in flight. Every attempt for a row is
 //! built on the same source ciphertext, and Token-2022 applies a transfer only on
@@ -83,7 +83,7 @@ impl SourceKeys {
 
 pub struct PayOptions {
     pub runs_dir: PathBuf,
-    /// Refuse to start above this per-CU price, in micro-lamports; the run stays resumable.
+    /// Refuse any attempt above this per-CU price, in micro-lamports; the run stays resumable.
     pub max_price_per_cu: u64,
     /// Wait between polls of the source account.
     pub poll: Duration,
@@ -247,7 +247,7 @@ fn mint_info<C: Chain>(chain: &C, mint: &Address) -> Result<MintInfo, PayError> 
     })
 }
 
-/// One stealth row's one-time account, derived from the run secret (docs/design.md, Keys).
+/// One stealth row's one-time account, derived from the run secret (docs/crypto.md, Derivation tree).
 struct Stealth {
     ephemeral: [u8; 32],
     view_tag: u8,
@@ -1052,7 +1052,7 @@ pub fn reclaim<C: Chain>(
 }
 
 /// The payer's receipt for one paid row: its amount and the two openings the run secret
-/// derives for it. Works for plain and stealth rows (docs/client.md, Audit).
+/// derives for it. Works for plain and stealth rows (docs/audit.md).
 pub fn disclose<C: Chain>(
     chain: &C,
     payer: &Keypair,

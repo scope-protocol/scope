@@ -49,7 +49,7 @@ enum Command {
     Disclose(DiscloseArgs),
     /// Check a receipt against the chain.
     Verify(VerifyArgs),
-    /// Measure bytes, compute and cost per transaction.
+    /// Not implemented: will measure bytes, compute and cost per transaction.
     Bench,
 }
 

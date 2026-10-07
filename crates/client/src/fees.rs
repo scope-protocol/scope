@@ -1,4 +1,4 @@
-//! Priority fee sampling (docs/client.md, Fees): the per-CU price landed non-vote
+//! Priority fee sampling (docs/payer.md, How are fees priced?): the per-CU price landed non-vote
 //! transactions actually paid, never `getRecentPrioritizationFees`.
 
 use solana_address::Address;

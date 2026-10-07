@@ -1,4 +1,4 @@
-//! Append-only run journal (docs/client.md, Journal): `runs/<run_id>/journal.jsonl`,
+//! Append-only run journal (docs/payer.md, What if the run crashes?): `runs/<run_id>/journal.jsonl`,
 //! mode 0600, one writer holding an exclusive lock. Every record is fsynced before
 //! the call returns, so an attempt is on disk before its transaction is sent. It
 //! holds no secret and no plaintext amount; the amounts live in the input copy.

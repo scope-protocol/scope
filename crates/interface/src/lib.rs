@@ -1,5 +1,5 @@
 //! The contract between the program and the client: account layouts, instruction
-//! data, seeds, errors and a reader for Token-2022 token accounts (docs/design.md).
+//! data, seeds, errors and a reader for Token-2022 token accounts (docs/protocol.md).
 //!
 //! `no_std` with no dependencies, so every side builds it without version conflicts.
 

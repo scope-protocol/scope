@@ -1,5 +1,5 @@
 //! Transfer proofs with the amount's Pedersen openings supplied by the caller, so the
-//! payer can later prove a payment's amount by disclosing them (docs/client.md, Audit).
+//! payer can later prove a payment's amount by disclosing them (docs/audit.md).
 //! Same builders, inputs and order as `transfer_split_proof_data` in
 //! spl-token-confidential-transfer-proof-generation 0.6.1 (`src/transfer.rs` 79-253);
 //! only where the two amount openings come from differs, and the verifier never sees it.

@@ -1,4 +1,4 @@
-//! The Token-2022 settings every announced account must have (docs/design.md, announce).
+//! The Token-2022 settings every announced account must have (docs/protocol.md, What does each instruction check?).
 
 use crate::{address::TOKEN_2022, err};
 use pinocchio::{AccountView, Address, ProgramResult};

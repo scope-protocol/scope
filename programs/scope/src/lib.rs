@@ -1,4 +1,4 @@
-//! SCOPE on-chain program (docs/design.md): `announce` publishes a one-time token
+//! SCOPE on-chain program (docs/protocol.md): `announce` publishes a one-time token
 //! account the payer set up and handed over; `reclaim` returns its rent to the payer;
 //! `register` and `deregister` keep a recipient's meta-address under a wallet.
 
