@@ -1407,3 +1407,120 @@ fn reclaim_stops_after_three_lost_attempts() {
         "{stopped:?}"
     );
 }
+
+/// The mint's confidential authority changes its policy after a run started. Token-2022
+/// stores an auditor key without checking it, so `bad_auditor` writes bytes that do not parse.
+fn set_mint_policy(h: &mut Harness, auto_approve: bool, bad_auditor: bool) {
+    let placeholder = *ElGamalKeypair::new_rand().pubkey();
+    let authority = h.mint_authority.insecure_clone();
+    let ix = spl_token_2022_interface::extension::confidential_transfer::instruction::update_mint(
+        &token_2022(),
+        &h.mint,
+        &authority.pubkey(),
+        &[],
+        auto_approve,
+        bad_auditor.then(|| placeholder.into()),
+    )
+    .expect("update_mint");
+    h.send(&[ix], &[&authority]).expect("mint policy update");
+    if bad_auditor {
+        let mut account = h.svm.get_account(&h.mint).expect("mint");
+        let key: [u8; 32] = placeholder.into();
+        let at = account
+            .data
+            .windows(32)
+            .position(|w| w == key)
+            .expect("auditor key in the mint");
+        account.data[at..at + 32].fill(0xff);
+        h.svm.set_account(h.mint, account).expect("set mint");
+    }
+}
+
+/// One stealth row of `whole` tokens, killed after its transaction was sent.
+fn stealth_row_killed_after_send(
+    name: &str,
+    whole: u64,
+) -> (Harness, PayOptions, RecipientSecretKeys) {
+    let mut h = Harness::new();
+    let alice = stealth_recipient(21);
+    let o = opts(name);
+    let input = format!("{},{whole}\n", alice.derive_public_keys().to_meta_address());
+    let (mint, source) = (h.mint, h.source);
+    let killed = pay::start(
+        Killer::new(SvmChain::new(&mut h.svm), KillAt::AfterSend(1)),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        mint,
+        source,
+        input.as_bytes(),
+        &o,
+    );
+    assert!(matches!(killed, Err(PayError::Chain(_))), "got {killed:?}");
+    (h, o, alice)
+}
+
+fn resume_run(h: &mut Harness, o: &PayOptions) -> Result<pay::Report, PayError> {
+    let run_id = only_run(o);
+    pay::resume(
+        SvmChain::new(&mut h.svm),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        &run_id,
+        o,
+    )
+}
+
+#[test]
+fn an_unreadable_earlier_journal_stops_a_second_run_of_the_same_input() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 1);
+    let o = opts("unreadable");
+    let text = input(&rs);
+    let run_id = start(&mut h, &text, &o).expect("first run").run_id;
+    let journal = o.runs_dir.join(&run_id).join(JOURNAL);
+    let set = |mode| {
+        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(mode)).expect("chmod")
+    };
+    set(0o000);
+    let second = start(&mut h, &text, &o);
+    set(0o600);
+    assert!(
+        matches!(second, Err(PayError::Journal(_))),
+        "got {second:?}"
+    );
+    assert_eq!(pending(&h, &rs[0]), 1_000_000, "paid once");
+}
+
+#[test]
+fn a_landed_stealth_row_resumes_after_the_mint_stops_auto_approving() {
+    let (mut h, o, alice) = stealth_row_killed_after_send("policy-change", 1);
+    set_mint_policy(&mut h, false, false);
+    let report = resume_run(&mut h, &o).expect("resume reconciles the landed row");
+    assert_eq!(report.paid.len(), 1);
+    assert_eq!(found(&mut h, &alice).len(), 1);
+    resume_run(&mut h, &o).expect("a finished run resumes under the new policy");
+}
+
+#[test]
+fn resuming_a_payment_that_nearly_drains_the_source_does_not_underflow() {
+    let whole = SOURCE_FUNDS / 1_000_000 * 3 / 5;
+    let (mut h, o, alice) = stealth_row_killed_after_send("near-empty", whole);
+    let report = resume_run(&mut h, &o).expect("resume");
+    assert_eq!(report.paid.len(), 1);
+    assert_eq!(found(&mut h, &alice)[0].1, whole * 1_000_000);
+}
+
+#[test]
+fn disclose_survives_a_later_auditor_key_that_does_not_parse() {
+    use scope_client::receipt;
+    let (mut h, o, run_id, _, _) = paid_run("auditor-later");
+    let archive = JournalArchive::new(&h, &o, &run_id);
+    set_mint_policy(&mut h, true, true);
+    let receipt =
+        pay::disclose(&SvmChain::new(&mut h.svm), &h.payer, &run_id, 0, &o).expect("disclose");
+    assert_eq!(
+        receipt::verify(&archive, &receipt).expect("verify").amount,
+        1_250_000
+    );
+}

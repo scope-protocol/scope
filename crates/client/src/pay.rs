@@ -177,6 +177,24 @@ fn ciphertext(bytes: &str) -> Option<[u8; 64]> {
     unhex(bytes)?.try_into().ok()
 }
 
+/// The mint's decimals only, to read back a run's input. Today's payment policy (auditor
+/// key, approval, extensions) does not apply to rows already paid.
+fn mint_decimals<C: Chain>(chain: &C, mint: &Address) -> Result<u8, PayError> {
+    let bad = |why: &str| PayError::Mint {
+        mint: *mint,
+        why: why.into(),
+    };
+    let account = chain
+        .account(mint, Commitment::Confirmed)?
+        .ok_or(bad("not found"))?;
+    if account.owner != token_2022() {
+        return Err(bad("not a Token-2022 mint"));
+    }
+    StateWithExtensions::<Mint>::unpack(&account.data)
+        .map(|state| state.base.decimals)
+        .map_err(|_| bad("not a mint"))
+}
+
 fn mint_info<C: Chain>(chain: &C, mint: &Address) -> Result<MintInfo, PayError> {
     let bad = |why: &str| PayError::Mint {
         mint: *mint,
@@ -288,10 +306,14 @@ fn stealth_rows<C: Chain>(
         .collect()
 }
 
-/// Refuses a run with stealth rows on a mint they cannot use.
-fn check_stealth_mint(rows: &[Row], mint: &Address, info: &MintInfo) -> Result<(), PayError> {
-    let any = rows
-        .iter()
+/// Refuses stealth rows still to pay on a mint they cannot use.
+fn check_stealth_mint<'a>(
+    unpaid: impl IntoIterator<Item = &'a Row>,
+    mint: &Address,
+    info: &MintInfo,
+) -> Result<(), PayError> {
+    let any = unpaid
+        .into_iter()
         .any(|r| matches!(r.recipient, Recipient::Stealth(_)));
     match info.stealth_refusal {
         Some(why) if any => Err(PayError::Mint {
@@ -328,7 +350,6 @@ struct LoadedRun {
     order: Vec<usize>,
     derived_openings: bool,
     rows: Vec<Row>,
-    info: MintInfo,
 }
 
 fn load_run<C: Chain>(
@@ -366,16 +387,14 @@ fn load_run<C: Chain>(
     if hex(&solana_sha256_hasher::hash(&input_bytes).to_bytes()) != *input_sha256 {
         return Err(corrupt("input copy does not match the run's hash"));
     }
-    let info = mint_info(chain, &mint)?;
     let text = std::str::from_utf8(&input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
-    let rows = input::parse(text, info.decimals)?;
+    let rows = input::parse(text, mint_decimals(chain, &mint)?)?;
     Ok(LoadedRun {
         mint,
         source,
         order: order.clone(),
         derived_openings: *derived_openings,
         rows,
-        info,
     })
 }
 
@@ -502,19 +521,29 @@ fn verified_balance(
 
 /// Finds an earlier run of the same input, by the hash in each journal's first record.
 fn earlier_run(runs_dir: &Path, input_sha256: &str) -> Result<Option<String>, PayError> {
-    let Ok(entries) = std::fs::read_dir(runs_dir) else {
-        return Ok(None);
+    let io = |e| PayError::Journal(JournalError::Io(runs_dir.to_path_buf(), e));
+    let entries = match std::fs::read_dir(runs_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io(e)),
     };
-    for entry in entries.flatten() {
-        match journal::read_header(&entry.path()) {
+    for entry in entries {
+        let dir = entry.map_err(io)?.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        match journal::read_header(&dir) {
             Ok(Some(Record::Run {
                 run_id,
                 input_sha256: h,
                 ..
             })) if h == input_sha256 => return Ok(Some(run_id)),
-            // A journal that cannot be read may be this input's; refuse rather than pay twice.
-            Err(e @ JournalError::Corrupt { .. }) => return Err(e.into()),
-            _ => {}
+            Ok(_) => {}
+            // A crash between creating the directory and the journal leaves nothing to pay twice.
+            Err(JournalError::Io(_, e))
+                if e.kind() == std::io::ErrorKind::NotFound && !dir.join(INPUT_COPY).exists() => {}
+            // Any other journal that cannot be read may be this input's; refuse rather than pay twice.
+            Err(e) => return Err(e.into()),
         }
     }
     Ok(None)
@@ -672,13 +701,10 @@ pub fn resume<C: Chain>(
         source,
         order,
         rows,
-        info,
         ..
     } = load_run(&chain, payer, &dir, &records)?;
     let run_secret = RunSecret::derive(payer, run_id).map_err(|e| PayError::Keys(e.to_string()))?;
-    check_stealth_mint(&rows, &mint, &info)?;
     let stealth = stealth_rows(&chain, &rows, &run_secret, run_id, &payer.pubkey(), &mint)?;
-    let rents = stealth_rents(&chain, &stealth, info.space)?;
 
     let mut landed = HashSet::new();
     let mut open: Option<Record> = None;
@@ -725,6 +751,9 @@ pub fn resume<C: Chain>(
         Commitment::Confirmed,
     )?;
     let balance = verified_balance(&keys, &state, &source)?;
+    // Payment policy binds new payments only; it is checked once outcomes are reconciled.
+    let info = mint_info(&chain, &mint)?;
+    let rents = stealth_rents(&chain, &stealth, info.space)?;
     // The open attempt's row may have landed, which can leave its recipient unable to take
     // another credit; it is preflighted only if the attempt turns out not to have landed.
     let open_row = match &open {
@@ -807,6 +836,16 @@ pub fn resume<C: Chain>(
             "source is not where the last landed row left it".into(),
         ));
     }
+    check_stealth_mint(
+        engine
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !landed.contains(i))
+            .map(|(_, r)| r),
+        &engine.mint,
+        &info,
+    )?;
     engine.run(&order, &landed)
 }
 
@@ -1116,7 +1155,11 @@ impl<C: Chain> Engine<'_, C> {
                 tx: hex(&wincode::serialize(&attempt.tx).expect("transactions serialize")),
             })?;
             match self.drive(&attempt)? {
-                Outcome::Landed => return self.record_landed(&attempt),
+                Outcome::Landed => {
+                    // Resume reads the balance back from the chain instead.
+                    self.balance -= self.rows[row].amount;
+                    return self.record_landed(&attempt);
+                }
                 Outcome::Expired => {
                     (self.opts.log)(&format!("row {row}: attempt expired, rebuilding"));
                 }
@@ -1131,7 +1174,6 @@ impl<C: Chain> Engine<'_, C> {
             signature: signature.clone(),
         })?;
         let recipient = paid_to(&self.rows, &self.stealth, attempt.row);
-        self.balance -= self.rows[attempt.row].amount;
         self.current = attempt.post;
         (self.opts.log)(&format!(
             "row {}: {recipient} paid, {signature}",
