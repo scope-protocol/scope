@@ -86,7 +86,14 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), JournalError> {
         .open(path)
         .map_err(io(path))?;
     file.write_all(bytes).map_err(io(path))?;
-    file.sync_all().map_err(io(path))
+    file.sync_all().map_err(io(path))?;
+    sync_parent(path)
+}
+
+/// Makes a new directory entry for `path` durable.
+fn sync_parent(path: &Path) -> Result<(), JournalError> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    File::open(dir).and_then(|d| d.sync_all()).map_err(io(dir))
 }
 
 /// Takes the exclusive lock on `dir/.lock`, creating both; released when the file drops.
@@ -116,6 +123,8 @@ impl Journal {
             .open(&path)
             .map_err(io(&path))?;
         lock(&file, &path)?;
+        sync_parent(&path)?;
+        sync_parent(dir)?;
         Ok(Self { file, path })
     }
 
@@ -129,6 +138,7 @@ impl Journal {
             .map_err(io(&path))?;
         lock(&file, &path)?;
         let records = read(&path, &file)?;
+        repair_tail(&path, &file)?;
         Ok((Self { file, path }, records))
     }
 
@@ -178,12 +188,30 @@ fn read(path: &Path, file: &File) -> Result<Vec<Record>, JournalError> {
     Ok(records)
 }
 
+/// Ends the file on a newline before anything is appended, so a new record never joins
+/// the bytes a crash left behind. A torn last line, which `read` dropped, is cut off; a
+/// complete record that lost only its newline gets one.
+fn repair_tail(path: &Path, mut file: &File) -> Result<(), JournalError> {
+    let data = std::fs::read(path).map_err(io(path))?;
+    if data.is_empty() || data.ends_with(b"\n") {
+        return Ok(());
+    }
+    let start = data.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    if serde_json::from_slice::<Record>(&data[start..]).is_ok() {
+        file.write_all(b"\n").map_err(io(path))?;
+    } else {
+        file.set_len(start as u64).map_err(io(path))?;
+    }
+    file.sync_data().map_err(io(path))
+}
+
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Lowercase hex only, so every value has one encoding.
 pub fn unhex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+    if !s.len().is_multiple_of(2) || !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return None;
     }
     (0..s.len())
@@ -256,10 +284,36 @@ mod tests {
     }
 
     #[test]
+    fn appends_after_a_torn_tail_stay_readable() {
+        let d = dir("torn-append");
+        drop(Journal::create(&d).expect("create"));
+        let path = d.join(JOURNAL);
+        let landed = Record::Landed {
+            row: 1,
+            signature: "sig".into(),
+        };
+        for (tail, kept) in [
+            ("{\"t\":\"land", vec![Record::Done]),
+            ("{\"t\":\"done\"}", vec![Record::Done, Record::Done]),
+        ] {
+            std::fs::write(&path, format!("{{\"t\":\"done\"}}\n{tail}")).expect("write");
+            {
+                let (mut j, read) = Journal::open(&d).expect("open");
+                assert_eq!(read, kept);
+                j.append(&landed).expect("append");
+            }
+            let (_, read) = Journal::open(&d).expect("reopen");
+            assert_eq!(read, [kept, vec![landed.clone()]].concat());
+        }
+    }
+
+    #[test]
     fn hex_round_trips() {
         assert_eq!(hex(&[0, 0xab, 0xff]), "00abff");
         assert_eq!(unhex("00abff"), Some(vec![0, 0xab, 0xff]));
         assert_eq!(unhex("0"), None);
         assert_eq!(unhex("zz"), None);
+        assert_eq!(unhex("+f"), None);
+        assert_eq!(unhex("AB"), None);
     }
 }
