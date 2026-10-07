@@ -7,7 +7,7 @@ It joins two existing pieces that were never combined, stealth addresses and Tok
 ## Status
 
 - Design decided ([docs/design.md](docs/design.md)).
-- Program with `announce`, `reclaim`, `register` and `deregister` built and tested in LiteSVM: every check has an attack test that trips it, and CI holds each instruction to a CU ceiling (announce 6,373 CU, reclaim 3,256, register 8,728 with its on-chain torsion check).
+- Program with `announce`, `reclaim`, `register` and `deregister` built and tested in LiteSVM: every check has an attack test that trips it, and CI holds each instruction to a CU ceiling (announce 6,373 CU, reclaim 3,256, register 8,728 with its on-chain torsion check, deregister 489).
 - Spike S3 green end to end: payer setup, handover and payment in one transaction, the recipient's sweep and rent refund in another.
 - Spike S1 green on Surfpool; the devnet run is pending.
 - `scope pay` pays plain and stealth recipients, resumably, in LiteSVM; a stealth row takes the recipient's `scope:` meta-address. Phases and gates: [docs/plan.md](docs/plan.md).
@@ -27,7 +27,7 @@ One cargo workspace.
 | `cli` | `scope-cli`, binary `scope` | Argument parsing and output over `crates/client`. `pay` (plain and stealth rows), `lookup`, `register`, `publish`, `scan`, `sweep`, `export-sweep-key`, `disclose` and `verify` work; `bench` remains a stub |
 | `docs/` | | Brief, design, client, crypto, privacy, plan, decisions, verification. Start at [docs/README.md](docs/README.md) |
 
-The program and the client depend on `crates/interface`, which depends on nothing. `crates/stealth-keygen` derives stealth keys and account-scoped `ct_ikm`. `scope-client::confidential` converts that material into ElGamal and symmetric keys with the workspace ZK SDK. Q14 implementation is complete; external derivation review remains Q1. Payer-engine stealth rows and receipts remain planned.
+The program and the client depend on `crates/interface`, which depends on nothing. `crates/stealth-keygen` derives stealth keys and account-scoped `ct_ikm`. `scope-client::confidential` converts that material into ElGamal and symmetric keys with the workspace ZK SDK. The payer engine derives stealth rows with the same crate, and receipts are built and verified in `scope-client`. Q14 implementation is complete; external derivation review remains Q1.
 
 ## Build and test
 

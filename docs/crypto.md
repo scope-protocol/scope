@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-06
+last_verified: 2026-10-07
 ---
 
 # Cryptography
@@ -27,7 +27,7 @@ prefix = SHA512(len(label) || label || p)[32..64]  ->  nonce prefix for raw-scal
 d      = HKDF-SHA512(salt = "stealth-dest/v1", ikm = canonical_bytes(b_spend), info = "d-owner" || R, len = 32)  ->  Ed25519 seed for D_owner
 ```
 
-Why: RFC 5869 says distinct `info` under a PRF gives computationally independent outputs; that is the whole argument for the three shared-secret leaves, the same pattern as a TLS 1.3 key schedule. Every expansion carries the exact R bytes, so encodings of R that X25519 maps to the same S still give different outputs. `C` ties the confidential keys to one account on one cluster, so a repeated R on another cluster or mint does not repeat the keys. In `C`, `chain_id` is the cluster's genesis hash and `program_id` is the SCOPE program id `EwbfwDdaRdxzF6wJFBKQmqcGoh93wNFL7FMo31eK9V2H`. `scope-client::confidential::context` builds this context for recipient discovery and sweeping (verification: V63); payer-engine stealth rows remain planned.
+Why: RFC 5869 says distinct `info` under a PRF gives computationally independent outputs; that is the whole argument for the three shared-secret leaves, the same pattern as a TLS 1.3 key schedule. Every expansion carries the exact R bytes, so encodings of R that X25519 maps to the same S still give different outputs. `C` ties the confidential keys to one account on one cluster, so a repeated R on another cluster or mint does not repeat the keys. In `C`, `chain_id` is the cluster's genesis hash and `program_id` is the SCOPE program id `EwbfwDdaRdxzF6wJFBKQmqcGoh93wNFL7FMo31eK9V2H`. `scope-client::confidential::context` builds this context for recipient discovery and sweeping and for the payer's stealth rows (verification: V63, V75).
 
 `derive_confidential_keys_from_ikm(ikm: &[u8]) -> Result<(ElGamalKeypair, AeKey), ElGamalError>` in solana-zk-sdk 7.0.1 runs a second HKDF-SHA512 (salt `solana-conf-bal/v1`, info `ae` and `elgamal`), unchanged in 8.0.0 (verification: V28). Feeding it `ct_ikm` rather than raw S keeps the stages separate. The crypto crate exports `ct_ikm` as `ConfidentialKeyMaterial`, a zeroizing 32-byte secret with no `Debug`, `Clone` or `Copy`, and has no Solana SDK dependency; `scope-client::confidential::derive_confidential_keys` makes the SDK call.
 

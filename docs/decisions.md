@@ -11,6 +11,7 @@ Docs describe the present; this file holds the why. Design history from before t
 ## 2026-10-07 Review of the payer stealth branch
 
 - **Receipts authenticate the transaction they name.** `verify` and recipient `disclose` require the archived transaction to carry the receipt's signature first and every signature to verify. Without that, a node could answer with a transfer it built from openings it knows. A node can still misreport success; that trust stays with the verifier's choice of node. Rejected: checking success against a second node, which only moves the trust.
+- **Mint policy binds new payments only.** Resume reconciles every recorded and open attempt before it checks the mint's stealth requirements, and only against rows still to pay; `disclose` and `status` read the mint's decimals and nothing else. A mint authority can change approval or the auditor key at any time, and that must not strand a payment already on chain or its receipt. Rejected: snapshotting the policy in the run header, which would let a run keep paying under a policy the mint no longer has.
 - **Two owner areas instead of three.** The audit and security area joins the program and payer engine area: the registry, receipts, adversarial suite, CU assertions and CI. Its open questions moved with it and are decided in the entries below.
 
 ## 2026-10-06 Payer stealth rows
