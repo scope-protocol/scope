@@ -3,7 +3,9 @@
 //! multiply only by canonical scalars, so the group order L itself is out of reach:
 //! with Q = (L-1)·P, a prime-order P gives Q = -P, so Q + P is the identity, Q is not,
 //! and -Q re-encoded is P. Any torsion part makes Q + P nonzero, since L is odd and
-//! torsion orders divide 8; a non-canonical encoding fails the re-encoding.
+//! torsion orders divide 8. Non-canonical encodings exist only for y < 19 (as y + p) or
+//! x = 0, and none of those points has prime order, so the rules above already refuse
+//! them; the re-encoding check is a backstop.
 
 /// The identity's canonical encoding (y = 1).
 #[cfg(target_os = "solana")]
@@ -95,5 +97,33 @@ mod tests {
             })
             .expect("some small y is off the curve");
         assert!(!prime_order(&off_curve), "not on the curve");
+    }
+
+    #[test]
+    fn rejects_every_torsion_point_alone_and_mixed() {
+        use curve25519_dalek::constants::EIGHT_TORSION;
+        for t in &EIGHT_TORSION[1..] {
+            assert!(!prime_order(&t.compress().to_bytes()));
+            assert!(!prime_order(
+                &(B * Scalar::from(7u64) + t).compress().to_bytes()
+            ));
+        }
+    }
+
+    /// Why the re-encoding check is a backstop: no point a non-canonical encoding can
+    /// name has prime order.
+    #[test]
+    fn no_point_with_a_non_canonical_encoding_has_prime_order() {
+        use curve25519_dalek::{edwards::CompressedEdwardsY, traits::IsIdentity};
+        for y in 0u8..19 {
+            for sign in [0, 0x80] {
+                let mut b = [0u8; 32];
+                b[0] = y;
+                b[31] = sign;
+                if let Some(p) = CompressedEdwardsY(b).decompress() {
+                    assert!(!p.is_torsion_free() || p.is_identity(), "y = {y}");
+                }
+            }
+        }
     }
 }

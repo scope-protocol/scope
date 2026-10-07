@@ -101,7 +101,48 @@ fn registers_in_srfc_42_layout_and_deregisters_with_the_rent_back() {
     )
     .expect("deregister");
     assert_eq!(lamports(&h, &entry), 0);
-    assert_eq!(lamports(&h, &registrant), before + rent - 5_000);
+    assert_eq!(
+        lamports(&h, &registrant),
+        before + rent - scope_client::fees::LAMPORTS_PER_SIGNATURE
+    );
+}
+
+#[test]
+fn registers_again_after_deregistering() {
+    let mut h = Harness::new();
+    let registrant = h.payer.pubkey();
+    let (entry, _) = meta_entry_address(&registrant);
+    register(&mut h, data(valid_spend())).expect("register");
+    let deregister = deregister_ix(&registrant, &entry, &deregister_data(META_SCHEME_V1));
+    h.send(std::slice::from_ref(&deregister), &[])
+        .expect("deregister");
+    assert_scope_error(h.send(&[deregister], &[]), ScopeError::NotMetaAddressEntry);
+    let other_spend = (B * Scalar::from(13u64)).compress().to_bytes();
+    register(&mut h, data(other_spend)).expect("register again");
+    let account = h.svm.get_account(&entry).expect("entry");
+    assert_eq!(
+        MetaAddressEntry::from_bytes(&account.data).map(|e| e.spend),
+        Ok(other_spend)
+    );
+}
+
+#[test]
+fn deregister_refuses_an_announcement_in_place_of_an_entry() {
+    let mut h = Harness::new();
+    let case = h.stealth_case();
+    h.send(&case.setup, &[]).expect("setup and announce");
+    let registrant = h.payer.pubkey();
+    assert_scope_error(
+        h.send(
+            &[deregister_ix(
+                &registrant,
+                &case.announcement,
+                &deregister_data(META_SCHEME_V1),
+            )],
+            &[],
+        ),
+        ScopeError::NotMetaAddressEntry,
+    );
 }
 
 #[test]
@@ -199,13 +240,23 @@ fn s7_rejects_identity_small_order_mixed_order_and_non_canonical_spend_keys() {
         })
         .find(|b| CompressedEdwardsY(*b).decompress().is_none())
         .expect("some small y is off the curve");
-    for (name, spend) in [
-        ("identity", identity),
-        ("small order", small_order),
-        ("mixed order", mixed.compress().to_bytes()),
-        ("non-canonical identity", noncanonical_identity),
-        ("off the curve", off_curve),
-    ] {
+    let mut vectors = vec![
+        ("identity".to_string(), identity),
+        ("small order".into(), small_order),
+        ("mixed order".into(), mixed.compress().to_bytes()),
+        ("non-canonical identity".into(), noncanonical_identity),
+        ("off the curve".into(), off_curve),
+    ];
+    for (i, t) in curve25519_dalek::constants::EIGHT_TORSION
+        .iter()
+        .enumerate()
+        .skip(1)
+    {
+        vectors.push((format!("torsion {i}"), t.compress().to_bytes()));
+        let with_b = B * Scalar::from(11u64) + t;
+        vectors.push((format!("torsion {i} + 11B"), with_b.compress().to_bytes()));
+    }
+    for (name, spend) in vectors {
         let mut h = Harness::new();
         println!("{name}");
         assert_scope_error(register(&mut h, data(spend)), ScopeError::InvalidSpendKey);

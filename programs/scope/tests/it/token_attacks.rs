@@ -224,7 +224,7 @@ fn public_credits_are_refused_but_mint_to_lands() {
 }
 
 #[test]
-fn the_credit_cap_admits_only_the_payers_credit() {
+fn the_credit_cap_refuses_a_second_credit() {
     let mut h = Harness::new();
     let case = h.stealth_case();
     pay(&mut h, &case);
