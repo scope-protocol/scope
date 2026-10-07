@@ -110,7 +110,9 @@ pub enum PayError {
     Recipient { recipient: Address, why: String },
     #[error("source holds {have}, the run needs {need} (base units)")]
     Insufficient { have: u64, need: u64 },
-    #[error("this input was already run as {run_id}; pass --again to pay it twice")]
+    #[error(
+        "this input was already run as {run_id}; resume it if it did not finish, or pass --again to pay it twice"
+    )]
     DuplicateInput { run_id: String },
     #[error("priority fee {price} micro-lamports/CU is above the cap {cap}; resume later")]
     FeeAboveCap { price: u64, cap: u64 },
@@ -504,14 +506,15 @@ fn earlier_run(runs_dir: &Path, input_sha256: &str) -> Result<Option<String>, Pa
         return Ok(None);
     };
     for entry in entries.flatten() {
-        if let Ok(Some(Record::Run {
-            run_id,
-            input_sha256: h,
-            ..
-        })) = journal::read_header(&entry.path())
-            && h == input_sha256
-        {
-            return Ok(Some(run_id));
+        match journal::read_header(&entry.path()) {
+            Ok(Some(Record::Run {
+                run_id,
+                input_sha256: h,
+                ..
+            })) if h == input_sha256 => return Ok(Some(run_id)),
+            // A journal that cannot be read may be this input's; refuse rather than pay twice.
+            Err(e @ JournalError::Corrupt { .. }) => return Err(e.into()),
+            _ => {}
         }
     }
     Ok(None)
@@ -571,8 +574,9 @@ pub fn start<C: Chain>(
     let text = std::str::from_utf8(input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
     let rows = input::parse(text, info.decimals)?;
     let input_sha256 = hex(&solana_sha256_hasher::hash(input_bytes).to_bytes());
-    // Held from the duplicate check until the new journal exists, so two runs of one input cannot race.
-    let _runs_lock = journal::lock_dir(&opts.runs_dir)?;
+    // Held from the duplicate check until the new journal records its input hash, so two
+    // runs of one input cannot race.
+    let runs_lock = journal::lock_dir(&opts.runs_dir)?;
     if !opts.again
         && let Some(run_id) = earlier_run(&opts.runs_dir, &input_sha256)?
     {
@@ -621,6 +625,7 @@ pub fn start<C: Chain>(
         order: order.clone(),
         derived_openings: true,
     })?;
+    drop(runs_lock);
     (opts.log)(&format!("run {run_id}: {} rows", rows.len()));
     let mut engine = Engine {
         chain,
@@ -720,7 +725,14 @@ pub fn resume<C: Chain>(
         Commitment::Confirmed,
     )?;
     let balance = verified_balance(&keys, &state, &source)?;
-    let plain = plain_rows(&chain, &rows, &landed, &mint)?;
+    // The open attempt's row may have landed, which can leave its recipient unable to take
+    // another credit; it is preflighted only if the attempt turns out not to have landed.
+    let open_row = match &open {
+        Some(Record::Attempt { row, .. }) => Some(*row),
+        _ => None,
+    };
+    let skip: HashSet<usize> = landed.iter().copied().chain(open_row).collect();
+    let plain = plain_rows(&chain, &rows, &skip, &mint)?;
     let mut engine = Engine {
         chain,
         payer,
@@ -776,6 +788,12 @@ pub fn resume<C: Chain>(
             return Err(PayError::Halted(format!(
                 "row {row}: source matches neither side of the open attempt"
             )));
+        }
+        if !landed.contains(&row)
+            && let Recipient::Plain(address) = &engine.rows[row].recipient
+        {
+            let key = preflight(&engine.chain, address, &engine.mint)?;
+            engine.plain.insert(row, key);
         }
         // A landed attempt changed the balance; read it back verified rather than trusting arithmetic.
         let state = engine.source_state(Commitment::Confirmed)?;

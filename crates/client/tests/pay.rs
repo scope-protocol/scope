@@ -399,6 +399,49 @@ fn resumes_after_kill_between_rows() {
 }
 
 #[test]
+fn resume_does_not_preflight_a_row_that_already_landed() {
+    let mut h = Harness::new();
+    let owner = Keypair::new();
+    let keys_r = ElGamalKeypair::new_rand();
+    let account = h.plain_confidential_account(&owner, &keys_r, &AeKey::new_rand());
+    let rs = [Recipient {
+        account,
+        keys: keys_r,
+    }];
+    let o = opts("landed-then-closed");
+    let (mint, source) = (h.mint, h.source);
+    let killed = pay::start(
+        Killer::new(SvmChain::new(&mut h.svm), KillAt::AfterSend(1)),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        mint,
+        source,
+        input(&rs).as_bytes(),
+        &o,
+    );
+    assert!(matches!(killed, Err(PayError::Chain(_))), "got {killed:?}");
+    // The recipient stops taking credits after the payment landed; preflight would refuse it.
+    let disable = spl_token_2022_interface::extension::confidential_transfer::instruction::disable_confidential_credits(
+        &token_2022(),
+        &account,
+        &owner.pubkey(),
+        &[],
+    )
+    .expect("disable");
+    h.send(&[disable], &[&owner]).expect("disable credits");
+    let report = pay::resume(
+        SvmChain::new(&mut h.svm),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        &only_run(&o),
+        &o,
+    )
+    .expect("resume");
+    assert_eq!(report.paid.len(), 1);
+    assert_paid_once(&h, &rs);
+}
+
+#[test]
 fn halts_when_the_source_moves_outside_the_run() {
     let mut h = Harness::new();
     let rs = recipients(&mut h, 2);
