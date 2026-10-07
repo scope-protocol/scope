@@ -7,7 +7,7 @@ All secrets in this file are deterministic public test inputs.
 The salt is `stealth-keygen-v3`; its expansion labels are `discovery-tag`
 and `spend-tweak`, followed by the exact 32-byte announcement `R`. The signing domain remains `stealth-keygen-v1-nonce`.
 These versioned strings are cryptographic constants, not selectable schemes.
-Renaming either would change outputs. This schedule replaces the earlier unbound HKDF derivation.
+Renaming either would change outputs.
 
 Generate it with `python3 scripts/generate_test_vectors.py`. The script uses
 Python's standard library and separate curve arithmetic, checked against
