@@ -338,7 +338,7 @@ struct DiscloseArgs {
     )]
     run: Option<String>,
     /// The row's position in the run's input file, from 0.
-    #[arg(long)]
+    #[arg(long, requires = "run")]
     row: Option<usize>,
     /// Payer keypair, with --run.
     #[arg(long, default_value = "~/.config/solana/id.json")]
@@ -350,6 +350,9 @@ struct DiscloseArgs {
     signature: Option<String>,
     #[command(flatten)]
     keys: RecipientKeys,
+    /// Write the receipt to this new file, owner-only, instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
     #[arg(long, default_value = "http://127.0.0.1:8899")]
     url: String,
 }
@@ -386,7 +389,20 @@ fn run_disclose(args: DiscloseArgs) -> anyhow::Result<()> {
         }
         (None, None) => bail!("--run or --signature"),
     };
-    println!("{}", serde_json::to_string_pretty(&receipt)?);
+    receipt::verify(&chain, &receipt)
+        .context("the receipt does not verify against the chain; nothing written")?;
+    let text = serde_json::to_string_pretty(&receipt)?;
+    match args.out {
+        Some(path) => private_files::create(&path, |file| Ok(file.write_all(text.as_bytes())?))?,
+        None => {
+            if matches!(receipt, receipt::Receipt::AccountKey { .. }) {
+                eprintln!(
+                    "this receipt grants read access to the one-time account; --out writes it owner-only"
+                );
+            }
+            println!("{text}");
+        }
+    }
     Ok(())
 }
 

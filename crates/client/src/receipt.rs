@@ -45,7 +45,7 @@ pub const RECEIPT_VERSION: u8 = 1;
 /// (spl-token-2022-interface 3.1.1, `src/instruction.rs` 1116).
 const CONFIDENTIAL_TRANSFER_EXTENSION: u8 = 27;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Receipt {
     Opening {
@@ -65,6 +65,38 @@ pub enum Receipt {
         /// The one-time account's confidential key material, hex.
         ct_ikm: String,
     },
+}
+
+/// Leaves out the openings and `ct_ikm`, so logs and panics do not carry them.
+impl core::fmt::Debug for Receipt {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Receipt::Opening {
+                version,
+                cluster,
+                signature,
+                amount,
+                ..
+            } => f
+                .debug_struct("Opening")
+                .field("version", version)
+                .field("cluster", cluster)
+                .field("signature", signature)
+                .field("amount", amount)
+                .finish_non_exhaustive(),
+            Receipt::AccountKey {
+                version,
+                cluster,
+                signature,
+                ..
+            } => f
+                .debug_struct("AccountKey")
+                .field("version", version)
+                .field("cluster", cluster)
+                .field("signature", signature)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 /// A payment transaction as an archival node returns it.
@@ -102,6 +134,8 @@ pub enum ReceiptError {
     Cluster,
     #[error("the transaction failed on chain")]
     Failed,
+    #[error("the node returned a transaction that this signature does not sign")]
+    Unauthenticated,
     #[error("the transaction holds no confidential transfer with an inline validity proof")]
     NoTransfer,
     #[error("the transaction holds no announcement for this recipient")]
@@ -136,7 +170,7 @@ fn find_transfer(tx: &VersionedTransaction) -> Result<Transfer, ReceiptError> {
         }
         let data = decode_instruction_data::<TransferInstructionData>(&ix.data[1..])
             .map_err(|_| ReceiptError::NoTransfer)?;
-        let at = i64::try_from(i).expect("instruction index")
+        let at = i64::try_from(i).map_err(|_| ReceiptError::NoTransfer)?
             + i64::from(data.ciphertext_validity_proof_instruction_offset);
         let proof = usize::try_from(at)
             .ok()
@@ -169,6 +203,29 @@ fn find_transfer(tx: &VersionedTransaction) -> Result<Transfer, ReceiptError> {
         });
     }
     Err(ReceiptError::NoTransfer)
+}
+
+/// The successful transaction `signature` names. It must be signed by that signature and
+/// all its others, so the node can misreport only whether it landed, not what it holds.
+fn fetch<A: TransactionArchive>(
+    archive: &A,
+    signature: &Signature,
+) -> Result<VersionedTransaction, ReceiptError> {
+    let ArchivedTransaction {
+        transaction,
+        succeeded,
+    } = archive.transaction(signature)?;
+    let required = usize::from(transaction.message.header().num_required_signatures);
+    if transaction.signatures.first() != Some(signature)
+        || transaction.signatures.len() != required
+        || !transaction.verify_with_results().into_iter().all(|ok| ok)
+    {
+        return Err(ReceiptError::Unauthenticated);
+    }
+    if !succeeded {
+        return Err(ReceiptError::Failed);
+    }
+    Ok(transaction)
 }
 
 fn grouped<P: TryInto<GroupedElGamalCiphertext<3>>>(
@@ -211,11 +268,8 @@ pub fn verify<A: TransactionArchive>(
     let sig: Signature = signature
         .parse()
         .map_err(|_| ReceiptError::Field("signature"))?;
-    let archived = archive.transaction(&sig)?;
-    if !archived.succeeded {
-        return Err(ReceiptError::Failed);
-    }
-    let transfer = find_transfer(&archived.transaction)?;
+    let transaction = fetch(archive, &sig)?;
+    let transfer = find_transfer(&transaction)?;
     let (lo, hi) = (
         grouped(transfer.context.grouped_ciphertext_lo)?,
         grouped(transfer.context.grouped_ciphertext_hi)?,
@@ -267,8 +321,7 @@ pub fn verify<A: TransactionArchive>(
     };
     Ok(Verified {
         signature: signature.clone(),
-        payer: *archived
-            .transaction
+        payer: *transaction
             .message
             .static_account_keys()
             .first()
@@ -288,11 +341,7 @@ pub fn disclose_as_recipient<A: TransactionArchive>(
     recipient: &RecipientSecretKeys,
     signature: &Signature,
 ) -> Result<Receipt, ReceiptError> {
-    let archived = archive.transaction(signature)?;
-    if !archived.succeeded {
-        return Err(ReceiptError::Failed);
-    }
-    let tx = &archived.transaction;
+    let tx = &fetch(archive, signature)?;
     let keys = tx.message.static_account_keys();
     let payer = *keys.first().ok_or(ReceiptError::NotOurs)?;
     let transfer = find_transfer(tx)?;

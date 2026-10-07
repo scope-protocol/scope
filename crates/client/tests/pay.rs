@@ -1156,6 +1156,30 @@ fn payer_receipts_prove_plain_and_stealth_amounts() {
         receipt::verify(&archive, &elsewhere),
         Err(ReceiptError::Cluster)
     ));
+
+    // A node that answers with another transaction, or alters the one asked for, is caught.
+    let signature = |r: &Receipt| match r {
+        Receipt::Opening { signature, .. } | Receipt::AccountKey { signature, .. } => signature
+            .parse::<solana_signature::Signature>()
+            .expect("signature"),
+    };
+    let (plain_sig, stealth_sig) = (signature(&plain_receipt), signature(&stealth_receipt));
+    let mut swapped = JournalArchive(archive.0.clone());
+    swapped.0.insert(plain_sig, archive.0[&stealth_sig].clone());
+    assert!(matches!(
+        receipt::verify(&swapped, &plain_receipt),
+        Err(ReceiptError::Unauthenticated)
+    ));
+    let (tx, landed) = archive.0[&plain_sig].clone();
+    let mut bytes = wincode::serialize(&tx).expect("serialize");
+    *bytes.last_mut().expect("bytes") ^= 1;
+    let altered: VersionedTransaction = wincode::deserialize(&bytes).expect("still parses");
+    let mut altered_archive = JournalArchive(archive.0.clone());
+    altered_archive.0.insert(plain_sig, (altered, landed));
+    assert!(matches!(
+        receipt::verify(&altered_archive, &plain_receipt),
+        Err(ReceiptError::Unauthenticated)
+    ));
 }
 
 #[test]
