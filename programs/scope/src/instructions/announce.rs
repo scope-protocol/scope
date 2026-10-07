@@ -2,15 +2,9 @@
 
 use crate::{
     address::{SYSTEM, announcement_pda, announcement_seeds, token_account_address},
-    err, setup,
+    err, pda, setup,
 };
-use pinocchio::{
-    AccountView, Address, ProgramResult,
-    cpi::Signer,
-    error::ProgramError,
-    sysvars::{Sysvar, rent::Rent},
-};
-use pinocchio_system::instructions::{Allocate, Assign, Transfer};
+use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError};
 use scope_interface::{
     ScopeError,
     instruction::AnnounceData,
@@ -70,12 +64,13 @@ pub(crate) fn process(
     if !announcement.is_data_empty() || !announcement.owned_by(&SYSTEM) {
         return Err(err(ScopeError::AnnouncementInUse));
     }
-    create_announcement(
+    let bump_seed = [bump];
+    pda::create(
         payer,
         announcement,
         program_id,
-        token_account.address(),
-        bump,
+        ANNOUNCEMENT_LEN,
+        &announcement_seeds(token_account.address(), &bump_seed),
     )?;
     let record = Announcement {
         view_tag: data.view_tag,
@@ -87,38 +82,4 @@ pub(crate) fn process(
         .try_borrow_mut()?
         .copy_from_slice(&record.to_bytes());
     Ok(())
-}
-
-/// Top up to rent exemption, then allocate and assign, so a pre-funded address still works.
-#[inline(never)]
-fn create_announcement(
-    payer: &AccountView,
-    announcement: &AccountView,
-    program_id: &Address,
-    token_account: &Address,
-    bump: u8,
-) -> ProgramResult {
-    let required = Rent::get()?.try_minimum_balance(ANNOUNCEMENT_LEN)?;
-    let deficit = required.saturating_sub(announcement.lamports());
-    if deficit > 0 {
-        Transfer {
-            from: payer,
-            to: announcement,
-            lamports: deficit,
-        }
-        .invoke()?;
-    }
-    let bump = [bump];
-    let seeds = announcement_seeds(token_account, &bump);
-    let signer = Signer::from(&seeds);
-    Allocate {
-        account: announcement,
-        space: ANNOUNCEMENT_LEN as u64,
-    }
-    .invoke_signed(core::slice::from_ref(&signer))?;
-    Assign {
-        account: announcement,
-        owner: program_id,
-    }
-    .invoke_signed(core::slice::from_ref(&signer))
 }

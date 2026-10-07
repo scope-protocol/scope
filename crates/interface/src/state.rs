@@ -52,6 +52,63 @@ impl Announcement {
     }
 }
 
+/// A registry entry, laid out byte for byte as sRFC-42 v1's `MetaAddressEntry`
+/// (susruth/slnt a958ece, `programs/registry/src/lib.rs` 117-130), Anchor discriminator
+/// included, so code that reads those entries reads ours.
+pub const META_ENTRY_LEN: usize = 109;
+/// `sha256("account:MetaAddressEntry")[..8]`, Anchor's account discriminator.
+pub const META_ENTRY_DISCRIMINATOR: [u8; 8] = [165, 7, 241, 154, 7, 172, 74, 178];
+/// The only scheme and payload version: Ed25519 B_spend, X25519 B_scan, no flags.
+pub const META_SCHEME_V1: u16 = 1;
+pub const META_VERSION: u8 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MetaAddressEntry {
+    pub registrant: [u8; 32],
+    pub scheme_id: u16,
+    pub bump: u8,
+    pub version: u8,
+    pub spend: [u8; 32],
+    pub scan: [u8; 32],
+    pub flags: u8,
+}
+
+impl MetaAddressEntry {
+    pub fn to_bytes(&self) -> [u8; META_ENTRY_LEN] {
+        let mut out = [0u8; META_ENTRY_LEN];
+        out[..8].copy_from_slice(&META_ENTRY_DISCRIMINATOR);
+        out[8..40].copy_from_slice(&self.registrant);
+        out[40..42].copy_from_slice(&self.scheme_id.to_le_bytes());
+        out[42] = self.bump;
+        out[43] = self.version;
+        out[44..76].copy_from_slice(&self.spend);
+        out[76..108].copy_from_slice(&self.scan);
+        out[108] = self.flags;
+        out
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Result<Self, ScopeError> {
+        if data.len() != META_ENTRY_LEN || data[..8] != META_ENTRY_DISCRIMINATOR {
+            return Err(ScopeError::NotMetaAddressEntry);
+        }
+        let mut registrant = [0u8; 32];
+        registrant.copy_from_slice(&data[8..40]);
+        let mut spend = [0u8; 32];
+        spend.copy_from_slice(&data[44..76]);
+        let mut scan = [0u8; 32];
+        scan.copy_from_slice(&data[76..108]);
+        Ok(Self {
+            registrant,
+            scheme_id: u16::from_le_bytes([data[40], data[41]]),
+            bump: data[42],
+            version: data[43],
+            spend,
+            scan,
+            flags: data[108],
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +151,27 @@ mod tests {
         assert_eq!(
             Announcement::from_bytes(&bytes),
             Err(ScopeError::NotAnnouncement)
+        );
+    }
+
+    #[test]
+    fn meta_entry_round_trips_in_srfc_42_layout() {
+        let e = MetaAddressEntry {
+            registrant: [1; 32],
+            scheme_id: 1,
+            bump: 253,
+            version: 1,
+            spend: [2; 32],
+            scan: [3; 32],
+            flags: 0,
+        };
+        let bytes = e.to_bytes();
+        assert_eq!(&bytes[..8], &META_ENTRY_DISCRIMINATOR);
+        assert_eq!(&bytes[40..44], &[1, 0, 253, 1]);
+        assert_eq!(MetaAddressEntry::from_bytes(&bytes), Ok(e));
+        assert_eq!(
+            MetaAddressEntry::from_bytes(&bytes[..108]),
+            Err(ScopeError::NotMetaAddressEntry)
         );
     }
 }

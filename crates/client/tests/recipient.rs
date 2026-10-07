@@ -1693,7 +1693,7 @@ fn sweep_refuses_a_mint_that_now_requires_destination_approval() {
 fn full_recipient_transaction_fits_the_v1_wire_and_compute_budgets() {
     use scope_client::{
         sweep::{self, SweepOptions},
-        tx::{COMPUTE_UNIT_LIMIT, v1_wire_size},
+        tx::{SWEEP_CU_LIMIT, v1_wire_size},
     };
     let auditor = ElGamalKeypair::new_rand();
     let mut h = Harness::with_auditor(Some(auditor.pubkey()));
@@ -1723,12 +1723,65 @@ fn full_recipient_transaction_fits_the_v1_wire_and_compute_budgets() {
         .svm
         .simulate_transaction(transaction.clone())
         .expect("simulate");
-    assert!(simulation.meta.compute_units_consumed <= u64::from(COMPUTE_UNIT_LIMIT));
+    let used = simulation.meta.compute_units_consumed;
+    assert!(
+        used * 10 <= u64::from(SWEEP_CU_LIMIT) * 9,
+        "full sweep used {used} CU, over 90% of its {SWEEP_CU_LIMIT} limit"
+    );
     println!(
         "full sweep with auditor and dust: {} bytes, {} CU",
         bytes.len(),
         simulation.meta.compute_units_consumed
     );
+}
+
+#[test]
+fn the_sweep_requirement_is_exact_at_the_price_cap_and_the_payer_funds_retries_on_top() {
+    use scope_client::{
+        fees::{self, SWEEP_PRICE_CAP},
+        sweep::{self, SweepError, SweepOptions},
+    };
+    let mut h = Harness::new();
+    let alice = recipient(1);
+    let (announcement, _, _) = fund(&mut h, &alice, 3);
+    let opts = SweepOptions {
+        poll: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let authority = sweep::prepare(&SvmChain::new(&mut h.svm), &alice, &announcement, &opts)
+        .expect("prepare")
+        .report()
+        .payment_authority;
+    let space = ExtensionType::try_calculate_account_len::<Account>(&[
+        ExtensionType::ConfidentialTransferAccount,
+    ])
+    .expect("space");
+    let (rent, reserve) = (
+        h.svm.minimum_balance_for_rent_exemption(space),
+        h.svm.minimum_balance_for_rent_exemption(0),
+    );
+    let funding = fees::sweep_requirement(rent, reserve, SWEEP_PRICE_CAP);
+    assert_eq!(
+        fees::sweep_funding(rent, reserve, SWEEP_PRICE_CAP),
+        funding + 2 * fees::sweep_attempt_fee(SWEEP_PRICE_CAP),
+        "the payer adds the fee of each rebuild"
+    );
+
+    set_funding(&mut h, authority, funding - 1);
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.price_samples = vec![vec![SWEEP_PRICE_CAP]];
+    let error = sweep::prepare(&chain, &alice, &announcement, &opts).expect_err("one short");
+    assert!(
+        matches!(error, SweepError::Underfunded { short: 1, .. }),
+        "{error}"
+    );
+
+    set_funding(&mut h, authority, funding);
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.price_samples = vec![vec![SWEEP_PRICE_CAP]];
+    let report = sweep::sweep(&mut chain, &alice, &announcement, &opts)
+        .expect("a P holding the requirement sweeps at the cap");
+    assert_eq!(report.reclaimed, Some(true));
 }
 
 #[test]
@@ -1781,6 +1834,8 @@ fn finalized_sweeps_succeed_when_metadata_is_unavailable_or_times_out() {
 fn sweep_reprices_only_rebuilt_attempts_and_rechecks_the_cap() {
     use scope_client::sweep::{self, SweepError, SweepOptions};
     use std::{cell::RefCell, rc::Rc};
+    let fee =
+        |price| scope_client::fees::priority_fee_lamports(price, scope_client::tx::SWEEP_CU_LIMIT);
     for retry_price in [20, 1_001] {
         let mut h = Harness::new();
         let alice = recipient(1);
@@ -1816,7 +1871,7 @@ fn sweep_reprices_only_rebuilt_attempts_and_rechecks_the_cap() {
         assert_eq!(chain.price_reads.get(), 2);
         if retry_price == 20 {
             let report = result.expect("repriced retry");
-            assert_eq!(*priorities.borrow(), [6, 6, 12]);
+            assert_eq!(*priorities.borrow(), [fee(10), fee(10), fee(20)]);
             assert_eq!(
                 report.finalized_signature.as_ref(),
                 Some(&report.attempt_signature)
@@ -1827,7 +1882,7 @@ fn sweep_reprices_only_rebuilt_attempts_and_rechecks_the_cap() {
             else {
                 panic!("missing recovery");
             };
-            assert_eq!(*priorities.borrow(), [6, 6]);
+            assert_eq!(*priorities.borrow(), [fee(10), fee(10)]);
             assert_eq!(report.attempt_signature, initial);
             assert!(source.to_string().contains("1001 is above the cap 1000"));
         }

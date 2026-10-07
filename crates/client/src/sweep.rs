@@ -6,7 +6,7 @@ use crate::{
     fees, ix,
     scan::{self, OwnedPayment, PaymentInfo, ScanError},
     signer::PaymentSigner,
-    tx::{COMPUTE_UNIT_LIMIT, signed_v1_transaction, v1_wire_size},
+    tx::{SWEEP_CU_LIMIT, signed_v1_transaction, v1_wire_size},
 };
 use core::num::NonZeroI8;
 use curve25519_dalek::scalar::Scalar;
@@ -43,7 +43,8 @@ use std::{
 use stealth_keygen::{RecipientSecretKeys, RecoveredPayment};
 
 const DESTINATION_SEED: &str = "scope-sweep/v1";
-const MAX_RETRIES: usize = 2;
+/// Transfer-only rebuilds after the first attempt; each can cost a fee.
+pub const MAX_RETRIES: usize = 2;
 
 pub struct SweepOptions {
     pub max_price_per_cu: u64,
@@ -55,7 +56,7 @@ pub struct SweepOptions {
 impl Default for SweepOptions {
     fn default() -> Self {
         Self {
-            max_price_per_cu: 1_000_000,
+            max_price_per_cu: fees::SWEEP_PRICE_CAP,
             poll: Duration::from_secs(2),
             timeout: Duration::from_secs(120),
             dry_run: false,
@@ -470,6 +471,7 @@ impl SweepPlan {
             &[&self.owner],
             &ixs,
             blockhash,
+            SWEEP_CU_LIMIT,
             Some(self.priority),
         )
         .map_err(invalid)?;
@@ -506,6 +508,7 @@ impl SweepPlan {
             &[&self.owner],
             &ixs,
             blockhash,
+            SWEEP_CU_LIMIT,
             Some(self.priority),
         )
         .map_err(invalid)?;
@@ -556,7 +559,7 @@ pub fn prepare<C: RecipientChain>(
     let destination = destination(chain, recipient, &payment)?;
     let price =
         fees::priority_price(chain.recent_prices()?, opts.max_price_per_cu).map_err(invalid)?;
-    let priority = fees::priority_fee_lamports(price, COMPUTE_UNIT_LIMIT);
+    let priority = fees::priority_fee_lamports(price, SWEEP_CU_LIMIT);
     let info = payment.info.clone();
     let elgamal = *destination.keys.pubkey();
     let address = destination.address;
@@ -703,7 +706,7 @@ fn retry_without_cleanup<C: RecipientChain>(
         .account(&prepared.mint, Commitment::Confirmed)?
         .ok_or_else(|| invalid("mint not found"))?;
     let price = fees::priority_price(chain.recent_prices()?, max_price_per_cu).map_err(invalid)?;
-    let priority = fees::priority_fee_lamports(price, COMPUTE_UNIT_LIMIT);
+    let priority = fees::priority_fee_lamports(price, SWEEP_CU_LIMIT);
     if Instant::now() >= deadline {
         return Err(invalid("sweep deadline exceeded"));
     }

@@ -1,6 +1,9 @@
 /// Announcement PDA: `[ANNOUNCEMENT_SEED, token_account]`.
 pub const ANNOUNCEMENT_SEED: &[u8] = b"ann";
 
+/// Registry entry PDA: `[META_SEED, registrant, scheme_id as u16 LE]`, as sRFC-42 v1.
+pub const META_SEED: &[u8] = b"meta";
+
 /// Domain of the digest behind the token account's `create_with_seed` seed.
 pub const TOKEN_ACCOUNT_SEED_DOMAIN: &[u8] = b"stealth-ta/v1";
 

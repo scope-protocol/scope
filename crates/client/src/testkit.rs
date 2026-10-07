@@ -479,6 +479,12 @@ impl Chain for SvmChain<'_> {
             .cloned()
             .unwrap_or_default())
     }
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        Ok([42; 32])
+    }
+    fn rent(&self, space: usize) -> Result<u64, ChainError> {
+        Ok(self.svm.minimum_balance_for_rent_exemption(space))
+    }
 }
 
 impl RecipientChain for SvmChain<'_> {
@@ -506,9 +512,6 @@ impl RecipientChain for SvmChain<'_> {
         })
     }
 
-    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
-        Ok([42; 32])
-    }
     fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
         Ok(self
             .svm
@@ -526,15 +529,33 @@ impl RecipientChain for SvmChain<'_> {
             })
             .collect())
     }
-    fn rent(&self, space: usize) -> Result<u64, ChainError> {
-        Ok(self.svm.minimum_balance_for_rent_exemption(space))
+    fn registry_entries(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        Ok(self
+            .svm
+            .get_program_accounts(&program_id())
+            .into_iter()
+            .filter(|(_, a)| {
+                a.data.len() == scope_interface::state::META_ENTRY_LEN
+                    && a.data[..8] == scope_interface::state::META_ENTRY_DISCRIMINATOR
+            })
+            .map(|(address, a)| {
+                (
+                    address,
+                    AccountData {
+                        owner: a.owner,
+                        lamports: a.lamports,
+                        data: a.data,
+                    },
+                )
+            })
+            .collect())
     }
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError> {
         let priority = match message {
             solana_message::VersionedMessage::V1(m) => m.config.priority_fee.unwrap_or(0),
             _ => 0,
         };
-        (u64::from(message.header().num_required_signatures) * 5_000)
+        (u64::from(message.header().num_required_signatures) * crate::fees::LAMPORTS_PER_SIGNATURE)
             .checked_add(priority)
             .ok_or_else(|| ChainError("fee overflow".into()))
     }

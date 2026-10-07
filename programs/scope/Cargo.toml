@@ -19,18 +19,22 @@ solana-address = { workspace = true, features = ["sha2"] }
 solana-sha256-hasher.workspace = true
 
 [target.'cfg(not(target_os = "solana"))'.dependencies]
+curve25519-dalek.workspace = true
 solana-address = { workspace = true, features = ["sha2", "curve25519"] }
 solana-sha256-hasher = { workspace = true, features = ["sha2"] }
 
 [dev-dependencies]
 curve25519-dalek.workspace = true
 litesvm.workspace = true
+scope-interface.workspace = true
 scope-client = { workspace = true, features = ["litesvm"] }
 solana-instruction.workspace = true
+solana-instruction-error.workspace = true
 solana-keypair.workspace = true
 solana-signer.workspace = true
 solana-system-interface.workspace = true
 solana-transaction.workspace = true
+solana-transaction-error.workspace = true
 solana-zk-sdk.workspace = true
 spl-token-2022-interface.workspace = true
 spl-token-confidential-transfer-proof-extraction.workspace = true

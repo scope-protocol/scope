@@ -54,7 +54,7 @@ pub fn price_per_cu(message: &VersionedMessage) -> Option<u64> {
     if let VersionedMessage::V1(v1) = message {
         let limit = v1.config.compute_unit_limit.filter(|l| *l > 0)?;
         let lamports = u128::from(v1.config.priority_fee.unwrap_or(0));
-        return Some((lamports * 1_000_000 / u128::from(limit)) as u64);
+        return Some(u64::try_from(lamports * 1_000_000 / u128::from(limit)).unwrap_or(u64::MAX));
     }
     let mut price = 0;
     for ix in message.instructions() {
@@ -83,6 +83,33 @@ pub fn block_prices(transactions: Vec<EncodedTransactionWithStatusMeta>) -> Vec<
 /// Total v1 header priority fee in lamports for `price` micro-lamports per CU, rounded up.
 pub fn priority_fee_lamports(price_per_cu: u64, compute_unit_limit: u32) -> u64 {
     (u128::from(price_per_cu) * u128::from(compute_unit_limit)).div_ceil(1_000_000) as u64
+}
+
+/// Agave's default base fee per signature (solana-fee-structure 4.1.0, `src/lib.rs` 125).
+pub const LAMPORTS_PER_SIGNATURE: u64 = 5_000;
+
+/// The highest per-CU price, in micro-lamports, a payer funds P's sweep for, and the
+/// sweep's default `--max-price`. The recipient may sweep weeks after the payment.
+pub const SWEEP_PRICE_CAP: u64 = 1_000_000;
+
+/// One sweep attempt's fee at `price`: two signatures and the priority fee at the sweep's
+/// compute-unit limit.
+pub fn sweep_attempt_fee(price: u64) -> u64 {
+    2 * LAMPORTS_PER_SIGNATURE + priority_fee_lamports(price, crate::tx::SWEEP_CU_LIMIT)
+}
+
+/// What the sweep requires P to hold for one attempt at `price`: D's rent, the attempt's
+/// fee, and the rent reserve the sweep leaves in P.
+pub fn sweep_requirement(destination_rent: u64, reserve: u64, price: u64) -> u64 {
+    destination_rent + sweep_attempt_fee(price) + reserve
+}
+
+/// What the payer funds P with: the requirement at `price_cap`, plus the fee of every
+/// rebuild the sweep may make, since an attempt that lands and fails is still charged.
+/// Whatever is left goes to D_owner with the sweep.
+pub fn sweep_funding(destination_rent: u64, reserve: u64, price_cap: u64) -> u64 {
+    sweep_requirement(destination_rent, reserve, price_cap)
+        + crate::sweep::MAX_RETRIES as u64 * sweep_attempt_fee(price_cap)
 }
 
 #[cfg(test)]

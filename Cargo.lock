@@ -2985,6 +2985,7 @@ dependencies = [
  "solana-commitment-config",
  "solana-keypair",
  "solana-rpc-client",
+ "solana-signature",
  "solana-signer",
  "stealth-keygen",
  "zeroize",
@@ -2996,6 +2997,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "curve25519-dalek 4.1.3",
+ "hkdf 0.13.0",
  "litesvm",
  "proptest",
  "rand 0.8.8",
@@ -3004,6 +3006,7 @@ dependencies = [
  "scope-interface",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "solana-address 2.6.1",
  "solana-commitment-config",
  "solana-instruction",
@@ -3018,6 +3021,7 @@ dependencies = [
  "solana-transaction",
  "solana-transaction-error",
  "solana-transaction-status-client-types",
+ "solana-zk-elgamal-proof-interface",
  "solana-zk-sdk 7.0.1",
  "spl-token-2022-interface",
  "spl-token-confidential-transfer-proof-extraction",
@@ -3026,6 +3030,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "wincode",
+ "zeroize",
 ]
 
 [[package]]
@@ -3047,11 +3052,13 @@ dependencies = [
  "scope-interface",
  "solana-address 2.6.1",
  "solana-instruction",
+ "solana-instruction-error",
  "solana-keypair",
  "solana-sha256-hasher",
  "solana-signer",
  "solana-system-interface 3.2.0",
  "solana-transaction",
+ "solana-transaction-error",
  "solana-zk-sdk 7.0.1",
  "spl-token-2022-interface",
  "spl-token-confidential-transfer-proof-extraction",

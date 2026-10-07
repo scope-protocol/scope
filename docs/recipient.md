@@ -19,7 +19,7 @@ scope sweep --recipient-key ./recipient.key --url http://127.0.0.1:8899 \
   --announcement <address-from-scan>
 ```
 
-Registration creates a local backup and prints the public meta-address; it does not create an on-chain registry entry. Existing backups are never overwritten. Raw files contain the library's 64-byte format, must be regular and nonsymlinked, and require owner-only permissions. New files use mode 0600; new directories use 0700. The file and parent directory are synchronized before success, including a bare filename. Secret buffers are cleared on drop (verification: V66).
+Registration creates a local backup and prints the public meta-address; publishing it on chain is a separate, optional `scope publish`. Existing backups are never overwritten. Raw files contain the library's 64-byte format, must be regular and nonsymlinked, and require owner-only permissions. New files use mode 0600; new directories use 0700. The file and parent directory are synchronized before success, including a bare filename. Secret buffers are cleared on drop (verification: V66).
 
 Encrypted backups use [age](https://github.com/FiloSottile/age). Supply its public recipient at registration and an owner-only private identity when loading. Plaintext streams through age and is never written to a temporary file. The encrypted round trip is tested with age installed (V66).
 
@@ -91,4 +91,4 @@ Use a funded fee payer; the transfer tool can require SOL for proof context acco
 - Payers must use a fresh R per payment to the same recipient. Reusing R reconstructs the same D; an existing token destination is refused, and closing it does not erase its public history. Another client can spend the source through the raw-scalar signer adapter. D_owner uses the standard SDK wallet schedule (V61, V63).
 - An announcement proves setup and handover, not a positive payment amount. Unpaid and already-retired accounts can appear with zero confidential balance; sweep refuses them. Public dust cleanup is separate (V64, V65).
 
-Counterparty destinations, reuse overrides, receipts, registry work and payer-engine stealth rows remain planned. Local validation does not replace external review of the derivations (Q1).
+A recipient can publish its meta-address under a wallet with `scope publish` and disclose a payment with `scope disclose --signature` ([client.md](client.md), Audit). Counterparty destinations and reuse overrides remain planned. Local validation does not replace external review of the derivations (Q1).

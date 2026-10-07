@@ -4,7 +4,7 @@ use crate::err;
 use pinocchio::{Address, cpi::Seed, error::ProgramError};
 use scope_interface::{
     SYSTEM_PROGRAM_ID, ScopeError, TOKEN_2022_ID,
-    seeds::{ANNOUNCEMENT_SEED, token_account_seed, token_account_seed_parts},
+    seeds::{ANNOUNCEMENT_SEED, META_SEED, token_account_seed, token_account_seed_parts},
 };
 
 pub(crate) const TOKEN_2022: Address = Address::new_from_array(TOKEN_2022_ID);
@@ -49,6 +49,43 @@ pub(crate) fn announcement_seeds<'a>(
     [
         Seed::from(ANNOUNCEMENT_SEED),
         Seed::from(token_account.as_ref()),
+        Seed::from(bump),
+    ]
+}
+
+/// Canonical registry entry PDA for a registrant and scheme.
+pub(crate) fn meta_entry_pda(
+    registrant: &Address,
+    scheme_id: &[u8; 2],
+    program_id: &Address,
+) -> (Address, u8) {
+    Address::find_program_address(&[META_SEED, registrant.as_ref(), scheme_id], program_id)
+}
+
+/// Registry entry address from a stored bump, without the canonical search.
+pub(crate) fn meta_entry_address(
+    registrant: &Address,
+    scheme_id: &[u8; 2],
+    bump: u8,
+    program_id: &Address,
+) -> Address {
+    Address::derive_address(
+        &[META_SEED, registrant.as_ref(), scheme_id],
+        Some(bump),
+        program_id,
+    )
+}
+
+/// Signer seeds for the registry entry PDA.
+pub(crate) fn meta_entry_seeds<'a>(
+    registrant: &'a Address,
+    scheme_id: &'a [u8; 2],
+    bump: &'a [u8; 1],
+) -> [Seed<'a>; 4] {
+    [
+        Seed::from(META_SEED),
+        Seed::from(registrant.as_ref()),
+        Seed::from(scheme_id),
         Seed::from(bump),
     ]
 }

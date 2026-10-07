@@ -1,4 +1,7 @@
-use scope_interface::seeds::{ANNOUNCEMENT_SEED, token_account_seed, token_account_seed_parts};
+use scope_interface::{
+    seeds::{ANNOUNCEMENT_SEED, META_SEED, token_account_seed, token_account_seed_parts},
+    state::META_SCHEME_V1,
+};
 use solana_address::Address;
 
 pub fn program_id() -> Address {
@@ -25,4 +28,16 @@ pub fn token_account_address(payer: &Address, e: &[u8; 32]) -> Address {
 
 pub fn announcement_address(token_account: &Address) -> (Address, u8) {
     Address::find_program_address(&[ANNOUNCEMENT_SEED, token_account.as_ref()], &program_id())
+}
+
+/// The registrant's sRFC-42 v1 registry entry.
+pub fn meta_entry_address(registrant: &Address) -> (Address, u8) {
+    Address::find_program_address(
+        &[
+            META_SEED,
+            registrant.as_ref(),
+            &META_SCHEME_V1.to_le_bytes(),
+        ],
+        &program_id(),
+    )
 }

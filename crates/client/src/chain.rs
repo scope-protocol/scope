@@ -9,7 +9,8 @@ use solana_rpc_client::{
     api::{
         config::{
             RpcAccountInfoConfig, RpcBlockConfig, RpcProgramAccountsConfig,
-            RpcSendTransactionConfig, RpcSimulateTransactionConfig, UiAccountEncoding,
+            RpcSendTransactionConfig, RpcSimulateTransactionConfig, RpcTransactionConfig,
+            UiAccountEncoding,
         },
         filter::{Memcmp, RpcFilterType},
     },
@@ -64,14 +65,17 @@ pub trait Chain {
 
     /// Per-CU prices in micro-lamports paid by landed non-vote transactions in a recent block.
     fn recent_prices(&self) -> Result<Vec<u64>, ChainError>;
+    /// The cluster's genesis hash, which binds stealth confidential keys to one cluster.
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError>;
+    fn rent(&self, space: usize) -> Result<u64, ChainError>;
 }
 
 /// Cluster reads needed by recipient discovery and sweeping.
 pub trait RecipientChain: Chain {
     fn set_deadline(&mut self, deadline: Option<Instant>);
-    fn genesis_hash(&self) -> Result<[u8; 32], ChainError>;
     fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError>;
-    fn rent(&self, space: usize) -> Result<u64, ChainError>;
+    /// Every registry entry, in one query, so lookups are picked locally.
+    fn registry_entries(&self) -> Result<Vec<(Address, AccountData)>, ChainError>;
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError>;
     fn finalized_status(&self, signature: &Signature) -> Result<FinalizedStatus, ChainError>;
 }
@@ -208,6 +212,13 @@ impl Chain for RpcChain {
         ))?;
         Ok(fees::block_prices(block.transactions.unwrap_or_default()))
     }
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        self.call(self.rpc().get_genesis_hash())
+            .map(|h| h.to_bytes())
+    }
+    fn rent(&self, space: usize) -> Result<u64, ChainError> {
+        self.call(self.rpc().get_minimum_balance_for_rent_exemption(space))
+    }
 }
 
 impl RecipientChain for RpcChain {
@@ -232,11 +243,6 @@ impl RecipientChain for RpcChain {
                 None => FinalizedStatus::Unknown,
             },
         )
-    }
-
-    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
-        self.call(self.rpc().get_genesis_hash())
-            .map(|h| h.to_bytes())
     }
 
     fn announcements(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
@@ -278,8 +284,38 @@ impl RecipientChain for RpcChain {
             .collect()
     }
 
-    fn rent(&self, space: usize) -> Result<u64, ChainError> {
-        self.call(self.rpc().get_minimum_balance_for_rent_exemption(space))
+    fn registry_entries(&self) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        use scope_interface::state::{META_ENTRY_DISCRIMINATOR, META_ENTRY_LEN};
+        let accounts = self.call(self.rpc().get_program_ui_accounts_with_config(
+            &crate::address::program_id(),
+            RpcProgramAccountsConfig {
+                filters: Some(vec![
+                    RpcFilterType::DataSize(META_ENTRY_LEN as u64),
+                    RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &META_ENTRY_DISCRIMINATOR)),
+                ]),
+                account_config: RpcAccountInfoConfig {
+                    encoding: Some(UiAccountEncoding::Base64),
+                    commitment: Some(CommitmentConfig::confirmed()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))?;
+        accounts
+            .into_iter()
+            .map(|(address, a)| {
+                Ok((
+                    address,
+                    AccountData {
+                        owner: a.owner.parse().map_err(rpc_err)?,
+                        lamports: a.lamports,
+                        data: a.data.decode().ok_or_else(|| {
+                            ChainError(format!("invalid RPC account encoding for {address}"))
+                        })?,
+                    },
+                ))
+            })
+            .collect()
     }
 
     fn fee(&self, message: &solana_message::VersionedMessage) -> Result<u64, ChainError> {
@@ -290,6 +326,43 @@ impl RecipientChain for RpcChain {
             }
         }
         self.call(self.rpc().get_fee_for_message(&WireMessage(message)))
+    }
+}
+
+impl crate::receipt::TransactionArchive for RpcChain {
+    fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+        Chain::genesis_hash(self)
+    }
+
+    /// Finalized only; v1 transactions need `maxSupportedTransactionVersion: 1` (V22).
+    fn transaction(
+        &self,
+        signature: &Signature,
+    ) -> Result<crate::receipt::ArchivedTransaction, ChainError> {
+        let found = self.call(self.rpc().get_transaction_with_config(
+            signature,
+            RpcTransactionConfig {
+                encoding: Some(UiTransactionEncoding::Base64),
+                commitment: Some(CommitmentConfig::finalized()),
+                max_supported_transaction_version: Some(1),
+            },
+        ))?;
+        let transaction = found
+            .transaction
+            .transaction
+            .decode()
+            .ok_or_else(|| ChainError(format!("{signature}: transaction does not decode")))?;
+        // Some history providers drop the status of old transactions; unknown is not failed.
+        let succeeded = found
+            .transaction
+            .meta
+            .ok_or_else(|| ChainError(format!("{signature}: the node returned no status")))?
+            .err
+            .is_none();
+        Ok(crate::receipt::ArchivedTransaction {
+            transaction,
+            succeeded,
+        })
     }
 }
 
@@ -314,9 +387,13 @@ mod tests {
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .expect("read timeout");
                 let mut request = [0; 4096];
-                assert!(stream.read(&mut request).expect("request") > 0);
+                // Under load the client's deadline can fire before it writes; that is the
+                // behavior under test, so there is nothing left to serve.
+                if stream.read(&mut request).unwrap_or(0) == 0 {
+                    return;
+                }
                 if rate_limited {
-                    stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("rate limit");
+                    let _ = stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                 } else {
                     std::thread::sleep(Duration::from_millis(500));
                 }

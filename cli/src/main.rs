@@ -9,7 +9,7 @@ use clap::{Args, Parser, Subcommand};
 use scope_client::{
     chain::RpcChain,
     pay::{self, PayOptions, SourceKeys},
-    scan, sweep,
+    receipt, scan, sweep,
 };
 use solana_address::Address;
 use solana_keypair::read_keypair_file;
@@ -35,6 +35,10 @@ enum Command {
     Register(RegisterArgs),
     /// Pay a batch of plain and stealth recipients.
     Pay(PayArgs),
+    /// Publish your meta-address under a wallet in the on-chain registry, or remove it.
+    Publish(PublishArgs),
+    /// Print the meta-addresses wallets published, fetched in one query.
+    Lookup(LookupArgs),
     /// Find payments addressed to you.
     Scan(ScanArgs),
     /// Move a found payment into a fresh account of your own.
@@ -42,9 +46,9 @@ enum Command {
     #[command(about = "Export one sweep's owner as a private Solana keypair file.")]
     ExportSweepKey(ExportSweepKeyArgs),
     /// Produce a receipt that proves one payment's amount.
-    Disclose,
+    Disclose(DiscloseArgs),
     /// Check a receipt against the chain.
-    Verify,
+    Verify(VerifyArgs),
     /// Measure bytes, compute and cost per transaction.
     Bench,
 }
@@ -96,7 +100,8 @@ struct SweepArgs {
     announcement: Address,
     #[arg(long, default_value = "http://127.0.0.1:8899")]
     url: String,
-    #[arg(long, default_value_t = 1_000_000)]
+    /// Highest priority price paid, micro-lamports per CU; the payer funds P for this cap.
+    #[arg(long, default_value_t = scope_client::fees::SWEEP_PRICE_CAP)]
     max_price: u64,
     /// Maximum wait for finalization, in seconds.
     #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
@@ -267,20 +272,176 @@ fn write_recovery(output: &mut impl Write, report: &sweep::SweepReport) -> io::R
 }
 
 #[derive(Debug, Args)]
+struct PublishArgs {
+    #[command(flatten)]
+    keys: RecipientKeys,
+    /// Wallet the entry is published under; it signs and pays the entry's rent.
+    #[arg(long, default_value = "~/.config/solana/id.json")]
+    keypair: String,
+    /// Remove the wallet's entry and return its rent instead.
+    #[arg(long)]
+    remove: bool,
+    #[arg(long, default_value = "http://127.0.0.1:8899")]
+    url: String,
+}
+
+#[derive(Debug, Args)]
+struct LookupArgs {
+    #[arg(required = true)]
+    wallets: Vec<Address>,
+    #[arg(long, default_value = "http://127.0.0.1:8899")]
+    url: String,
+}
+
+fn run_publish(args: PublishArgs) -> anyhow::Result<()> {
+    let keypair_path = expand_home(&args.keypair)?;
+    let wallet = read_keypair_file(&keypair_path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", keypair_path.display()))?;
+    let ix = if args.remove {
+        scope_client::ix::deregister(&wallet.pubkey())
+    } else {
+        scope_client::ix::register(&wallet.pubkey(), &args.keys.load()?.derive_public_keys())
+    };
+    let rpc = RpcClient::new_with_commitment(
+        args.url,
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    );
+    let tx = scope_client::tx::v1_transaction(&wallet, &[], &[ix], rpc.get_latest_blockhash()?);
+    let signature = rpc.send_and_confirm_transaction(&tx)?;
+    let (entry, _) = scope_client::address::meta_entry_address(&wallet.pubkey());
+    println!(
+        "{}\t{entry}\t{signature}",
+        if args.remove { "removed" } else { "published" }
+    );
+    Ok(())
+}
+
+fn run_lookup(args: LookupArgs) -> anyhow::Result<()> {
+    for (wallet, keys) in scope_client::registry::lookup(&recipient_chain(args.url), &args.wallets)?
+    {
+        match keys {
+            Some(keys) => println!("{wallet}\t{}", keys.to_meta_address()),
+            None => println!("{wallet}\tnot published"),
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Args)]
+struct DiscloseArgs {
+    /// As the payer: the run holding the payment, with --row.
+    #[arg(
+        long,
+        value_name = "RUN_ID",
+        requires = "row",
+        conflicts_with = "signature"
+    )]
+    run: Option<String>,
+    /// The row's position in the run's input file, from 0.
+    #[arg(long, requires = "run")]
+    row: Option<usize>,
+    /// Payer keypair, with --run.
+    #[arg(long, default_value = "~/.config/solana/id.json")]
+    keypair: String,
+    #[arg(long, default_value = "runs")]
+    runs: PathBuf,
+    /// As a stealth recipient: the payment transaction's signature.
+    #[arg(long, required_unless_present = "run")]
+    signature: Option<String>,
+    #[command(flatten)]
+    keys: RecipientKeys,
+    /// Write the receipt to this new file, owner-only, instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+    #[arg(long, default_value = "http://127.0.0.1:8899")]
+    url: String,
+}
+
+#[derive(Debug, Args)]
+struct VerifyArgs {
+    /// Receipt file from `scope disclose`.
+    receipt: PathBuf,
+    /// An RPC node that keeps transaction history.
+    #[arg(long, default_value = "http://127.0.0.1:8899")]
+    url: String,
+}
+
+fn run_disclose(args: DiscloseArgs) -> anyhow::Result<()> {
+    let chain = recipient_chain(args.url);
+    let receipt = match (args.run, args.signature) {
+        (Some(run_id), _) => {
+            let keypair_path = expand_home(&args.keypair)?;
+            let payer = read_keypair_file(&keypair_path)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", keypair_path.display()))?;
+            let opts = PayOptions {
+                runs_dir: args.runs,
+                max_price_per_cu: 0,
+                poll: Duration::from_secs(2),
+                again: false,
+                log: |line| eprintln!("{line}"),
+            };
+            pay::disclose(&chain, &payer, &run_id, args.row.context("--row")?, &opts)?
+        }
+        (None, Some(signature)) => {
+            let signature: solana_signature::Signature =
+                signature.parse().context("--signature")?;
+            receipt::disclose_as_recipient(&chain, &args.keys.load()?, &signature)?
+        }
+        (None, None) => bail!("--run or --signature"),
+    };
+    receipt::verify(&chain, &receipt)
+        .context("the receipt does not verify against the chain; nothing written")?;
+    let text = serde_json::to_string_pretty(&receipt)?;
+    match args.out {
+        Some(path) => private_files::create(&path, |file| Ok(file.write_all(text.as_bytes())?))?,
+        None => {
+            if matches!(receipt, receipt::Receipt::AccountKey { .. }) {
+                eprintln!(
+                    "this receipt grants read access to the one-time account; --out writes it owner-only"
+                );
+            }
+            println!("{text}");
+        }
+    }
+    Ok(())
+}
+
+fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(&args.receipt)
+        .with_context(|| format!("reading {}", args.receipt.display()))?;
+    let receipt: receipt::Receipt = serde_json::from_str(&text).context("parsing the receipt")?;
+    let verified = receipt::verify(&recipient_chain(args.url), &receipt)?;
+    println!("verified\t{}", verified.signature);
+    println!("amount_base_units\t{}", verified.amount);
+    println!("payer\t{}", verified.payer);
+    println!("source\t{}", verified.source);
+    println!("destination\t{}", verified.destination);
+    println!("mint\t{}", verified.mint);
+    Ok(())
+}
+
+#[derive(Debug, Args)]
 struct PayArgs {
-    /// `recipient,amount` rows; recipient is a configured confidential token account.
-    #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+    /// `recipient,amount` rows; recipient is a configured confidential token account (plain row)
+    /// or a `scope:` meta-address (stealth row).
+    #[arg(long, required_unless_present_any = ["resume", "status"], conflicts_with_all = ["resume", "status"])]
     input: Option<PathBuf>,
     /// Token-2022 mint with confidential transfers enabled.
-    #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, required_unless_present_any = ["resume", "status"], conflicts_with_all = ["resume", "status"])]
     mint: Option<Address>,
     /// The payer's confidential token account to pay from, configured with the keys
     /// spl-token-cli derives from --keypair.
-    #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, required_unless_present_any = ["resume", "status"], conflicts_with_all = ["resume", "status"])]
     source: Option<Address>,
     /// Continue an interrupted run.
-    #[arg(long, value_name = "RUN_ID")]
+    #[arg(long, value_name = "RUN_ID", conflicts_with = "status")]
     resume: Option<String>,
+    /// Show where each stealth row of a run stands: unpaid, open, swept or reclaimed.
+    #[arg(long, value_name = "RUN_ID")]
+    status: Option<String>,
+    /// With --status, return the rent of every swept stealth row to the payer.
+    #[arg(long, requires = "status")]
+    reclaim: bool,
     /// Payer keypair: owns the source and pays every fee.
     #[arg(long, default_value = "~/.config/solana/id.json")]
     keypair: String,
@@ -318,6 +479,29 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
         again: args.again,
         log: |line| eprintln!("{line}"),
     };
+    if let Some(run_id) = args.status {
+        let mut chain = chain;
+        let rows = if args.reclaim {
+            pay::reclaim(&mut chain, &payer, &run_id, &opts)?
+        } else {
+            pay::status(&chain, &payer, &run_id, &opts)?
+        };
+        println!("row\ttoken_account\tannouncement\tstate");
+        for s in rows {
+            let state = match s.state {
+                pay::StealthState::Unpaid => "unpaid",
+                pay::StealthState::Unresolved => "unresolved, resume the run",
+                pay::StealthState::Open => "open",
+                pay::StealthState::Swept => "swept",
+                pay::StealthState::Reclaimed => "reclaimed",
+            };
+            println!(
+                "{}\t{}\t{}\t{state}",
+                s.row, s.token_account, s.announcement
+            );
+        }
+        return Ok(());
+    }
     let report = match args.resume {
         Some(run_id) => {
             let keys = SourceKeys::from_signer(&payer)?;
@@ -352,8 +536,12 @@ fn main() -> anyhow::Result<()> {
             eprintln!("recipient backup: {}", path.display());
             Ok(())
         }
+        Command::Publish(args) => run_publish(args),
+        Command::Lookup(args) => run_lookup(args),
         Command::Scan(args) => run_scan(args),
         Command::Sweep(args) => run_sweep(args),
+        Command::Disclose(args) => run_disclose(args),
+        Command::Verify(args) => run_verify(args),
         Command::ExportSweepKey(args) => run_export_sweep_key(args),
         other => bail!("{other:?} is not implemented yet"),
     }
