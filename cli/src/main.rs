@@ -31,7 +31,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Publish a meta-address so payers can reach you with one-time accounts.
+    /// Create your recipient key backup and print the meta-address payers send to.
     Register(RegisterArgs),
     /// Pay a batch of plain and stealth recipients.
     Pay(PayArgs),
@@ -436,7 +436,7 @@ struct PayArgs {
     /// Continue an interrupted run.
     #[arg(long, value_name = "RUN_ID", conflicts_with = "status")]
     resume: Option<String>,
-    /// Show where each stealth row of a run stands: unpaid, open, swept or reclaimed.
+    /// Show where each stealth row of a run stands: unpaid, unresolved, open, swept or reclaimed.
     #[arg(long, value_name = "RUN_ID")]
     status: Option<String>,
     /// With --status, return the rent of every swept stealth row to the payer.
