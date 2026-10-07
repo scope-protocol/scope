@@ -38,6 +38,10 @@ pub fn transfer_proofs(
 ) -> Result<TransferProofData, String> {
     let no_auditor = ElGamalPubkey::default();
     let auditor = auditor.unwrap_or(&no_auditor);
+    // try_split_u64 does not bound the high part, so the 48-bit limit is checked here.
+    if amount >> 48 != 0 {
+        return Err("amount exceeds 48 bits".into());
+    }
     let (lo, hi) =
         try_split_u64(amount, TRANSFER_AMOUNT_LO_BITS).ok_or("amount exceeds 48 bits")?;
     let keys = [source.pubkey(), destination, auditor];

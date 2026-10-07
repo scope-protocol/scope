@@ -79,7 +79,8 @@ pub fn parse(text: &str, decimals: u8) -> Result<Vec<Row>, InputError> {
     Ok(rows)
 }
 
-/// Decimal token units to base units, exact: more fractional digits than the mint has is an error.
+/// Decimal token units to base units, exact: more fractional digits than the mint has is an error,
+/// and so is more than 2^48 - 1 base units, the most one confidential transfer can move.
 pub fn parse_amount(s: &str, decimals: u8) -> Result<u64, &'static str> {
     let (whole, frac) = s.split_once('.').unwrap_or((s, ""));
     let digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
@@ -107,6 +108,9 @@ pub fn parse_amount(s: &str, decimals: u8) -> Result<u64, &'static str> {
     if amount == 0 {
         return Err("zero");
     }
+    if amount >> 48 != 0 {
+        return Err("above the 48-bit confidential transfer limit");
+    }
     Ok(amount)
 }
 
@@ -133,6 +137,11 @@ mod tests {
             Err("more decimals than the mint")
         );
         assert_eq!(parse_amount("18446744073710", 6), Err("too large"));
+        assert_eq!(parse_amount("281474976.710655", 6), Ok((1 << 48) - 1));
+        assert_eq!(
+            parse_amount("281474976.710656", 6),
+            Err("above the 48-bit confidential transfer limit")
+        );
     }
 
     #[test]

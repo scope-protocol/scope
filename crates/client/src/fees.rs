@@ -54,7 +54,7 @@ pub fn price_per_cu(message: &VersionedMessage) -> Option<u64> {
     if let VersionedMessage::V1(v1) = message {
         let limit = v1.config.compute_unit_limit.filter(|l| *l > 0)?;
         let lamports = u128::from(v1.config.priority_fee.unwrap_or(0));
-        return Some((lamports * 1_000_000 / u128::from(limit)) as u64);
+        return Some(u64::try_from(lamports * 1_000_000 / u128::from(limit)).unwrap_or(u64::MAX));
     }
     let mut price = 0;
     for ix in message.instructions() {
