@@ -113,11 +113,10 @@ fn stealth_payment_keeps_headroom_under_its_limit() {
 /// Measured 2026-10-06 at bump 255: 8,728, S7 included. Ceiling about 20% above.
 const REGISTER_CU_MAX: u64 = 10_500;
 
-#[test]
-fn register_stays_within_budget() {
+/// A wallet whose registry entry has bump 255, and its `register` instruction.
+fn register_at_bump_255(h: &mut Harness) -> (Keypair, solana_instruction::Instruction) {
     use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT as B, scalar::Scalar};
     use scope_interface::{instruction::RegisterData, state::META_SCHEME_V1};
-    let mut h = Harness::new();
     let owner = loop {
         let k = Keypair::new();
         if scope_client::address::meta_entry_address(&k.pubkey()).1 == 255 {
@@ -145,11 +144,35 @@ fn register_stays_within_budget() {
         ],
         data: data.to_bytes().to_vec(),
     };
+    (owner, ix)
+}
+
+#[test]
+fn register_stays_within_budget() {
+    let mut h = Harness::new();
+    let (owner, ix) = register_at_bump_255(&mut h);
     let meta = h.send(&[ix], &[&owner]).expect("register");
     let used = program_compute_units(&meta.logs);
     println!("register CU {used:?}");
     assert_eq!(used.len(), 1);
     assert!(used[0] <= REGISTER_CU_MAX, "register used {}", used[0]);
+}
+
+/// Measured 2026-10-07 at bump 255: 489. Ceiling about 20% above.
+const DEREGISTER_CU_MAX: u64 = 600;
+
+#[test]
+fn deregister_stays_within_budget() {
+    let mut h = Harness::new();
+    let (owner, register) = register_at_bump_255(&mut h);
+    h.send(&[register], &[&owner]).expect("register");
+    let meta = h
+        .send(&[scope_client::ix::deregister(&owner.pubkey())], &[&owner])
+        .expect("deregister");
+    let used = program_compute_units(&meta.logs);
+    println!("deregister CU {used:?}");
+    assert_eq!(used.len(), 1);
+    assert!(used[0] <= DEREGISTER_CU_MAX, "deregister used {}", used[0]);
 }
 
 /// The payer's reclaim backstop sends `reclaim` alone; at bump 255.
