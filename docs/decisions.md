@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-10-06
+last_verified: 2026-10-07
 ---
 
 # Decisions
@@ -8,9 +8,14 @@ last_verified: 2026-10-06
 TL;DR: append-only, newest first. Each entry says what was decided, why, and what was rejected.
 Docs describe the present; this file holds the why. Design history from before this repository lives in the team's working notes.
 
+## 2026-10-07 Review of the payer stealth branch
+
+- **Receipts authenticate the transaction they name.** `verify` and recipient `disclose` require the archived transaction to carry the receipt's signature first and every signature to verify. Without that, a node could answer with a transfer it built from openings it knows. A node can still misreport success; that trust stays with the verifier's choice of node. Rejected: checking success against a second node, which only moves the trust.
+- **Two owner areas instead of three.** The audit and security area joins the program and payer engine area: the registry, receipts, adversarial suite, CU assertions and CI. Its open questions moved with it and are decided in the entries below.
+
 ## 2026-10-06 Payer stealth rows
 
-- **A registry in sRFC-42's layout (Q12).** Two instructions in our program, `register` and `deregister`, writing sRFC-42 v1's entry byte for byte under the same seeds, so its readers work on ours; S7's torsion check refuses a bad B_spend on chain. Payers look up with one query and paste the meta-address into the payroll file, which then records exactly whom it paid. Rejected: a private layout, resolving registry rows inside `scope pay` (a re-registration between start and resume would change a recipient mid-run), and a second program, which the one-program rule excludes.
+- **A registry in sRFC-42's layout (Q12).** Two instructions in our program, `register` and `deregister`, writing sRFC-42 v1's entry byte for byte under the same seeds, so its readers work on ours. That answers the deferral below, whose reason was that the seeds did not match; S7's torsion check refuses a bad B_spend on chain. Payers look up with one query and paste the meta-address into the payroll file, which then records exactly whom it paid. Rejected: a private layout, resolving registry rows inside `scope pay` (a re-registration between start and resume would change a recipient mid-run), and a second program, which the one-program rule excludes.
 - **Receipts: the payer's openings for every row, `ct_ikm` for the stealth recipient (Q15).** Plain recipients' keys are their wallet keys and cannot be handed out per payment, but the payer's amount openings prove any row's amount and reveal nothing else, and the run secret re-derives them. A recipient's receipt is built from the payment transaction alone and is refused unless its key is the transfer's destination key. Rejected: stealth-only receipts with plain payments left to the auditor key.
 - **The run secret comes from the payer's signature (Q16).** `run_secret = HKDF(payer's Ed25519 signature over a fixed label || run_id)`. Signing is deterministic, so the payer keypair, already backed up, rebuilds every run's secret, every R_i and every amount opening; the same pattern as the source keys. Rejected: a master secret in an age file or the keychain (one more backup and storage code for the same result).
 - **Amount openings are derived, not drawn.** The engine builds transfer proofs with the same builders as proof-generation 0.6.1 but takes the two amount openings from the run secret. A payer can then prove any row's amount, plain or stealth, by disclosing that row's openings, with nothing stored. Every attempt for a row moves the same amount, so reusing its openings across attempts reveals nothing. Rejected: random openings stored beside the journal (a secret on disk that the journal rule keeps out).

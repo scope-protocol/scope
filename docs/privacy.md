@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-06
+last_verified: 2026-10-07
 ---
 
 # Privacy
@@ -38,7 +38,7 @@ The payer can follow the funds it paid, as on any public ledger, but reads no am
 - **The payer follows the funds.** The payer sees D in the sweep and can watch D's counterparties forever, amounts hidden. Any payer on a public ledger can do this with a wallet it paid, and the payer already knows who it paid. This rail hides the recipient from the public, not from the payer.
 - **Payer's keys.** The payer can read that one account until it is emptied. It cannot move funds (P owns the account) or decrypt the destination side. The credit cap limits outstanding pending credits, and public credits are disabled; an applied source can receive one further confidential credit before sweeping, which requires fresh proofs; sweeping also disables confidential credits so a transfer-only fallback cannot reopen the source to the payer (verification: V2, V3, V7, V65). Insufficient funding and mint-authority restrictions can still prevent a sweep. A partial spend straight from the one-time account shows the payer the split; sweep the whole balance.
 - **Balance cache.** The AE-encrypted balance hint is writable by anyone holding the AES key, which includes the payer. The client never trusts it.
-- **Registration.** Publishing is optional; a meta-address string handed to the payer works without it. A published entry makes the registering wallet's link to the meta-address public and permanent; for a grants or donations flow, publish from a wallet with no other history. Lookups fetch every entry in one query and pick locally, so the RPC provider does not learn whom a payer looks up.
+- **Registration.** Publishing is optional; a meta-address string handed to the payer works without it. A published entry makes the registering wallet's link to the meta-address public and permanent; for a grants or donations flow, publish from a wallet with no other history. Lookups fetch every entry in one query and pick locally, so the query does not name the wallet looked up; the provider still sees that a lookup happened and any payment that follows.
 - **Underfunded P.** If the payer leaves too little on P, the only top-up path is a wallet the recipient controls, which links it. The client refuses to send below a computed floor; the payer overprovisions.
 - **Headcount and timing.** A run's transactions land close together from one payer: an observer counts recipients per run with certainty. Spreading sends over time helps; not solved.
 - **Send order.** A payroll file sorted by name, plus a public roster, would link the k-th one-time account to the k-th employee. The engine shuffles send order with a random permutation recorded in the run header; this hides order, not headcount.

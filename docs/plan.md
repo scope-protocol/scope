@@ -1,11 +1,11 @@
 ---
 status: draft
-last_verified: 2026-10-06
+last_verified: 2026-10-07
 ---
 
 # Plan
 
-TL;DR: six phases, each closed by a gate that is a running command or a passing test, not a date. P0 and P1 are done except the devnet leg of S1, the multi-day S4 run and the Q1 review request; Q14 code is implemented and awaiting review. The plain payer engine runs on Surfpool; the program's attack tests, CU ceilings and S5 are in; devnet runs are next.
+TL;DR: six phases, each closed by a gate that is a running command or a passing test, not a date. P0 and P1 are done except the devnet leg of S1, the multi-day S4 run and the Q1 review request; Q14 code is implemented and awaiting review. The plain payer engine runs on Surfpool; stealth rows, receipts, the registry with S7 and the chaos harness pass in LiteSVM; devnet runs are next.
 Two owners split by area; open questions have owners, and the cut order applies as soon as a gate stalls.
 
 ## Owners

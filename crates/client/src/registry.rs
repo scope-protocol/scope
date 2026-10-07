@@ -1,6 +1,6 @@
 //! The on-chain registry (docs/design.md, Registry): sRFC-42 v1 entries in our program.
-//! Lookups fetch every entry in one query and pick locally, so the RPC provider does not
-//! learn whom the payer looks up (docs/client.md, Privacy).
+//! Lookups fetch every entry in one query and pick locally, so the query does not name
+//! the wallet looked up (docs/privacy.md, Registration).
 
 use crate::{
     address::{meta_entry_address, program_id},
