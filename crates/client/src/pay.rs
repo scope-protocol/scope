@@ -20,6 +20,7 @@ use crate::{
     input::{self, InputError, Recipient, Row},
     ix::{self, StealthSetup},
     journal::{self, INPUT_COPY, Journal, JournalError, Record, hex, unhex},
+    mint_policy::{self, MintPolicy},
     proofs::transfer_proofs,
     run_secret::RunSecret,
     tx::{
@@ -42,12 +43,8 @@ use solana_zk_sdk::encryption::{
 };
 use spl_token_2022_interface::{
     extension::{
-        BaseStateWithExtensions, ExtensionType, StateWithExtensions,
-        account_len::try_calculate_account_len_from_mint_data,
-        confidential_transfer::{
-            ConfidentialTransferAccount, ConfidentialTransferMint, instruction as ct,
-        },
-        default_account_state::DefaultAccountState,
+        BaseStateWithExtensions, StateWithExtensions,
+        confidential_transfer::{ConfidentialTransferAccount, instruction as ct},
     },
     state::{Account, AccountState, Mint},
 };
@@ -58,13 +55,6 @@ use std::{
     time::Duration,
 };
 use stealth_keygen::{RecipientPublicKeys, derive_payment_with_ephemeral};
-
-/// Mint extensions a plain confidential Transfer cannot go through.
-const REFUSED_MINT_EXTENSIONS: [ExtensionType; 3] = [
-    ExtensionType::NonTransferable,
-    ExtensionType::TransferFeeConfig,
-    ExtensionType::TransferHook,
-];
 
 pub struct SourceKeys {
     pub elgamal: ElGamalKeypair,
@@ -110,12 +100,22 @@ pub enum PayError {
     Recipient { recipient: Address, why: String },
     #[error("source holds {have}, the run needs {need} (base units)")]
     Insufficient { have: u64, need: u64 },
+    #[error("the payer needs {} SOL, has {}", sol(*need), sol(*have))]
+    PayerFunds { have: u64, need: u64 },
     #[error(
         "this input was already run as {run_id}; resume it if it did not finish, or pass --again to pay it twice"
     )]
     DuplicateInput { run_id: String },
     #[error("priority fee {price} micro-lamports/CU is above the cap {cap}; resume later")]
     FeeAboveCap { price: u64, cap: u64 },
+    #[error(
+        "run {run_id} paid on cluster {journal} (genesis hash), but this RPC node is on {node}; use the node the run started on"
+    )]
+    WrongCluster {
+        run_id: String,
+        journal: String,
+        node: String,
+    },
     #[error("proof generation: {0}")]
     Proof(String),
     #[error("row {row}: simulation failed, nothing sent: {logs}")]
@@ -146,15 +146,6 @@ pub struct Report {
     pub paid: Vec<Paid>,
 }
 
-struct MintInfo {
-    decimals: u8,
-    auditor: Option<ElGamalPubkey>,
-    /// Size of a confidential token account for this mint.
-    space: usize,
-    /// Why stealth rows cannot use this mint, if they cannot.
-    stealth_refusal: Option<&'static str>,
-}
-
 struct SourceState {
     available: [u8; 64],
     hint: AeCiphertext,
@@ -171,6 +162,8 @@ struct Attempt {
 enum Outcome {
     Landed,
     Expired,
+    /// The transaction landed and failed, so it can never land again; its error text.
+    Failed(String),
 }
 
 fn ciphertext(bytes: &str) -> Option<[u8; 64]> {
@@ -195,7 +188,7 @@ fn mint_decimals<C: Chain>(chain: &C, mint: &Address) -> Result<u8, PayError> {
         .map_err(|_| bad("not a mint"))
 }
 
-fn mint_info<C: Chain>(chain: &C, mint: &Address) -> Result<MintInfo, PayError> {
+fn mint_info<C: Chain>(chain: &C, mint: &Address) -> Result<MintPolicy, PayError> {
     let bad = |why: &str| PayError::Mint {
         mint: *mint,
         why: why.into(),
@@ -206,45 +199,7 @@ fn mint_info<C: Chain>(chain: &C, mint: &Address) -> Result<MintInfo, PayError> 
     if account.owner != token_2022() {
         return Err(bad("not a Token-2022 mint"));
     }
-    let state =
-        StateWithExtensions::<Mint>::unpack(&account.data).map_err(|_| bad("not a mint"))?;
-    let types = state
-        .get_extension_types()
-        .map_err(|_| bad("bad extensions"))?;
-    if let Some(t) = REFUSED_MINT_EXTENSIONS.iter().find(|t| types.contains(t)) {
-        return Err(bad(&format!("{t:?} is not supported")));
-    }
-    let ext = state
-        .get_extension::<ConfidentialTransferMint>()
-        .map_err(|_| bad("confidential transfers not enabled"))?;
-    let auditor = ext
-        .auditor_elgamal_pubkey
-        .get()
-        .map(|key| ElGamalPubkey::try_from(key.0.as_slice()))
-        .transpose()
-        .map_err(|_| bad("bad auditor key"))?;
-    // `announce` does not check approval (verification: V72), so this is the client's job.
-    let frozen_by_default = state
-        .get_extension::<DefaultAccountState>()
-        .is_ok_and(|s| s.state == AccountState::Frozen as u8);
-    let stealth_refusal = if !bool::from(ext.auto_approve_new_accounts) {
-        Some("stealth rows need a mint that approves new confidential accounts itself")
-    } else if frozen_by_default {
-        Some("stealth rows need a mint that does not freeze new accounts")
-    } else {
-        None
-    };
-    let space = try_calculate_account_len_from_mint_data(
-        &account.data,
-        &[ExtensionType::ConfidentialTransferAccount],
-    )
-    .map_err(|_| bad("cannot size a confidential account"))?;
-    Ok(MintInfo {
-        decimals: state.base.decimals,
-        auditor,
-        space,
-        stealth_refusal,
-    })
+    mint_policy::check(&account.data).map_err(|why| bad(&why))
 }
 
 /// One stealth row's one-time account, derived from the run secret (docs/crypto.md, Derivation tree).
@@ -310,7 +265,7 @@ fn stealth_rows<C: Chain>(
 fn check_stealth_mint<'a>(
     unpaid: impl IntoIterator<Item = &'a Row>,
     mint: &Address,
-    info: &MintInfo,
+    info: &MintPolicy,
 ) -> Result<(), PayError> {
     let any = unpaid
         .into_iter()
@@ -322,6 +277,67 @@ fn check_stealth_mint<'a>(
         }),
         _ => Ok(()),
     }
+}
+
+/// Lamports as SOL text, exact to the lamport.
+pub fn sol(lamports: u64) -> String {
+    format!(
+        "{}.{:09}",
+        lamports / 1_000_000_000,
+        lamports % 1_000_000_000
+    )
+}
+
+/// Rows in `rows` not in `skip` that credit the plain account `address`.
+fn credits_to(rows: &[Row], skip: &HashSet<usize>, address: &Address) -> u64 {
+    rows.iter()
+        .enumerate()
+        .filter(|(i, r)| !skip.contains(i) && r.recipient == Recipient::Plain(*address))
+        .count() as u64
+}
+
+/// What the payer's wallet must hold for the rows not in `skip`: for each stealth row the
+/// one-time account's rent, the announcement's rent and P's funding, for every row the
+/// fee at the price cap, and once the wallet's own rent reserve.
+pub fn payer_need<C: Chain>(
+    chain: &C,
+    rows: &[Row],
+    skip: &HashSet<usize>,
+    rents: (u64, u64),
+    max_price_per_cu: u64,
+) -> Result<u64, PayError> {
+    let (rent, reserve) = rents;
+    let fee =
+        |limit| fees::LAMPORTS_PER_SIGNATURE + fees::priority_fee_lamports(max_price_per_cu, limit);
+    let mut need = 0u64;
+    let mut stealth_rows = 0u64;
+    for (_, r) in rows.iter().enumerate().filter(|(i, _)| !skip.contains(i)) {
+        need = need.saturating_add(match r.recipient {
+            Recipient::Plain(_) => fee(PLAIN_TRANSFER_CU_LIMIT),
+            Recipient::Stealth(_) => {
+                stealth_rows += 1;
+                fee(STEALTH_PAYMENT_CU_LIMIT)
+            }
+        });
+    }
+    if stealth_rows > 0 {
+        let per_row = rent
+            .saturating_add(chain.rent(scope_interface::state::ANNOUNCEMENT_LEN)?)
+            .saturating_add(fees::sweep_funding(rent, reserve, fees::SWEEP_PRICE_CAP));
+        need = need.saturating_add(per_row.saturating_mul(stealth_rows));
+    }
+    Ok(need.saturating_add(chain.rent(0)?))
+}
+
+/// Refuses a run whose lamport cost the payer's wallet cannot cover.
+fn check_payer_funds<C: Chain>(chain: &C, payer: &Address, need: u64) -> Result<(), PayError> {
+    let have = chain
+        .account(payer, Commitment::Confirmed)?
+        .map_or(0, |a| a.lamports);
+    if have < need {
+        return Err(PayError::PayerFunds { have, need });
+    }
+    Ok(())
 }
 
 /// Preflights every plain row not in `skip` and returns its ElGamal key.
@@ -338,7 +354,10 @@ fn plain_rows<C: Chain>(
             Recipient::Plain(address) => Some((i, address)),
             Recipient::Stealth(_) => None,
         })
-        .map(|(i, address)| Ok((i, preflight(chain, address, mint)?)))
+        .map(|(i, address)| {
+            let credits = credits_to(rows, skip, address);
+            Ok((i, preflight(chain, address, mint, credits)?))
+        })
         .collect()
 }
 
@@ -366,6 +385,8 @@ fn load_run<C: Chain>(
         })
     };
     let Some(Record::Run {
+        run_id,
+        genesis,
         input_sha256,
         mint,
         source,
@@ -379,6 +400,17 @@ fn load_run<C: Chain>(
     };
     if *journal_payer != payer.pubkey().to_string() {
         return Err(corrupt("run belongs to another payer"));
+    }
+    // Runs that predate the field recorded no cluster.
+    if !genesis.is_empty() {
+        let node = hex(&chain.genesis_hash()?);
+        if node != *genesis {
+            return Err(PayError::WrongCluster {
+                run_id: run_id.clone(),
+                journal: genesis.clone(),
+                node,
+            });
+        }
     }
     let mint: Address = mint.parse().map_err(|_| corrupt("bad mint"))?;
     let source: Address = source.parse().map_err(|_| corrupt("bad source"))?;
@@ -404,7 +436,11 @@ fn stealth_rents<C: Chain>(
     stealth: &HashMap<usize, Stealth>,
     space: usize,
 ) -> Result<(u64, u64), PayError> {
-    if stealth.is_empty() {
+    rents_if(chain, !stealth.is_empty(), space)
+}
+
+fn rents_if<C: Chain>(chain: &C, any_stealth: bool, space: usize) -> Result<(u64, u64), PayError> {
+    if !any_stealth {
         return Ok((0, 0));
     }
     Ok((chain.rent(space)?, chain.rent(0)?))
@@ -418,11 +454,13 @@ fn paid_to(rows: &[Row], stealth: &HashMap<usize, Stealth>, row: usize) -> Addre
     }
 }
 
-/// The recipient's ElGamal key, once its account can take one more confidential credit.
+/// The recipient's ElGamal key, once its account can take `credits` more confidential
+/// credits, one per row that pays it.
 fn preflight<C: Chain>(
     chain: &C,
     recipient: &Address,
     mint: &Address,
+    credits: u64,
 ) -> Result<ElGamalPubkey, PayError> {
     let bad = |why: &str| PayError::Recipient {
         recipient: *recipient,
@@ -451,10 +489,12 @@ fn preflight<C: Chain>(
     if !bool::from(ext.allow_confidential_credits) {
         return Err(bad("confidential credits disabled"));
     }
-    if u64::from(ext.pending_balance_credit_counter)
-        >= u64::from(ext.maximum_pending_balance_credit_counter)
-    {
-        return Err(bad("pending credit counter full"));
+    let room = u64::from(ext.maximum_pending_balance_credit_counter)
+        .saturating_sub(u64::from(ext.pending_balance_credit_counter));
+    if credits > room {
+        return Err(bad(&format!(
+            "pending credit counter: {credits} rows pay it, room for {room}"
+        )));
     }
     ElGamalPubkey::try_from(ext.elgamal_pubkey).map_err(|_| bad("bad ElGamal key"))
 }
@@ -519,8 +559,32 @@ fn verified_balance(
     Ok(claimed)
 }
 
-/// Finds an earlier run of the same input, by the hash in each journal's first record.
-fn earlier_run(runs_dir: &Path, input_sha256: &str) -> Result<Option<String>, PayError> {
+/// What makes two inputs the same payout: the rows' recipients and base-unit amounts,
+/// in any order, on one mint from one payer. Formatting, comments and row order do not
+/// change it; a different mint does.
+pub fn input_key(rows: &[Row], mint: &Address, payer: &Address) -> String {
+    let mut lines: Vec<String> = rows
+        .iter()
+        .map(|r| match &r.recipient {
+            Recipient::Plain(a) => format!("plain {a} {}", r.amount),
+            Recipient::Stealth(k) => format!("stealth {} {}", k.to_meta_address(), r.amount),
+        })
+        .collect();
+    lines.sort();
+    let text = format!(
+        "scope-input/v1\nmint {mint}\npayer {payer}\n{}",
+        lines.join("\n")
+    );
+    hex(&solana_sha256_hasher::hash(text.as_bytes()).to_bytes())
+}
+
+/// Finds an earlier run of the same input: by `input_key` in each journal's first
+/// record, or for a journal that predates it by the hash of the raw input bytes.
+fn earlier_run(
+    runs_dir: &Path,
+    input_key: &str,
+    input_sha256: &str,
+) -> Result<Option<String>, PayError> {
     let io = |e| PayError::Journal(JournalError::Io(runs_dir.to_path_buf(), e));
     let entries = match std::fs::read_dir(runs_dir) {
         Ok(entries) => entries,
@@ -535,9 +599,17 @@ fn earlier_run(runs_dir: &Path, input_sha256: &str) -> Result<Option<String>, Pa
         match journal::read_header(&dir) {
             Ok(Some(Record::Run {
                 run_id,
-                input_sha256: h,
+                input_sha256: raw,
+                input_key: key,
                 ..
-            })) if h == input_sha256 => return Ok(Some(run_id)),
+            })) if if key.is_empty() {
+                raw == input_sha256
+            } else {
+                key == input_key
+            } =>
+            {
+                return Ok(Some(run_id));
+            }
             Ok(_) => {}
             // A crash between creating the directory and the journal leaves nothing to pay twice.
             Err(JournalError::Io(_, e))
@@ -603,11 +675,12 @@ pub fn start<C: Chain>(
     let text = std::str::from_utf8(input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
     let rows = input::parse(text, info.decimals)?;
     let input_sha256 = hex(&solana_sha256_hasher::hash(input_bytes).to_bytes());
+    let input_key = input_key(&rows, &mint, &payer.pubkey());
     // Held from the duplicate check until the new journal records its input hash, so two
     // runs of one input cannot race.
     let runs_lock = journal::lock_dir(&opts.runs_dir)?;
     if !opts.again
-        && let Some(run_id) = earlier_run(&opts.runs_dir, &input_sha256)?
+        && let Some(run_id) = earlier_run(&opts.runs_dir, &input_key, &input_sha256)?
     {
         return Err(PayError::DuplicateInput { run_id });
     }
@@ -640,14 +713,19 @@ pub fn start<C: Chain>(
     let stealth = stealth_rows(&chain, &rows, &run_secret, &run_id, &payer.pubkey(), &mint)?;
     let rents = stealth_rents(&chain, &stealth, info.space)?;
     let plain = plain_rows(&chain, &rows, &HashSet::new(), &mint)?;
+    let need = payer_need(&chain, &rows, &HashSet::new(), rents, opts.max_price_per_cu)?;
+    check_payer_funds(&chain, &payer.pubkey(), need)?;
 
     let dir = opts.runs_dir.join(&run_id);
     let mut journal = Journal::create(&dir)?;
     journal::write_private(&dir.join(INPUT_COPY), input_bytes)?;
     let order = shuffled(rows.len());
     journal.append(&Record::Run {
+        format: journal::FORMAT,
+        genesis: hex(&chain.genesis_hash()?),
         run_id: run_id.clone(),
         input_sha256,
+        input_key,
         mint: mint.to_string(),
         source: source.to_string(),
         payer: payer.pubkey().to_string(),
@@ -655,7 +733,11 @@ pub fn start<C: Chain>(
         derived_openings: true,
     })?;
     drop(runs_lock);
-    (opts.log)(&format!("run {run_id}: {} rows", rows.len()));
+    (opts.log)(&format!(
+        "run {run_id}: {} rows\njournal: {}",
+        rows.len(),
+        dir.join(journal::JOURNAL).display()
+    ));
     let mut engine = Engine {
         chain,
         payer,
@@ -677,6 +759,151 @@ pub fn start<C: Chain>(
         run_id,
     };
     engine.run(&order, &HashSet::new())
+}
+
+/// What a real run would do and cost, from every preflight but without sending anything
+/// or writing a journal.
+#[derive(Debug)]
+pub struct DryRun {
+    pub genesis: [u8; 32],
+    /// `cluster_name` of the genesis hash.
+    pub cluster: String,
+    pub rows: usize,
+    pub plain_rows: usize,
+    pub stealth_rows: usize,
+    /// Sum of all rows, base units.
+    pub total: u64,
+    pub decimals: u8,
+    pub payer_have: u64,
+    pub payer_need: u64,
+    /// The sampled per-CU price a row would pay now, micro-lamports.
+    pub price: u64,
+    /// Most one row's fee can be at `--max-price`, lamports.
+    pub fee_cap_plain: u64,
+    pub fee_cap_stealth: u64,
+}
+
+const KNOWN_CLUSTERS: [(&str, &str); 3] = [
+    (
+        "mainnet-beta",
+        "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    ),
+    ("devnet", "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"),
+    ("testnet", "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY"),
+];
+
+/// The cluster a genesis hash belongs to, or `unknown cluster <hash>`.
+pub fn cluster_name(genesis: &[u8; 32]) -> String {
+    let hash = solana_message::Hash::new_from_array(*genesis).to_string();
+    KNOWN_CLUSTERS
+        .iter()
+        .find(|(_, known)| *known == hash)
+        .map_or_else(
+            || format!("unknown cluster {hash}"),
+            |(name, _)| (*name).into(),
+        )
+}
+
+/// A real run on mainnet-beta needs `--yes`; anything else goes ahead.
+pub fn mainnet_gate(genesis: &[u8; 32], yes: bool) -> Result<(), String> {
+    if cluster_name(genesis) == "mainnet-beta" && !yes {
+        return Err(
+            "this node is on mainnet-beta; check the plan with --dry-run, then rerun with --yes"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// Token amount in base units as decimal text.
+pub fn token_amount(base: u64, decimals: u8) -> String {
+    let Some(scale) = 10u64
+        .checked_pow(u32::from(decimals))
+        .filter(|_| decimals > 0)
+    else {
+        return base.to_string();
+    };
+    format!(
+        "{}.{:0width$}",
+        base / scale,
+        base % scale,
+        width = usize::from(decimals)
+    )
+}
+
+/// Runs the preflights of `start` that need no signature or write: the input, the mint's
+/// policy, duplicate runs, the source and its balance, the plain recipients, the payer's
+/// SOL and a fee sample.
+pub fn dry_run<C: Chain>(
+    chain: &C,
+    payer: &Keypair,
+    keys: &SourceKeys,
+    mint: Address,
+    source: Address,
+    input_bytes: &[u8],
+    opts: &PayOptions,
+) -> Result<DryRun, PayError> {
+    let info = mint_info(chain, &mint)?;
+    let text = std::str::from_utf8(input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
+    let rows = input::parse(text, info.decimals)?;
+    if !opts.again {
+        let raw = hex(&solana_sha256_hasher::hash(input_bytes).to_bytes());
+        let key = input_key(&rows, &mint, &payer.pubkey());
+        if let Some(run_id) = earlier_run(&opts.runs_dir, &key, &raw)? {
+            return Err(PayError::DuplicateInput { run_id });
+        }
+    }
+    let state = source_state(
+        chain,
+        &source,
+        &mint,
+        &payer.pubkey(),
+        keys,
+        Commitment::Confirmed,
+    )?;
+    let balance = verified_balance(keys, &state, &source)?;
+    let total = rows
+        .iter()
+        .try_fold(0u64, |sum, r| sum.checked_add(r.amount))
+        .ok_or(PayError::Insufficient {
+            have: balance,
+            need: u64::MAX,
+        })?;
+    if total > balance {
+        return Err(PayError::Insufficient {
+            have: balance,
+            need: total,
+        });
+    }
+    check_stealth_mint(&rows, &mint, &info)?;
+    plain_rows(chain, &rows, &HashSet::new(), &mint)?;
+    let stealth_rows = rows
+        .iter()
+        .filter(|r| matches!(r.recipient, Recipient::Stealth(_)))
+        .count();
+    let rents = rents_if(chain, stealth_rows > 0, info.space)?;
+    let payer_need = payer_need(chain, &rows, &HashSet::new(), rents, opts.max_price_per_cu)?;
+    let price = fees::priority_price(chain.recent_prices()?, opts.max_price_per_cu)?;
+    let fee_cap = |limit| {
+        fees::LAMPORTS_PER_SIGNATURE + fees::priority_fee_lamports(opts.max_price_per_cu, limit)
+    };
+    let genesis = chain.genesis_hash()?;
+    Ok(DryRun {
+        genesis,
+        cluster: cluster_name(&genesis),
+        rows: rows.len(),
+        plain_rows: rows.len() - stealth_rows,
+        stealth_rows,
+        total,
+        decimals: info.decimals,
+        payer_have: chain
+            .account(&payer.pubkey(), Commitment::Confirmed)?
+            .map_or(0, |a| a.lamports),
+        payer_need,
+        price,
+        fee_cap_plain: fee_cap(PLAIN_TRANSFER_CU_LIMIT),
+        fee_cap_stealth: fee_cap(STEALTH_PAYMENT_CU_LIMIT),
+    })
 }
 
 /// Continues run `run_id` from its journal and the chain.
@@ -733,6 +960,7 @@ pub fn resume<C: Chain>(
                 });
                 open = None;
             }
+            Record::Halted { .. } => {}
             Record::Done => {
                 return Ok(Report {
                     run_id: run_id.into(),
@@ -762,6 +990,8 @@ pub fn resume<C: Chain>(
     };
     let skip: HashSet<usize> = landed.iter().copied().chain(open_row).collect();
     let plain = plain_rows(&chain, &rows, &skip, &mint)?;
+    let need = payer_need(&chain, &rows, &landed, rents, opts.max_price_per_cu)?;
+    check_payer_funds(&chain, &payer.pubkey(), need)?;
     let mut engine = Engine {
         chain,
         payer,
@@ -821,7 +1051,8 @@ pub fn resume<C: Chain>(
         if !landed.contains(&row)
             && let Recipient::Plain(address) = &engine.rows[row].recipient
         {
-            let key = preflight(&engine.chain, address, &engine.mint)?;
+            let credits = credits_to(&engine.rows, &landed, address);
+            let key = preflight(&engine.chain, address, &engine.mint, credits)?;
             engine.plain.insert(row, key);
         }
         // A landed attempt changed the balance; read it back verified rather than trusting arithmetic.
@@ -849,6 +1080,10 @@ pub fn resume<C: Chain>(
     engine.run(&order, &landed)
 }
 
+/// Consecutive expired or failed attempts of one row before the run halts. An attempt that
+/// passed simulation and still does not land points at something a rebuild will not fix.
+const REBUILD_LIMIT: usize = 3;
+
 /// Expired attempts per row before `reclaim` gives up; it is a backstop, safe to rerun.
 const RECLAIM_ATTEMPTS: usize = 3;
 
@@ -874,6 +1109,97 @@ pub struct StealthStatus {
     pub token_account: Address,
     pub announcement: Address,
     pub state: StealthState,
+}
+
+/// Where a run as a whole stands, from its journal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunState {
+    Done,
+    /// The last thing the run recorded was an error it stopped on.
+    Halted(String),
+    /// Neither done nor halted: running now, or killed; resume to find out.
+    Unfinished,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlainState {
+    Unpaid,
+    /// Attempted and not recorded as landed; resuming settles it.
+    Attempted,
+    Landed,
+}
+
+#[derive(Debug)]
+pub struct PlainStatus {
+    pub row: usize,
+    pub recipient: Address,
+    pub state: PlainState,
+    pub signature: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct RunSummary {
+    pub rows: usize,
+    pub landed: usize,
+    pub state: RunState,
+    pub plain: Vec<PlainStatus>,
+}
+
+/// The run's row counts, its overall state and each plain row, read from the journal
+/// without locking it.
+pub fn summary<C: Chain>(
+    chain: &C,
+    payer: &Keypair,
+    run_id: &str,
+    opts: &PayOptions,
+) -> Result<RunSummary, PayError> {
+    let dir = opts.runs_dir.join(run_id);
+    let records = journal::read_unlocked(&dir)?;
+    let run = load_run(chain, payer, &dir, &records)?;
+    let mut landed: HashMap<usize, String> = HashMap::new();
+    let mut attempted = HashSet::new();
+    for r in &records {
+        match r {
+            Record::Landed { row, signature } => {
+                landed.insert(*row, signature.clone());
+            }
+            Record::Attempt { row, .. } => {
+                attempted.insert(*row);
+            }
+            _ => {}
+        }
+    }
+    let state = match records.last() {
+        Some(Record::Done) => RunState::Done,
+        Some(Record::Halted { reason }) => RunState::Halted(reason.clone()),
+        _ => RunState::Unfinished,
+    };
+    let plain = run
+        .rows
+        .iter()
+        .enumerate()
+        .filter_map(|(row, r)| match &r.recipient {
+            Recipient::Plain(recipient) => Some(PlainStatus {
+                row,
+                recipient: *recipient,
+                state: if landed.contains_key(&row) {
+                    PlainState::Landed
+                } else if attempted.contains(&row) {
+                    PlainState::Attempted
+                } else {
+                    PlainState::Unpaid
+                },
+                signature: landed.get(&row).cloned(),
+            }),
+            Recipient::Stealth(_) => None,
+        })
+        .collect();
+    Ok(RunSummary {
+        rows: run.rows.len(),
+        landed: landed.len(),
+        state,
+        plain,
+    })
 }
 
 /// Where each stealth row of run `run_id` stands. Reads the journal without locking it,
@@ -930,6 +1256,25 @@ pub fn status<C: Chain>(
     Ok(out)
 }
 
+/// Whether the token account exists and every balance of it is empty.
+fn token_account_empty<C: Chain>(chain: &C, token_account: &Address) -> Result<bool, PayError> {
+    Ok(match chain.account(token_account, Commitment::Confirmed)? {
+        Some(a) if a.owner == token_2022() => StateWithExtensions::<Account>::unpack(&a.data)
+            .ok()
+            .and_then(|state| {
+                let ext = state.get_extension::<ConfidentialTransferAccount>().ok()?;
+                Some(
+                    state.base.amount == 0
+                        && ext.available_balance.0 == [0; 64]
+                        && ext.pending_balance_lo.0 == [0; 64]
+                        && ext.pending_balance_hi.0 == [0; 64],
+                )
+            })
+            .unwrap_or(false),
+        _ => false,
+    })
+}
+
 /// What the journal says about a row.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Journaled {
@@ -957,21 +1302,7 @@ fn stealth_state<C: Chain>(
             Journaled::Nothing => StealthState::Unpaid,
         });
     }
-    let empty = match chain.account(&s.token_account, Commitment::Confirmed)? {
-        Some(a) if a.owner == token_2022() => StateWithExtensions::<Account>::unpack(&a.data)
-            .ok()
-            .and_then(|state| {
-                let ext = state.get_extension::<ConfidentialTransferAccount>().ok()?;
-                Some(
-                    state.base.amount == 0
-                        && ext.available_balance.0 == [0; 64]
-                        && ext.pending_balance_lo.0 == [0; 64]
-                        && ext.pending_balance_hi.0 == [0; 64],
-                )
-            })
-            .unwrap_or(false),
-        _ => false,
-    };
+    let empty = token_account_empty(chain, &s.token_account)?;
     // Every row pays a nonzero amount, so empty balances under an open announcement mean swept.
     Ok(if empty {
         StealthState::Swept
@@ -980,10 +1311,78 @@ fn stealth_state<C: Chain>(
     })
 }
 
+/// Why one `reclaim` could not be completed.
+enum ReclaimError {
+    Simulation(String),
+    GaveUp,
+    Other(PayError),
+}
+
+impl<E: Into<PayError>> From<E> for ReclaimError {
+    fn from(e: E) -> Self {
+        Self::Other(e.into())
+    }
+}
+
+/// Calls the permissionless `reclaim` until the announcement is closed. Anyone may call
+/// it, so another caller can win the race; that is success too. Each attempt pays the
+/// sampled priority price under `--max-price`.
+fn reclaim_announcement<C: Chain>(
+    chain: &mut C,
+    payer: &Keypair,
+    announcement: &Address,
+    token_account: &Address,
+    label: &str,
+    opts: &PayOptions,
+) -> Result<(), ReclaimError> {
+    let ix = ix::reclaim(announcement, token_account, &payer.pubkey());
+    let closed = |chain: &C| -> Result<bool, PayError> {
+        Ok(chain
+            .account(announcement, Commitment::Confirmed)?
+            .is_none_or(|a| a.owner != program_id()))
+    };
+    let mut attempts = 0;
+    'attempts: while !closed(chain)? {
+        if attempts == RECLAIM_ATTEMPTS {
+            return Err(ReclaimError::GaveUp);
+        }
+        attempts += 1;
+        let price = fees::priority_price(chain.recent_prices()?, opts.max_price_per_cu)?;
+        let (blockhash, last_valid_block_height) = chain.blockhash()?;
+        let tx = v1_transaction_with_fee(
+            payer,
+            &[],
+            std::slice::from_ref(&ix),
+            blockhash,
+            RECLAIM_CU_LIMIT,
+            fees::priority_fee_lamports(price, RECLAIM_CU_LIMIT),
+        );
+        if let Err(logs) = chain.simulate(&tx)? {
+            if closed(chain)? {
+                break;
+            }
+            return Err(ReclaimError::Simulation(logs));
+        }
+        loop {
+            if let Err(e) = chain.send(&tx) {
+                (opts.log)(&format!("{label}: reclaim send failed, will retry: {e}"));
+            }
+            std::thread::sleep(opts.poll);
+            if closed(chain)? {
+                break 'attempts;
+            }
+            if chain.finalized_block_height()? > last_valid_block_height {
+                continue 'attempts;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Calls `reclaim` for every swept stealth row of the run, then returns the new status.
 /// Token-2022 refuses to close an account with any balance (verification: V4), so this
-/// cannot touch funds. Each attempt pays the sampled priority price under `--max-price`;
-/// after `RECLAIM_ATTEMPTS` expired attempts for a row it stops and says so.
+/// cannot touch funds. After `RECLAIM_ATTEMPTS` expired attempts for a row it stops and
+/// says so.
 pub fn reclaim<C: Chain>(
     chain: &mut C,
     payer: &Keypair,
@@ -995,53 +1394,26 @@ pub fn reclaim<C: Chain>(
         .filter(|s| s.state == StealthState::Swept)
         .collect();
     for s in swept {
-        let ix = ix::reclaim(&s.announcement, &s.token_account, &payer.pubkey());
-        let closed = |chain: &C| -> Result<bool, PayError> {
-            Ok(chain
-                .account(&s.announcement, Commitment::Confirmed)?
-                .is_none_or(|a| a.owner != program_id()))
-        };
-        // Anyone may call reclaim, so another caller can win the race; that is success too.
-        let mut attempts = 0;
-        'attempts: while !closed(chain)? {
-            if attempts == RECLAIM_ATTEMPTS {
+        let label = format!("row {}", s.row);
+        match reclaim_announcement(
+            chain,
+            payer,
+            &s.announcement,
+            &s.token_account,
+            &label,
+            opts,
+        ) {
+            Ok(()) => {}
+            Err(ReclaimError::Simulation(logs)) => {
+                return Err(PayError::Simulation { row: s.row, logs });
+            }
+            Err(ReclaimError::GaveUp) => {
                 return Err(PayError::Halted(format!(
                     "row {}: reclaim did not land in {RECLAIM_ATTEMPTS} attempts; try again later",
                     s.row
                 )));
             }
-            attempts += 1;
-            let price = fees::priority_price(chain.recent_prices()?, opts.max_price_per_cu)?;
-            let (blockhash, last_valid_block_height) = chain.blockhash()?;
-            let tx = v1_transaction_with_fee(
-                payer,
-                &[],
-                std::slice::from_ref(&ix),
-                blockhash,
-                RECLAIM_CU_LIMIT,
-                fees::priority_fee_lamports(price, RECLAIM_CU_LIMIT),
-            );
-            if let Err(logs) = chain.simulate(&tx)? {
-                if closed(chain)? {
-                    break;
-                }
-                return Err(PayError::Simulation { row: s.row, logs });
-            }
-            loop {
-                if let Err(e) = chain.send(&tx) {
-                    (opts.log)(&format!(
-                        "row {}: reclaim send failed, will retry: {e}",
-                        s.row
-                    ));
-                }
-                std::thread::sleep(opts.poll);
-                if closed(chain)? {
-                    break 'attempts;
-                }
-                if chain.finalized_block_height()? > last_valid_block_height {
-                    continue 'attempts;
-                }
-            }
+            Err(ReclaimError::Other(e)) => return Err(e),
         }
         (opts.log)(&format!(
             "row {}: rent reclaimed from {}",
@@ -1049,6 +1421,77 @@ pub fn reclaim<C: Chain>(
         ));
     }
     status(chain, payer, run_id, opts)
+}
+
+/// What `reclaim_all` did with one announcement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReclaimOutcome {
+    /// The announcement is closed and its rent is back with the payer.
+    Reclaimed,
+    /// The one-time account still holds a balance, so Token-2022 would refuse to close it.
+    StillHolding,
+    Failed(String),
+}
+
+#[derive(Debug)]
+pub struct ReclaimReport {
+    pub announcement: Address,
+    pub token_account: Address,
+    pub outcome: ReclaimOutcome,
+}
+
+/// Reclaims every announcement the payer made, found on chain, whose one-time account is
+/// swept. It needs no journal, so it also covers runs whose journal is lost.
+pub fn reclaim_all<C: Chain>(
+    chain: &mut C,
+    payer: &Keypair,
+    opts: &PayOptions,
+) -> Result<Vec<ReclaimReport>, PayError> {
+    let mut found: Vec<(Address, Address)> = chain
+        .announcements_by_payer(&payer.pubkey())?
+        .into_iter()
+        .filter(|(_, a)| a.owner == program_id())
+        .filter_map(|(address, a)| {
+            let announcement = scope_interface::state::Announcement::from_bytes(&a.data).ok()?;
+            (announcement.payer == payer.pubkey().to_bytes()).then(|| {
+                (
+                    address,
+                    token_account_address(&payer.pubkey(), &announcement.ephemeral),
+                )
+            })
+        })
+        .collect();
+    found.sort();
+    let mut report = Vec::new();
+    for (announcement, token_account) in found {
+        let outcome = if !token_account_empty(chain, &token_account)? {
+            ReclaimOutcome::StillHolding
+        } else {
+            match reclaim_announcement(
+                chain,
+                payer,
+                &announcement,
+                &token_account,
+                &announcement.to_string(),
+                opts,
+            ) {
+                Ok(()) => ReclaimOutcome::Reclaimed,
+                Err(ReclaimError::Simulation(logs)) => {
+                    ReclaimOutcome::Failed(format!("simulation failed: {logs}"))
+                }
+                Err(ReclaimError::GaveUp) => ReclaimOutcome::Failed(format!(
+                    "did not land in {RECLAIM_ATTEMPTS} attempts; try again later"
+                )),
+                Err(ReclaimError::Other(e)) => return Err(e),
+            }
+        };
+        report.push(ReclaimReport {
+            announcement,
+            token_account,
+            outcome,
+        });
+    }
+    Ok(report)
 }
 
 /// The payer's receipt for one paid row: its amount and the two openings the run secret
@@ -1111,7 +1554,31 @@ impl<C: Chain> Engine<'_, C> {
         )
     }
 
+    /// Runs the rows; an error that stops the run is journaled and reported with the path
+    /// and the command that resumes it.
     fn run(&mut self, order: &[usize], landed: &HashSet<usize>) -> Result<Report, PayError> {
+        let result = self.run_rows(order, landed);
+        if let Err(error) = &result {
+            if let PayError::Halted(why) = error {
+                let _ = self.journal.append(&Record::Halted {
+                    reason: why.clone(),
+                });
+            }
+            (self.opts.log)(&format!(
+                "run {} stopped: {error}\njournal: {}\nresume with: scope pay --resume {}",
+                self.run_id,
+                self.opts
+                    .runs_dir
+                    .join(&self.run_id)
+                    .join(journal::JOURNAL)
+                    .display(),
+                self.run_id
+            ));
+        }
+        result
+    }
+
+    fn run_rows(&mut self, order: &[usize], landed: &HashSet<usize>) -> Result<Report, PayError> {
         for &row in order.iter().filter(|r| !landed.contains(*r)) {
             self.pay_row(row)?;
         }
@@ -1141,7 +1608,7 @@ impl<C: Chain> Engine<'_, C> {
     }
 
     fn pay_row(&mut self, row: usize) -> Result<(), PayError> {
-        loop {
+        for expired in 1.. {
             let attempt = self.build(row)?;
             if let Err(logs) = self.chain.simulate(&attempt.tx)? {
                 return Err(PayError::Simulation { row, logs });
@@ -1160,11 +1627,27 @@ impl<C: Chain> Engine<'_, C> {
                     self.balance -= self.rows[row].amount;
                     return self.record_landed(&attempt);
                 }
+                Outcome::Expired if expired == REBUILD_LIMIT => {
+                    return Err(PayError::Halted(format!(
+                        "row {row}: {REBUILD_LIMIT} attempts expired without landing; resume to try again"
+                    )));
+                }
+                Outcome::Failed(error) if expired == REBUILD_LIMIT => {
+                    return Err(PayError::Halted(format!(
+                        "row {row}: {REBUILD_LIMIT} attempts landed with an error, the last: {error}"
+                    )));
+                }
                 Outcome::Expired => {
                     (self.opts.log)(&format!("row {row}: attempt expired, rebuilding"));
                 }
+                Outcome::Failed(error) => {
+                    (self.opts.log)(&format!(
+                        "row {row}: attempt landed with an error ({error}), rebuilding"
+                    ));
+                }
             }
         }
+        unreachable!("the loop returns on landing or the rebuild limit")
     }
 
     fn record_landed(&mut self, attempt: &Attempt) -> Result<(), PayError> {
@@ -1324,6 +1807,10 @@ impl<C: Chain> Engine<'_, C> {
                     attempt.row
                 )));
             }
+            // A failed transaction cannot land again, and moved nothing; resending it is pointless.
+            if let Some(error) = self.chain.landed_error(&attempt.tx.signatures[0])? {
+                return Ok(Outcome::Failed(error));
+            }
             if self.chain.finalized_block_height()? > attempt.last_valid_block_height {
                 let finalized = self.source_state(Commitment::Finalized)?.available;
                 if finalized == attempt.pre {
@@ -1338,5 +1825,97 @@ impl<C: Chain> Engine<'_, C> {
                 )));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    fn rows(amounts: &[u64]) -> Vec<Row> {
+        amounts
+            .iter()
+            .map(|&amount| Row {
+                recipient: Recipient::Plain(Address::new_from_array([amount as u8; 32])),
+                amount,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_input_key_ignores_order_and_binds_mint_and_payer() {
+        let (mint, other_mint) = (Address::new_unique(), Address::new_unique());
+        let (payer, other_payer) = (Address::new_unique(), Address::new_unique());
+        let mut shuffled = rows(&[1, 2, 3]);
+        shuffled.reverse();
+        let key = input_key(&rows(&[1, 2, 3]), &mint, &payer);
+        assert_eq!(key, input_key(&shuffled, &mint, &payer));
+        assert_ne!(key, input_key(&rows(&[1, 2, 3]), &other_mint, &payer));
+        assert_ne!(key, input_key(&rows(&[1, 2, 3]), &mint, &other_payer));
+        assert_ne!(key, input_key(&rows(&[1, 2, 4]), &mint, &payer));
+        let twice = [rows(&[1]), rows(&[1]), rows(&[2, 3])].concat();
+        assert_ne!(key, input_key(&twice, &mint, &payer));
+    }
+
+    #[test]
+    fn a_journal_without_an_input_key_still_matches_on_the_raw_hash() {
+        let runs = std::env::temp_dir().join(format!("scope-earlier-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&runs);
+        let dir = runs.join("ab");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let old = r#"{"t":"run","run_id":"ab","input_sha256":"beef","mint":"m","source":"s","payer":"p","order":[0]}"#;
+        std::fs::write(dir.join(journal::JOURNAL), format!("{old}\n")).expect("journal");
+        assert_eq!(
+            earlier_run(&runs, "key", "beef").expect("read"),
+            Some("ab".into())
+        );
+        assert_eq!(earlier_run(&runs, "key", "cafe").expect("read"), None);
+    }
+
+    #[test]
+    fn known_clusters_are_named_and_others_show_their_hash() {
+        let hash = |text: &str| -> [u8; 32] {
+            solana_message::Hash::from_str(text)
+                .expect("genesis hash")
+                .to_bytes()
+        };
+        assert_eq!(
+            cluster_name(&hash("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d")),
+            "mainnet-beta"
+        );
+        assert_eq!(
+            cluster_name(&hash("EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG")),
+            "devnet"
+        );
+        assert_eq!(
+            cluster_name(&hash("4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY")),
+            "testnet"
+        );
+        let other = cluster_name(&[9; 32]);
+        assert!(other.starts_with("unknown cluster "), "{other}");
+        assert!(other.contains(&solana_message::Hash::new_from_array([9; 32]).to_string()));
+    }
+
+    #[test]
+    fn token_amounts_print_with_the_mints_decimals() {
+        assert_eq!(token_amount(1_250_500, 6), "1.250500");
+        assert_eq!(token_amount(7, 0), "7");
+        assert_eq!(token_amount(5, 9), "0.000000005");
+    }
+
+    #[test]
+    fn mainnet_needs_an_explicit_yes() {
+        let mainnet =
+            solana_message::Hash::from_str("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d")
+                .expect("genesis hash")
+                .to_bytes();
+        let refused = mainnet_gate(&mainnet, false).expect_err("no --yes");
+        assert!(
+            refused.contains("--dry-run") && refused.contains("--yes"),
+            "{refused}"
+        );
+        mainnet_gate(&mainnet, true).expect("--yes");
+        mainnet_gate(&[9; 32], false).expect("other clusters need no flag");
     }
 }

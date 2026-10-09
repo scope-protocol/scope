@@ -11,6 +11,7 @@ pub mod history;
 pub mod input;
 pub mod ix;
 pub mod journal;
+pub mod mint_policy;
 pub mod pay;
 pub mod proofs;
 pub mod receipt;
