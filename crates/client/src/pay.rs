@@ -100,6 +100,8 @@ pub enum PayError {
     Recipient { recipient: Address, why: String },
     #[error("source holds {have}, the run needs {need} (base units)")]
     Insufficient { have: u64, need: u64 },
+    #[error("the payer needs {} SOL, has {}", sol(*need), sol(*have))]
+    PayerFunds { have: u64, need: u64 },
     #[error(
         "this input was already run as {run_id}; resume it if it did not finish, or pass --again to pay it twice"
     )]
@@ -277,6 +279,67 @@ fn check_stealth_mint<'a>(
     }
 }
 
+/// Lamports as SOL text, exact to the lamport.
+pub fn sol(lamports: u64) -> String {
+    format!(
+        "{}.{:09}",
+        lamports / 1_000_000_000,
+        lamports % 1_000_000_000
+    )
+}
+
+/// Rows in `rows` not in `skip` that credit the plain account `address`.
+fn credits_to(rows: &[Row], skip: &HashSet<usize>, address: &Address) -> u64 {
+    rows.iter()
+        .enumerate()
+        .filter(|(i, r)| !skip.contains(i) && r.recipient == Recipient::Plain(*address))
+        .count() as u64
+}
+
+/// What the payer's wallet must hold for the rows not in `skip`: for each stealth row the
+/// one-time account's rent, the announcement's rent and P's funding, for every row the
+/// fee at the price cap, and once the wallet's own rent reserve.
+pub fn payer_need<C: Chain>(
+    chain: &C,
+    rows: &[Row],
+    skip: &HashSet<usize>,
+    rents: (u64, u64),
+    max_price_per_cu: u64,
+) -> Result<u64, PayError> {
+    let (rent, reserve) = rents;
+    let fee =
+        |limit| fees::LAMPORTS_PER_SIGNATURE + fees::priority_fee_lamports(max_price_per_cu, limit);
+    let mut need = 0u64;
+    let mut stealth_rows = 0u64;
+    for (_, r) in rows.iter().enumerate().filter(|(i, _)| !skip.contains(i)) {
+        need = need.saturating_add(match r.recipient {
+            Recipient::Plain(_) => fee(PLAIN_TRANSFER_CU_LIMIT),
+            Recipient::Stealth(_) => {
+                stealth_rows += 1;
+                fee(STEALTH_PAYMENT_CU_LIMIT)
+            }
+        });
+    }
+    if stealth_rows > 0 {
+        let per_row = rent
+            .saturating_add(chain.rent(scope_interface::state::ANNOUNCEMENT_LEN)?)
+            .saturating_add(fees::sweep_funding(rent, reserve, fees::SWEEP_PRICE_CAP));
+        need = need.saturating_add(per_row.saturating_mul(stealth_rows));
+    }
+    Ok(need.saturating_add(chain.rent(0)?))
+}
+
+/// Refuses a run whose lamport cost the payer's wallet cannot cover.
+fn check_payer_funds<C: Chain>(chain: &C, payer: &Address, need: u64) -> Result<(), PayError> {
+    let have = chain
+        .account(payer, Commitment::Confirmed)?
+        .map_or(0, |a| a.lamports);
+    if have < need {
+        return Err(PayError::PayerFunds { have, need });
+    }
+    Ok(())
+}
+
 /// Preflights every plain row not in `skip` and returns its ElGamal key.
 fn plain_rows<C: Chain>(
     chain: &C,
@@ -291,7 +354,10 @@ fn plain_rows<C: Chain>(
             Recipient::Plain(address) => Some((i, address)),
             Recipient::Stealth(_) => None,
         })
-        .map(|(i, address)| Ok((i, preflight(chain, address, mint)?)))
+        .map(|(i, address)| {
+            let credits = credits_to(rows, skip, address);
+            Ok((i, preflight(chain, address, mint, credits)?))
+        })
         .collect()
 }
 
@@ -384,11 +450,13 @@ fn paid_to(rows: &[Row], stealth: &HashMap<usize, Stealth>, row: usize) -> Addre
     }
 }
 
-/// The recipient's ElGamal key, once its account can take one more confidential credit.
+/// The recipient's ElGamal key, once its account can take `credits` more confidential
+/// credits, one per row that pays it.
 fn preflight<C: Chain>(
     chain: &C,
     recipient: &Address,
     mint: &Address,
+    credits: u64,
 ) -> Result<ElGamalPubkey, PayError> {
     let bad = |why: &str| PayError::Recipient {
         recipient: *recipient,
@@ -417,10 +485,12 @@ fn preflight<C: Chain>(
     if !bool::from(ext.allow_confidential_credits) {
         return Err(bad("confidential credits disabled"));
     }
-    if u64::from(ext.pending_balance_credit_counter)
-        >= u64::from(ext.maximum_pending_balance_credit_counter)
-    {
-        return Err(bad("pending credit counter full"));
+    let room = u64::from(ext.maximum_pending_balance_credit_counter)
+        .saturating_sub(u64::from(ext.pending_balance_credit_counter));
+    if credits > room {
+        return Err(bad(&format!(
+            "pending credit counter: {credits} rows pay it, room for {room}"
+        )));
     }
     ElGamalPubkey::try_from(ext.elgamal_pubkey).map_err(|_| bad("bad ElGamal key"))
 }
@@ -639,6 +709,8 @@ pub fn start<C: Chain>(
     let stealth = stealth_rows(&chain, &rows, &run_secret, &run_id, &payer.pubkey(), &mint)?;
     let rents = stealth_rents(&chain, &stealth, info.space)?;
     let plain = plain_rows(&chain, &rows, &HashSet::new(), &mint)?;
+    let need = payer_need(&chain, &rows, &HashSet::new(), rents, opts.max_price_per_cu)?;
+    check_payer_funds(&chain, &payer.pubkey(), need)?;
 
     let dir = opts.runs_dir.join(&run_id);
     let mut journal = Journal::create(&dir)?;
@@ -764,6 +836,8 @@ pub fn resume<C: Chain>(
     };
     let skip: HashSet<usize> = landed.iter().copied().chain(open_row).collect();
     let plain = plain_rows(&chain, &rows, &skip, &mint)?;
+    let need = payer_need(&chain, &rows, &landed, rents, opts.max_price_per_cu)?;
+    check_payer_funds(&chain, &payer.pubkey(), need)?;
     let mut engine = Engine {
         chain,
         payer,
@@ -823,7 +897,8 @@ pub fn resume<C: Chain>(
         if !landed.contains(&row)
             && let Recipient::Plain(address) = &engine.rows[row].recipient
         {
-            let key = preflight(&engine.chain, address, &engine.mint)?;
+            let credits = credits_to(&engine.rows, &landed, address);
+            let key = preflight(&engine.chain, address, &engine.mint, credits)?;
             engine.plain.insert(row, key);
         }
         // A landed attempt changed the balance; read it back verified rather than trusting arithmetic.

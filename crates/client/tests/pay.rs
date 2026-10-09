@@ -1661,5 +1661,89 @@ fn a_refused_mint_extension_stops_the_run_before_anything_is_sent() {
         matches!(&stopped, Err(PayError::Mint { why, .. }) if why.contains("PermissionedBurn")),
         "{stopped:?}"
     );
-    assert!(!o.runs_dir.exists(), "no journal for a refused mint");
+    assert_no_run(&o);
+}
+
+/// A refused run leaves no run directory behind.
+fn assert_no_run(o: &PayOptions) {
+    let runs = std::fs::read_dir(&o.runs_dir)
+        .map(|d| d.flatten().filter(|e| e.path().is_dir()).count())
+        .unwrap_or(0);
+    assert_eq!(runs, 0, "no run was created");
+}
+
+fn set_payer_lamports(h: &mut Harness, lamports: u64) {
+    let mut account = h.svm.get_account(&h.payer.pubkey()).expect("payer");
+    account.lamports = lamports;
+    h.svm.set_account(h.payer.pubkey(), account).expect("set");
+}
+
+#[test]
+fn refuses_a_run_the_payers_sol_cannot_cover_before_sending() {
+    let mut h = Harness::new();
+    let o = opts("sol-need");
+    let alice = stealth_recipient(21);
+    let stealth_row = format!("{},1\n", alice.derive_public_keys().to_meta_address());
+    // A stealth row costs 8,630,800 lamports plus fees and the payer's reserve.
+    set_payer_lamports(&mut h, 8_000_000);
+    let stopped = start(&mut h, &stealth_row, &o);
+    assert!(
+        matches!(&stopped, Err(PayError::PayerFunds { have: 8_000_000, need }) if *need > 8_630_800),
+        "{stopped:?}"
+    );
+    assert_no_run(&o);
+    // A plain row needs only its fee.
+    let rs = recipients(&mut h, 1);
+    set_payer_lamports(&mut h, 1_000);
+    let stopped = start(&mut h, &input(&rs), &o);
+    assert!(
+        matches!(stopped, Err(PayError::PayerFunds { .. })),
+        "{stopped:?}"
+    );
+    let message = stopped.expect_err("funds").to_string();
+    assert!(message.contains("SOL"), "{message}");
+}
+
+#[test]
+fn a_funded_stealth_run_passes_the_sol_check() {
+    let mut h = Harness::new();
+    let o = opts("sol-ok");
+    let alice = stealth_recipient(22);
+    let row = format!("{},1\n", alice.derive_public_keys().to_meta_address());
+    // One stealth row at the default cap needs about 0.0087 SOL plus fees and the reserve.
+    set_payer_lamports(&mut h, 3_000_000_000);
+    start(&mut h, &row, &o).expect("run");
+}
+
+/// Sets the most credits `account` can hold pending.
+fn set_credit_limit(h: &mut Harness, account: Address, max: u64) {
+    use spl_token_2022_interface::extension::BaseStateWithExtensionsMut;
+    let mut stored = h.svm.get_account(&account).expect("account");
+    let mut state = spl_token_2022_interface::extension::StateWithExtensionsMut::<Account>::unpack(
+        &mut stored.data,
+    )
+    .expect("unpack");
+    state
+        .get_extension_mut::<ConfidentialTransferAccount>()
+        .expect("ct")
+        .maximum_pending_balance_credit_counter = max.into();
+    h.svm.set_account(account, stored).expect("set");
+}
+
+#[test]
+fn counts_every_row_to_one_recipient_against_its_credit_room() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 1);
+    set_credit_limit(&mut h, rs[0].account, 2);
+    let a = rs[0].account;
+    let o = opts("credits");
+    let three = format!("{a},1\n{a},2\n{a},3\n");
+    let stopped = start(&mut h, &three, &o);
+    assert!(
+        matches!(&stopped, Err(PayError::Recipient { why, .. }) if why.contains("3 rows") && why.contains("room for 2")),
+        "{stopped:?}"
+    );
+    assert_no_run(&o);
+    start(&mut h, &format!("{a},1\n{a},2\n"), &o).expect("two rows fit");
+    assert_eq!(pending(&h, &rs[0]), 3_000_000);
 }
