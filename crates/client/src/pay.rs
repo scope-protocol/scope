@@ -20,6 +20,7 @@ use crate::{
     input::{self, InputError, Recipient, Row},
     ix::{self, StealthSetup},
     journal::{self, INPUT_COPY, Journal, JournalError, Record, hex, unhex},
+    mint_policy::{self, MintPolicy},
     proofs::transfer_proofs,
     run_secret::RunSecret,
     tx::{
@@ -42,12 +43,8 @@ use solana_zk_sdk::encryption::{
 };
 use spl_token_2022_interface::{
     extension::{
-        BaseStateWithExtensions, ExtensionType, StateWithExtensions,
-        account_len::try_calculate_account_len_from_mint_data,
-        confidential_transfer::{
-            ConfidentialTransferAccount, ConfidentialTransferMint, instruction as ct,
-        },
-        default_account_state::DefaultAccountState,
+        BaseStateWithExtensions, StateWithExtensions,
+        confidential_transfer::{ConfidentialTransferAccount, instruction as ct},
     },
     state::{Account, AccountState, Mint},
 };
@@ -58,13 +55,6 @@ use std::{
     time::Duration,
 };
 use stealth_keygen::{RecipientPublicKeys, derive_payment_with_ephemeral};
-
-/// Mint extensions a plain confidential Transfer cannot go through.
-const REFUSED_MINT_EXTENSIONS: [ExtensionType; 3] = [
-    ExtensionType::NonTransferable,
-    ExtensionType::TransferFeeConfig,
-    ExtensionType::TransferHook,
-];
 
 pub struct SourceKeys {
     pub elgamal: ElGamalKeypair,
@@ -154,15 +144,6 @@ pub struct Report {
     pub paid: Vec<Paid>,
 }
 
-struct MintInfo {
-    decimals: u8,
-    auditor: Option<ElGamalPubkey>,
-    /// Size of a confidential token account for this mint.
-    space: usize,
-    /// Why stealth rows cannot use this mint, if they cannot.
-    stealth_refusal: Option<&'static str>,
-}
-
 struct SourceState {
     available: [u8; 64],
     hint: AeCiphertext,
@@ -205,7 +186,7 @@ fn mint_decimals<C: Chain>(chain: &C, mint: &Address) -> Result<u8, PayError> {
         .map_err(|_| bad("not a mint"))
 }
 
-fn mint_info<C: Chain>(chain: &C, mint: &Address) -> Result<MintInfo, PayError> {
+fn mint_info<C: Chain>(chain: &C, mint: &Address) -> Result<MintPolicy, PayError> {
     let bad = |why: &str| PayError::Mint {
         mint: *mint,
         why: why.into(),
@@ -216,45 +197,7 @@ fn mint_info<C: Chain>(chain: &C, mint: &Address) -> Result<MintInfo, PayError> 
     if account.owner != token_2022() {
         return Err(bad("not a Token-2022 mint"));
     }
-    let state =
-        StateWithExtensions::<Mint>::unpack(&account.data).map_err(|_| bad("not a mint"))?;
-    let types = state
-        .get_extension_types()
-        .map_err(|_| bad("bad extensions"))?;
-    if let Some(t) = REFUSED_MINT_EXTENSIONS.iter().find(|t| types.contains(t)) {
-        return Err(bad(&format!("{t:?} is not supported")));
-    }
-    let ext = state
-        .get_extension::<ConfidentialTransferMint>()
-        .map_err(|_| bad("confidential transfers not enabled"))?;
-    let auditor = ext
-        .auditor_elgamal_pubkey
-        .get()
-        .map(|key| ElGamalPubkey::try_from(key.0.as_slice()))
-        .transpose()
-        .map_err(|_| bad("bad auditor key"))?;
-    // `announce` does not check approval (verification: V72), so this is the client's job.
-    let frozen_by_default = state
-        .get_extension::<DefaultAccountState>()
-        .is_ok_and(|s| s.state == AccountState::Frozen as u8);
-    let stealth_refusal = if !bool::from(ext.auto_approve_new_accounts) {
-        Some("stealth rows need a mint that approves new confidential accounts itself")
-    } else if frozen_by_default {
-        Some("stealth rows need a mint that does not freeze new accounts")
-    } else {
-        None
-    };
-    let space = try_calculate_account_len_from_mint_data(
-        &account.data,
-        &[ExtensionType::ConfidentialTransferAccount],
-    )
-    .map_err(|_| bad("cannot size a confidential account"))?;
-    Ok(MintInfo {
-        decimals: state.base.decimals,
-        auditor,
-        space,
-        stealth_refusal,
-    })
+    mint_policy::check(&account.data).map_err(|why| bad(&why))
 }
 
 /// One stealth row's one-time account, derived from the run secret (docs/crypto.md, Derivation tree).
@@ -320,7 +263,7 @@ fn stealth_rows<C: Chain>(
 fn check_stealth_mint<'a>(
     unpaid: impl IntoIterator<Item = &'a Row>,
     mint: &Address,
-    info: &MintInfo,
+    info: &MintPolicy,
 ) -> Result<(), PayError> {
     let any = unpaid
         .into_iter()

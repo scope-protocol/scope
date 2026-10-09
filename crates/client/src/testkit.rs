@@ -341,7 +341,7 @@ pub struct SvmChain<'a> {
     pub before_send: Option<VersionedTransaction>,
     pub before_send_hook: Option<SendHook>,
     pub after_send: Option<VersionedTransaction>,
-    pub sent_signatures: Vec<solana_signature::Signature>,
+    pub sent_signatures: Vec<Signature>,
     pub failed_status_lag: Cell<usize>,
     pub height_delay: std::time::Duration,
     /// Every sent transaction lands and fails with this error instead of executing.
@@ -512,10 +512,7 @@ impl Chain for SvmChain<'_> {
 impl RecipientChain for SvmChain<'_> {
     fn set_deadline(&mut self, _deadline: Option<std::time::Instant>) {}
 
-    fn finalized_status(
-        &self,
-        signature: &solana_signature::Signature,
-    ) -> Result<FinalizedStatus, ChainError> {
+    fn finalized_status(&self, signature: &Signature) -> Result<FinalizedStatus, ChainError> {
         if self.fail_status_after_send && self.sent {
             return Err(ChainError("RPC disconnected after send".into()));
         }

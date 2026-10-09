@@ -1650,3 +1650,16 @@ fn attempts_that_land_with_an_error_halt_the_row_with_that_error_after_three() {
     );
     assert_eq!(attempts(&o, &only_run(&o)), 3);
 }
+
+#[test]
+fn a_refused_mint_extension_stops_the_run_before_anything_is_sent() {
+    let mut h = Harness::with_permissioned_burn();
+    let rs = recipients(&mut h, 1);
+    let o = opts("refused-mint");
+    let stopped = start(&mut h, &input(&rs), &o);
+    assert!(
+        matches!(&stopped, Err(PayError::Mint { why, .. }) if why.contains("PermissionedBurn")),
+        "{stopped:?}"
+    );
+    assert!(!o.runs_dir.exists(), "no journal for a refused mint");
+}
