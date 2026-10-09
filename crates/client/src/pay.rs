@@ -436,7 +436,11 @@ fn stealth_rents<C: Chain>(
     stealth: &HashMap<usize, Stealth>,
     space: usize,
 ) -> Result<(u64, u64), PayError> {
-    if stealth.is_empty() {
+    rents_if(chain, !stealth.is_empty(), space)
+}
+
+fn rents_if<C: Chain>(chain: &C, any_stealth: bool, space: usize) -> Result<(u64, u64), PayError> {
+    if !any_stealth {
         return Ok((0, 0));
     }
     Ok((chain.rent(space)?, chain.rent(0)?))
@@ -751,6 +755,151 @@ pub fn start<C: Chain>(
         run_id,
     };
     engine.run(&order, &HashSet::new())
+}
+
+/// What a real run would do and cost, from every preflight but without sending anything
+/// or writing a journal.
+#[derive(Debug)]
+pub struct DryRun {
+    pub genesis: [u8; 32],
+    /// `cluster_name` of the genesis hash.
+    pub cluster: String,
+    pub rows: usize,
+    pub plain_rows: usize,
+    pub stealth_rows: usize,
+    /// Sum of all rows, base units.
+    pub total: u64,
+    pub decimals: u8,
+    pub payer_have: u64,
+    pub payer_need: u64,
+    /// The sampled per-CU price a row would pay now, micro-lamports.
+    pub price: u64,
+    /// Most one row's fee can be at `--max-price`, lamports.
+    pub fee_cap_plain: u64,
+    pub fee_cap_stealth: u64,
+}
+
+const KNOWN_CLUSTERS: [(&str, &str); 3] = [
+    (
+        "mainnet-beta",
+        "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    ),
+    ("devnet", "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"),
+    ("testnet", "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY"),
+];
+
+/// The cluster a genesis hash belongs to, or `unknown cluster <hash>`.
+pub fn cluster_name(genesis: &[u8; 32]) -> String {
+    let hash = solana_message::Hash::new_from_array(*genesis).to_string();
+    KNOWN_CLUSTERS
+        .iter()
+        .find(|(_, known)| *known == hash)
+        .map_or_else(
+            || format!("unknown cluster {hash}"),
+            |(name, _)| (*name).into(),
+        )
+}
+
+/// A real run on mainnet-beta needs `--yes`; anything else goes ahead.
+pub fn mainnet_gate(genesis: &[u8; 32], yes: bool) -> Result<(), String> {
+    if cluster_name(genesis) == "mainnet-beta" && !yes {
+        return Err(
+            "this node is on mainnet-beta; check the plan with --dry-run, then rerun with --yes"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// Token amount in base units as decimal text.
+pub fn token_amount(base: u64, decimals: u8) -> String {
+    let Some(scale) = 10u64
+        .checked_pow(u32::from(decimals))
+        .filter(|_| decimals > 0)
+    else {
+        return base.to_string();
+    };
+    format!(
+        "{}.{:0width$}",
+        base / scale,
+        base % scale,
+        width = usize::from(decimals)
+    )
+}
+
+/// Runs the preflights of `start` that need no signature or write: the input, the mint's
+/// policy, duplicate runs, the source and its balance, the plain recipients, the payer's
+/// SOL and a fee sample.
+pub fn dry_run<C: Chain>(
+    chain: &C,
+    payer: &Keypair,
+    keys: &SourceKeys,
+    mint: Address,
+    source: Address,
+    input_bytes: &[u8],
+    opts: &PayOptions,
+) -> Result<DryRun, PayError> {
+    let info = mint_info(chain, &mint)?;
+    let text = std::str::from_utf8(input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
+    let rows = input::parse(text, info.decimals)?;
+    if !opts.again {
+        let raw = hex(&solana_sha256_hasher::hash(input_bytes).to_bytes());
+        let key = input_key(&rows, &mint, &payer.pubkey());
+        if let Some(run_id) = earlier_run(&opts.runs_dir, &key, &raw)? {
+            return Err(PayError::DuplicateInput { run_id });
+        }
+    }
+    let state = source_state(
+        chain,
+        &source,
+        &mint,
+        &payer.pubkey(),
+        keys,
+        Commitment::Confirmed,
+    )?;
+    let balance = verified_balance(keys, &state, &source)?;
+    let total = rows
+        .iter()
+        .try_fold(0u64, |sum, r| sum.checked_add(r.amount))
+        .ok_or(PayError::Insufficient {
+            have: balance,
+            need: u64::MAX,
+        })?;
+    if total > balance {
+        return Err(PayError::Insufficient {
+            have: balance,
+            need: total,
+        });
+    }
+    check_stealth_mint(&rows, &mint, &info)?;
+    plain_rows(chain, &rows, &HashSet::new(), &mint)?;
+    let stealth_rows = rows
+        .iter()
+        .filter(|r| matches!(r.recipient, Recipient::Stealth(_)))
+        .count();
+    let rents = rents_if(chain, stealth_rows > 0, info.space)?;
+    let payer_need = payer_need(chain, &rows, &HashSet::new(), rents, opts.max_price_per_cu)?;
+    let price = fees::priority_price(chain.recent_prices()?, opts.max_price_per_cu)?;
+    let fee_cap = |limit| {
+        fees::LAMPORTS_PER_SIGNATURE + fees::priority_fee_lamports(opts.max_price_per_cu, limit)
+    };
+    let genesis = chain.genesis_hash()?;
+    Ok(DryRun {
+        genesis,
+        cluster: cluster_name(&genesis),
+        rows: rows.len(),
+        plain_rows: rows.len() - stealth_rows,
+        stealth_rows,
+        total,
+        decimals: info.decimals,
+        payer_have: chain
+            .account(&payer.pubkey(), Commitment::Confirmed)?
+            .map_or(0, |a| a.lamports),
+        payer_need,
+        price,
+        fee_cap_plain: fee_cap(PLAIN_TRANSFER_CU_LIMIT),
+        fee_cap_stealth: fee_cap(STEALTH_PAYMENT_CU_LIMIT),
+    })
 }
 
 /// Continues run `run_id` from its journal and the chain.
@@ -1562,6 +1711,7 @@ impl<C: Chain> Engine<'_, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     fn rows(amounts: &[u64]) -> Vec<Row> {
         amounts
@@ -1601,5 +1751,51 @@ mod tests {
             Some("ab".into())
         );
         assert_eq!(earlier_run(&runs, "key", "cafe").expect("read"), None);
+    }
+
+    #[test]
+    fn known_clusters_are_named_and_others_show_their_hash() {
+        let hash = |text: &str| -> [u8; 32] {
+            solana_message::Hash::from_str(text)
+                .expect("genesis hash")
+                .to_bytes()
+        };
+        assert_eq!(
+            cluster_name(&hash("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d")),
+            "mainnet-beta"
+        );
+        assert_eq!(
+            cluster_name(&hash("EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG")),
+            "devnet"
+        );
+        assert_eq!(
+            cluster_name(&hash("4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY")),
+            "testnet"
+        );
+        let other = cluster_name(&[9; 32]);
+        assert!(other.starts_with("unknown cluster "), "{other}");
+        assert!(other.contains(&solana_message::Hash::new_from_array([9; 32]).to_string()));
+    }
+
+    #[test]
+    fn token_amounts_print_with_the_mints_decimals() {
+        assert_eq!(token_amount(1_250_500, 6), "1.250500");
+        assert_eq!(token_amount(7, 0), "7");
+        assert_eq!(token_amount(5, 9), "0.000000005");
+    }
+
+    #[test]
+    fn mainnet_needs_an_explicit_yes() {
+        let mainnet =
+            solana_message::Hash::from_str("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d")
+                .expect("genesis hash")
+                .to_bytes();
+        let refused = mainnet_gate(&mainnet, false).expect_err("no --yes");
+        assert!(
+            refused.contains("--dry-run") && refused.contains("--yes"),
+            "{refused}"
+        );
+        mainnet_gate(&mainnet, true).expect("--yes");
+        mainnet_gate(&[9; 32], false).expect("other clusters need no flag");
     }
 }

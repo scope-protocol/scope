@@ -1801,3 +1801,81 @@ fn reclaim_all_closes_swept_announcements_without_a_journal() {
     assert_eq!(again.len(), 1, "only bob's announcement is left");
     assert_eq!(again[0].outcome, StillHolding);
 }
+
+#[test]
+fn a_dry_run_reports_the_run_and_changes_nothing() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 2);
+    let alice = stealth_recipient(41);
+    let text = format!(
+        "{}{},0.5\n",
+        input(&rs),
+        alice.derive_public_keys().to_meta_address()
+    );
+    let o = opts("dry-run");
+    let before = h.svm.get_account(&h.source).expect("source").data;
+    let payer_before = h
+        .svm
+        .get_account(&h.payer.pubkey())
+        .expect("payer")
+        .lamports;
+    let k = keys(&h.source_elgamal, &h.source_ae);
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.price_samples = vec![vec![10, 20, 30, 40]];
+    let dry =
+        pay::dry_run(&chain, &h.payer, &k, h.mint, h.source, text.as_bytes(), &o).expect("dry run");
+    assert_eq!((dry.rows, dry.plain_rows, dry.stealth_rows), (3, 2, 1));
+    assert_eq!(dry.total, 3_500_000);
+    assert_eq!(dry.decimals, 6);
+    assert_eq!(dry.price, 30);
+    assert!(
+        dry.cluster.starts_with("unknown cluster "),
+        "{}",
+        dry.cluster
+    );
+    assert_eq!(dry.payer_have, payer_before);
+    assert!(dry.payer_need > 8_630_800, "{}", dry.payer_need);
+    assert!(dry.fee_cap_stealth > dry.fee_cap_plain);
+    assert!(dry.payer_have >= dry.payer_need);
+    assert!(!o.runs_dir.exists(), "a dry run writes no journal");
+    assert_eq!(h.svm.get_account(&h.source).expect("source").data, before);
+    assert_eq!(
+        h.svm
+            .get_account(&h.payer.pubkey())
+            .expect("payer")
+            .lamports,
+        payer_before
+    );
+}
+
+#[test]
+fn a_dry_run_runs_the_same_preflights_as_a_real_run() {
+    let mut h = Harness::with_permissioned_burn();
+    let rs = recipients(&mut h, 1);
+    let o = opts("dry-run-refused");
+    let k = keys(&h.source_elgamal, &h.source_ae);
+    let chain = SvmChain::new(&mut h.svm);
+    let refused = pay::dry_run(
+        &chain,
+        &h.payer,
+        &k,
+        h.mint,
+        h.source,
+        input(&rs).as_bytes(),
+        &o,
+    );
+    assert!(matches!(refused, Err(PayError::Mint { .. })), "{refused:?}");
+
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 1);
+    let o = opts("dry-run-dup");
+    let text = input(&rs);
+    start(&mut h, &text, &o).expect("run");
+    let k = keys(&h.source_elgamal, &h.source_ae);
+    let chain = SvmChain::new(&mut h.svm);
+    let again = pay::dry_run(&chain, &h.payer, &k, h.mint, h.source, text.as_bytes(), &o);
+    assert!(
+        matches!(again, Err(PayError::DuplicateInput { .. })),
+        "{again:?}"
+    );
+}
