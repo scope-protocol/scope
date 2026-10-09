@@ -343,6 +343,8 @@ pub struct SvmChain<'a> {
     pub sent_signatures: Vec<solana_signature::Signature>,
     pub failed_status_lag: Cell<usize>,
     pub height_delay: std::time::Duration,
+    /// The cluster's genesis hash.
+    pub genesis: [u8; 32],
     sent: bool,
 }
 
@@ -373,6 +375,7 @@ impl<'a> SvmChain<'a> {
             sent_signatures: Vec::new(),
             failed_status_lag: Cell::new(0),
             height_delay: std::time::Duration::ZERO,
+            genesis: [42; 32],
             sent: false,
         }
     }
@@ -480,7 +483,7 @@ impl Chain for SvmChain<'_> {
             .unwrap_or_default())
     }
     fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
-        Ok([42; 32])
+        Ok(self.genesis)
     }
     fn rent(&self, space: usize) -> Result<u64, ChainError> {
         Ok(self.svm.minimum_balance_for_rent_exemption(space))

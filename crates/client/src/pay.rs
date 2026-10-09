@@ -116,6 +116,14 @@ pub enum PayError {
     DuplicateInput { run_id: String },
     #[error("priority fee {price} micro-lamports/CU is above the cap {cap}; resume later")]
     FeeAboveCap { price: u64, cap: u64 },
+    #[error(
+        "run {run_id} paid on cluster {journal} (genesis hash), but this RPC node is on {node}; use the node the run started on"
+    )]
+    WrongCluster {
+        run_id: String,
+        journal: String,
+        node: String,
+    },
     #[error("proof generation: {0}")]
     Proof(String),
     #[error("row {row}: simulation failed, nothing sent: {logs}")]
@@ -366,6 +374,8 @@ fn load_run<C: Chain>(
         })
     };
     let Some(Record::Run {
+        run_id,
+        genesis,
         input_sha256,
         mint,
         source,
@@ -379,6 +389,17 @@ fn load_run<C: Chain>(
     };
     if *journal_payer != payer.pubkey().to_string() {
         return Err(corrupt("run belongs to another payer"));
+    }
+    // Runs that predate the field recorded no cluster.
+    if !genesis.is_empty() {
+        let node = hex(&chain.genesis_hash()?);
+        if node != *genesis {
+            return Err(PayError::WrongCluster {
+                run_id: run_id.clone(),
+                journal: genesis.clone(),
+                node,
+            });
+        }
     }
     let mint: Address = mint.parse().map_err(|_| corrupt("bad mint"))?;
     let source: Address = source.parse().map_err(|_| corrupt("bad source"))?;
@@ -646,6 +667,8 @@ pub fn start<C: Chain>(
     journal::write_private(&dir.join(INPUT_COPY), input_bytes)?;
     let order = shuffled(rows.len());
     journal.append(&Record::Run {
+        format: journal::FORMAT,
+        genesis: hex(&chain.genesis_hash()?),
         run_id: run_id.clone(),
         input_sha256,
         mint: mint.to_string(),

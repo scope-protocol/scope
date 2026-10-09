@@ -1524,3 +1524,30 @@ fn disclose_survives_a_later_auditor_key_that_does_not_parse() {
         1_250_000
     );
 }
+
+#[test]
+fn a_run_records_its_cluster_and_refuses_another_one() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 1);
+    let o = opts("cluster");
+    let run_id = start(&mut h, &input(&rs), &o).expect("run").run_id;
+    let records = journal(&o, &run_id);
+    assert!(matches!(
+        &records[0],
+        Record::Run { format, genesis, .. }
+            if *format == scope_client::journal::FORMAT && *genesis == "2a".repeat(32)
+    ));
+    let wrong = |chain: &mut SvmChain| chain.genesis = [7; 32];
+    let is_wrong_cluster = |e: &PayError| matches!(e, PayError::WrongCluster { .. });
+    let mut chain = SvmChain::new(&mut h.svm);
+    wrong(&mut chain);
+    let e = pay::status(&chain, &h.payer, &run_id, &o).expect_err("status");
+    assert!(is_wrong_cluster(&e), "{e}");
+    let e = pay::disclose(&chain, &h.payer, &run_id, 0, &o).expect_err("disclose");
+    assert!(is_wrong_cluster(&e), "{e}");
+    let e = pay::reclaim(&mut chain, &h.payer, &run_id, &o).expect_err("reclaim");
+    assert!(is_wrong_cluster(&e), "{e}");
+    let k = keys(&h.source_elgamal, &h.source_ae);
+    let e = pay::resume(chain, &h.payer, k, &run_id, &o).expect_err("resume");
+    assert!(is_wrong_cluster(&e), "{e}");
+}
