@@ -5,7 +5,7 @@ last_verified: 2026-10-09
 
 # Receiving with `scope`
 
-TL;DR: for a recipient of stealth payments. After reading you can create and back up your keys, optionally publish your meta-address, find payments, sweep them into an account of your own and spend from it.
+TL;DR: for a recipient of stealth payments. After reading you can create and back up your keys, optionally publish your meta-address, find payments (even after they were swept), sweep them into an account of your own and spend from it.
 Plain rows need none of this: they arrive in your own confidential token account. Payer-side commands are in [payer.md](payer.md), receipts in [audit.md](audit.md).
 
 ## Before you start
@@ -29,14 +29,18 @@ scope publish --recipient-key ~/.config/scope/recipient.key \
 
 # 3. Find payments addressed to you.
 scope scan --recipient-key ~/.config/scope/recipient.key --url <rpc-url>
-# announcement	token_account	mint	amount_base_units	public_amount_base_units	ephemeral
-# <announcement>	<one-time account>	<mint>	980000000	0	<R>
+# announcement	token_account	payer	mint	amount_base_units	public_amount_base_units	ephemeral
+# <announcement>	<one-time account>	<payer>	<mint>	980000000	0	<R>
 
 # 4. Simulate, then sweep one payment into a fresh account of your own.
 scope sweep --recipient-key ~/.config/scope/recipient.key --url <rpc-url> \
   --announcement <announcement> --dry-run
 scope sweep --recipient-key ~/.config/scope/recipient.key --url <rpc-url> \
   --announcement <announcement>
+
+# 5. Or sweep everything scan finds, one transaction each, with a random pause between.
+scope sweep --recipient-key ~/.config/scope/recipient.key --url <rpc-url> \
+  --all --jitter-secs 120
 ```
 
 Before each attempt the sweep prints and saves a recovery record:
@@ -59,20 +63,30 @@ finalized_signature	<signature>
 rent reclaimed
 ```
 
-`swept` reads `simulated` on a dry run and `prepared amount` when the payment completed but this attempt's own success was not verified (then `payment completed; this attempt's success was not verified` replaces the signature line). Extra lines appear when they apply: `public balance burned: <n> base units`, and `public balance remaining\t<n> base units` (or `unknown`). The rent line reads `reclaimed`, `not reclaimed by this attempt; funds swept without cleanup`, or `reclaim status unknown`; a dry run says `reclaim simulated` or `reclaim unavailable; simulated sweep omits cleanup`, `public balance to burn` for `burned`, and `SOL predicted remaining` for `SOL remaining`. The saved recovery record also gains a `finalized_signature` line once the attempt finalizes, and a `last_send_error` line when a send failed.
+`swept` reads `simulated` on a dry run and `prepared amount` when the payment completed but this attempt's own success was not verified. Further lines report burned or remaining public balance, the rent outcome (`reclaimed`, `not reclaimed by this attempt; funds swept without cleanup` or `reclaim status unknown`) and, in the saved record, `finalized_signature` and `last_send_error`. A dry run says `predicted` where the real run says `remaining`.
 
 ## Flags
 
-Every command that loads keys takes `--recipient-key` (default `~/.config/scope/recipient.key`) and `--identity <file>` for an age-encrypted backup.
+Every command that loads keys takes `--recipient-key` (default `~/.config/scope/recipient.key`) and `--identity <file>` for an age-encrypted backup. `scope meta-address` prints the meta-address from the backup, which works with an encrypted one too.
 
 | Command | Flag | Default | Meaning |
 |---|---|---|---|
 | `register` | `--encrypt-to <age recipient>` | none | encrypt the new backup with age |
+| `register` | `--verify-identity <file>` | none | with `--encrypt-to`: decrypt the new file with this age identity and check it matches |
 | `publish` | `--keypair <file>` | `~/.config/solana/id.json` | wallet the entry is published under; signs and pays its rent |
 | `publish` | `--remove` | off | close the wallet's entry and return its rent |
-| `publish`, `scan`, `sweep` | `--url <rpc>` | `http://127.0.0.1:8899` | RPC node |
+| `publish`, `scan`, `sweep`, `recover` | `--url <rpc>` | `http://127.0.0.1:8899` | RPC node |
 | `scan` | `--mint <address>` | all mints | show payments in this mint only |
-| `sweep` | `--announcement <address>` | required | from `scan` |
+| `scan` | `--min-amount <base units>` | `0` | hide smaller payments |
+| `scan` | `--ignore-payer <address>` | none | hide a payer's payments; repeatable |
+| `scan` | `--with-signature` | off | add each payment's signature, one history query per row |
+| `recover` | `--limit <n>` | `1000` | program transactions to examine, newest first |
+| `recover` | `--since <signature>` | none | stop at this signature |
+| `sweep` | `--announcement <address>` | one of the two | from `scan` |
+| `sweep` | `--all` | off | sweep every payment `scan` finds, one transaction each; stops at the first failure and says how many were done |
+| `sweep --all` | `--mint`, `--ignore-payer` | none | as for `scan` |
+| `sweep --all` | `--min-amount <base units>` | `1` | skip smaller payments; a zero payment cannot be swept |
+| `sweep --all` | `--jitter-secs <max>` | `0` | wait a random 0 to `max` seconds between sweeps; 30 to 300 is a sensible range (not used with `--dry-run`) |
 | `sweep` | `--max-price <n>` | `1000000` | priority price cap, micro-lamports per CU; the payer funded P for this cap |
 | `sweep` | `--timeout <s>` | `120` (at least 1) | deadline for sending and waiting |
 | `sweep` | `--dry-run` | off | build and simulate, send nothing, write no journal |
@@ -80,6 +94,8 @@ Every command that loads keys takes `--recipient-key` (default `~/.config/scope/
 | `export-sweep-key` | `--ephemeral <R>` | required | public R from scan, sweep or the journal |
 | `export-sweep-key` | `--token-account <T>` | required | the payment's token account, from the same places |
 | `export-sweep-key` | `--output <file>` | required | new keypair file |
+| `export-sweep-key` | `--encrypt-to <age recipient>` | none | write the keypair JSON encrypted with age |
+| `disclose` | `--token-account <T>` | none | recipient receipt without the signature; see [audit.md](audit.md) |
 
 ## Backups
 
@@ -92,39 +108,48 @@ scope register --recipient-key ./recipient.age --encrypt-to <age-public-recipien
 scope scan --recipient-key ./recipient.age --identity ./identity.txt --url <rpc-url>
 ```
 
+`register` warns on stderr about a plaintext backup, and about an encrypted one it did not read back (check it with `scope meta-address --identity <file>`). With `--verify-identity` it decrypts the file it wrote and fails unless the meta-address matches.
+
 Back up the key file and the recovery journal together (Recovery, below).
 
 ## Publishing
 
-`scope publish` writes your meta-address to the on-chain registry under `--keypair`'s wallet; `--remove` closes the entry and returns its rent, printing `removed\t<entry>\t<signature>` (verification: V81). Entry layout and checks are in [protocol.md](protocol.md); what a lookup reveals is in [privacy.md](privacy.md).
+`scope publish` writes your meta-address to the on-chain registry under `--keypair`'s wallet; `--remove` closes the entry and returns its rent (verification: V81). Entry layout is in [protocol.md](protocol.md); what a lookup reveals is in [privacy.md](privacy.md).
 
 ## What does scan check?
 
-`scan` fetches program-owned accounts of the announcement's size and version, then checks each view tag locally, since tags depend on each R. For a match it checks the canonical announcement address, that the token account's owner is P, its close authority and delegate, that it is not frozen, the account policy (approved, no public credits, one pending credit), the ElGamal key derived for this account, and the balance hint against the ciphertext. Valid rows go to stdout as they are found; a failed check prints `skipped payment <account>: <reason>` to stderr and scanning continues. A chain error stops the scan; rows already printed are valid (verification: V64).
+`scan` fetches program-owned accounts of the announcement's size and version, then checks each view tag locally, since tags depend on each R. The token accounts of tag matches are read with `getMultipleAccounts`, 100 per call, not one call each. For a match it checks the canonical announcement address, that the token account's owner is P, its close authority and delegate, that it is not frozen, the account policy (approved, no public credits, one pending credit), the ElGamal key derived for this account, and the balance hint against the ciphertext. Valid rows go to stdout as they are found; a failed check prints `skipped payment <account>: <reason>` to stderr and scanning continues. A chain error stops the scan with "scan stopped after reading N of M candidate accounts"; rows already printed are valid and the rest were not read (verification: V64).
 
-A local RPC fixture scans 1,000 seeded announcements in about 617 ms on one machine; provider-scale timing is not measured (verification: V67).
+A local RPC fixture scans 1,000 seeded announcements in about 350 ms on one machine; provider-scale timing is not measured (verification: V67).
 
 An announcement proves setup and handover, not a positive amount: an unpaid or already swept account can show a zero amount, and sweep refuses it (verification: V64, V65).
 
 ## What does the sweep transaction do?
 
-One v1 transaction, fee paid by P and signed by P and D_owner. It creates your fresh account D, owned by D_owner, a standard Ed25519 key derived from your spend key and the exact R (verification: V61); moves the whole confidential amount from the one-time account into D; burns any public dust and calls `reclaim`, which returns the one-time account's rent to the payer (verification: V77); and sends P's spare SOL to D_owner when that is enough for D_owner to stay rent-exempt, while P keeps its rent reserve (verification: V65). SOL someone sent to D's address cannot block it, and an existing token account at D is refused (verification: V65). Instruction by instruction, with bytes and compute: [protocol.md](protocol.md).
+One v1 transaction, fee paid by P and signed by P and D_owner. It creates your fresh account D, owned by D_owner, a standard Ed25519 key derived from your spend key and the exact R (verification: V61); moves the whole confidential amount from the one-time account into D and applies it, so D's available balance holds the amount when the sweep lands; burns any public dust and calls `reclaim`, which returns the one-time account's rent to the payer (verification: V77); and sends P's spare SOL to D_owner when that is enough for D_owner to stay rent-exempt, while P keeps its rent reserve (verification: V65). SOL someone sent to D's address cannot block it, and an existing token account at D is refused (verification: V65). Instruction by instruction, with bytes and compute: [protocol.md](protocol.md).
 
 ## Fallback, retries and dust
 
-If the full transaction fails simulation, the sweep simulates a transfer-only version: steps 1 to 3 and 5, no burn, no reclaim. It moves your funds but leaves any public dust and both rents behind, for example on a mint where only the issuer may burn (verification: V65). The payer can reclaim the rent later only if no public balance remains ([payer.md](payer.md)).
+If the full transaction fails simulation, the sweep simulates a transfer-only version: steps 1 to 3 and 5, no burn, no reclaim. It moves your funds but leaves any public dust and both rents behind, for example on a mint where only the issuer may burn (verification: V65). The payer can reclaim the rent later only if no public balance remains.
 
-The sweep resends one signed transaction while its outcome is unknown. Only a finalized failure or blockhash expiry allows a rebuild, at most two, each transfer-only, refreshing balances, mint policy, proofs, blockhash, rent deficit and price. Each new attempt samples the current p75 price and refuses one above `--max-price`; a resend keeps its signed fee (verification: V65, V69). The payer funded P for three attempts at the 1,000,000 cap ([payer.md](payer.md)); a lower `--max-price` only spends less.
+The sweep resends one signed transaction while its outcome is unknown. Only a finalized failure or blockhash expiry allows a rebuild, at most two, each transfer-only, refreshing balances, mint policy, proofs, blockhash, rent deficit and price. A rebuild samples the current p75 price and refuses one above `--max-price`; a resend keeps its signed fee (verification: V65, V69). The payer funded P for three attempts at the 1,000,000 cap ([payer.md](payer.md)).
 
-`--timeout` starts after preparation and the first recovery record. It bounds RPC calls, retry preparation and polling; no new send starts after it, but a transaction already sent can still finalize. On timeout the sweep exits with "sweep completion has not been observed; check chain state before retrying" and the last recovery record (verification: V65).
+`--timeout` starts after preparation and the first recovery record and bounds RPC calls, retry preparation and polling; no new send starts after it, but a sent transaction can still finalize. On timeout the sweep exits with "sweep completion has not been observed; check chain state before retrying" and the last recovery record (verification: V65).
 
-Success is a finalized successful signature for this attempt, even if follow-up balance reads fail; unknown values print as `unknown`. Without that, the sweep counts as complete only when the one-time account is empty or closed and D is your authenticated account (verification: V69).
+Success is a finalized successful signature for this attempt, even if follow-up reads fail (they print `unknown`). Without it, the sweep counts as complete only when the one-time account is empty or closed and D is your authenticated account (verification: V69).
 
 ## Recovery
 
-The recovery journal (default `<recipient-key>.sweeps.jsonl`) is a locked, owner-only JSONL file with header `{"format":"scope-recipient-recovery","version":1}`. Before every new attempt the sweep appends `genesis_hash`, `ephemeral`, `destination`, `owner`, `payment_authority` and `attempt_signature`, syncs it, then prints the same record to stdout; if either fails, that attempt is not sent. It holds no private key and no amount. A torn last record is cut before the next append; a file that is not a SCOPE journal, or a symlink, is refused (verification: V70). A journal entry records a prepared attempt, not a landed one.
+The recovery journal (default `<recipient-key>.sweeps.jsonl`) is a locked, owner-only JSONL file with header `{"format":"scope-recipient-recovery","version":1}`. Before every new attempt the sweep appends `genesis_hash`, `ephemeral`, `destination`, `owner`, `payment_authority` and `attempt_signature`, syncs it, then prints the same record to stdout; if either fails, that attempt is not sent. It holds no private key and no amount, but it is plaintext and links P, D, D_owner and R, so keep it as private as the key backup. A torn last record is cut before the next append; a foreign file or a symlink is refused (verification: V70). An entry records a prepared attempt, not a landed one.
 
-Once an announcement is reclaimed (a full sweep does this itself), scan no longer lists that payment. Exact R plus the key backup rebuilds D_owner and D's keys, so keep the journal or the saved output: the key backup alone cannot list past destinations. Finding them from historical payer transactions is not built (Q17 in [plan.md](plan.md)) (verification: V61, V65).
+Once an announcement is reclaimed (a full sweep does this itself), scan no longer lists that payment. Exact R plus the key backup rebuilds D_owner and D's keys, so keep the journal or the saved output.
+
+Without them, `scope recover` rebuilds the list from history. It walks the program's transactions newest first, finds each `announce`, applies the one-byte tag check, and keeps a payment only when the transaction's own confidential transfer pays the key derived for you. It needs an RPC that keeps transaction history for the program and examines `--limit` transactions (1,000 by default); raise the limit for older payments. Transactions the node lists but will not return are counted in a stderr warning. Tests use a fake history; no public RPC provider has been tried [unverified].
+
+```sh
+scope recover --recipient-key ~/.config/scope/recipient.key --url <archival-rpc-url> --limit 5000
+# payer	mint	token_account	ephemeral	signature	destination	destination_exists	destination_lamports	destination_base_units
+```
 
 ## Spending the swept funds
 
@@ -137,25 +162,23 @@ scope export-sweep-key --recipient-key ./recipient.key \
 # destination	<D>
 ```
 
-It writes the file with mode 0600, refuses overwrites and symlinks, prints only public addresses and makes no RPC call. An imported owner applies and spends D's balance with the standard SDK wallet key schedule; that flow is tested in LiteSVM (verification: V71).
+It writes the file with mode 0600, refuses overwrites and symlinks, prints only public addresses and makes no RPC call. With `--encrypt-to <age recipient>` the file holds the keypair JSON encrypted with age; decrypt it with `age --decrypt -i <identity> <file>` before use. An imported owner spends D's balance with the standard SDK wallet key schedule; that flow is tested in LiteSVM (verification: V71).
 
-Swept tokens arrive in D's pending balance. With spl-token-cli 5.6.1, apply it, then transfer from the explicit D address [unverified: these command lines are not run by any test; they follow the [5.6.1 CLI source](https://github.com/solana-program/token-2022/tree/cli%40v5.6.1/clients/cli/src)]:
+The sweep applies the pending balance, so D_owner can transfer from D at once (tested in LiteSVM with the restored key). With spl-token-cli 5.6.1 the transfer looks like this [unverified: no test runs this command line; it follows the [5.6.1 CLI source](https://github.com/solana-program/token-2022/tree/cli%40v5.6.1/clients/cli/src)]:
 
 ```sh
-spl-token --program-2022 --url <rpc-url> --fee-payer ./sweep-owner-keypair.json \
-  apply-pending-balance --address <D> --owner ./sweep-owner-keypair.json
 spl-token --program-2022 --url <rpc-url> --fee-payer ./sweep-owner-keypair.json \
   transfer <mint> <amount-in-token-units> <configured-recipient-token-account> \
   --from <D> --owner ./sweep-owner-keypair.json --confidential
 ```
 
-D_owner needs SOL for fees and possibly for proof context accounts. D's keys match spl-token-cli's own derivation from the owner (verification: V50, V77), and `--address`/`--from` select D instead of an associated account. A fee payer shared across destinations links them ([privacy.md](privacy.md)).
+D_owner needs SOL for fees and possibly for proof context accounts. D's keys match spl-token-cli's own derivation from the owner (verification: V50, V77). A fee payer shared across destinations links them ([privacy.md](privacy.md)).
 
 ## Limits
 
 - The cluster must support v1 transactions and Token-2022's confidential instructions; public-cluster checks are tracked in [plan.md](plan.md).
-- The sweep refuses mints that need approval of new accounts, freeze new accounts by default, or carry non-transferable, transfer-fee or transfer-hook extensions [unverified: no test for the extension refusals]. Issuer freezes, pauses or policy changes can still block a sweep.
+- The sweep refuses mints that need approval of new accounts, freeze new accounts by default, or carry non-transferable, transfer-fee or transfer-hook extensions [unverified: no test for the extension refusals]. Issuer freezes or policy changes can still block a sweep.
 - One sweep moves at most 2^48 - 1 base units, Token-2022's single-transfer limit; a larger balance is refused (verification: V65).
 - D depends on R and the token account T, so two announcements that reuse one R still sweep to different destinations. A payment swept twice gets the same D, which the sweep refuses once it exists (verification: V61, V65).
 - Any client holding your spend key can spend a one-time account; `scope` uses a raw-scalar signer, and D_owner is a standard key (verification: V61, V63).
-- Your receipt for a payment needs that payment's signature ([audit.md](audit.md)).
+- Your receipt for a payment needs that payment's signature, or its token account when the node keeps history ([audit.md](audit.md)).
