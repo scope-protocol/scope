@@ -62,7 +62,7 @@ Stablecoin payroll and B2B settlement platforms serving payers who are public an
 
 ## How much does a payment cost?
 
-A stealth row locks 4,008,120 lamports of payer rent that comes back at the sweep, funds the recipient's sweep with 4,622,680 lamports, and pays a transaction fee of 5,000 lamports plus a priority fee. A plain row costs only its fee. The priority fee is the only cost that grows with congestion. Breakdown and formulas: [payer.md](payer.md); rent per account: [protocol.md](protocol.md).
+A stealth row locks payer rent that comes back at the sweep, funds the recipient's sweep, and pays a transaction fee plus a priority fee. A plain row costs only its fee. The priority fee is the only cost that grows with congestion. Figures and formulas: [payer.md](payer.md); rent per account: [protocol.md](protocol.md).
 
 ## What is in scope?
 
