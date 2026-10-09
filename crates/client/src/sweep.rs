@@ -215,17 +215,12 @@ fn destination_from_mint(
         return Err(invalid("mint is not owned by Token-2022"));
     }
     let mint = StateWithExtensions::<Mint>::unpack(&mint_account.data).map_err(invalid)?;
-    let types = mint.get_extension_types().map_err(invalid)?;
-    for refused in [
-        ExtensionType::NonTransferable,
-        ExtensionType::TransferFeeConfig,
-        ExtensionType::TransferHook,
-    ] {
-        if types.contains(&refused) {
-            return Err(invalid(format!(
-                "mint extension {refused:?} is not supported"
-            )));
-        }
+    let refused = crate::mint_policy::refusals(&mint_account.data).map_err(invalid)?;
+    if !refused.is_empty() {
+        return Err(invalid(format!(
+            "mint is not supported: {}",
+            refused.join("; ")
+        )));
     }
     let confidential = mint
         .get_extension::<ConfidentialTransferMint>()

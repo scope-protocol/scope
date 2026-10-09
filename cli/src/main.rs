@@ -98,8 +98,9 @@ struct MetaAddressArgs {
 struct RecoverArgs {
     #[command(flatten)]
     keys: RecipientKeys,
-    #[arg(long, default_value = "http://127.0.0.1:8899")]
-    url: String,
+    /// RPC node; defaults to $SCOPE_URL, else http://127.0.0.1:8899.
+    #[arg(long)]
+    url: Option<String>,
     /// Program transactions to examine, newest first.
     #[arg(long, default_value_t = history::DEFAULT_LIMIT)]
     limit: usize,
@@ -112,8 +113,9 @@ struct RecoverArgs {
 struct ScanArgs {
     #[command(flatten)]
     keys: RecipientKeys,
-    #[arg(long, default_value = "http://127.0.0.1:8899")]
-    url: String,
+    /// RPC node; defaults to $SCOPE_URL, else http://127.0.0.1:8899.
+    #[arg(long)]
+    url: Option<String>,
     /// Show payments for only this mint.
     #[arg(long)]
     mint: Option<Address>,
@@ -151,8 +153,9 @@ struct SweepArgs {
     /// With --all: wait a random 0 to this many seconds between sweeps (30 to 300 suggested).
     #[arg(long, conflicts_with = "announcement", default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=86_400))]
     jitter_secs: u64,
-    #[arg(long, default_value = "http://127.0.0.1:8899")]
-    url: String,
+    /// RPC node; defaults to $SCOPE_URL, else http://127.0.0.1:8899.
+    #[arg(long)]
+    url: Option<String>,
     /// Highest priority price paid, micro-lamports per CU; the payer funds P for this cap.
     #[arg(long, default_value_t = scope_client::fees::SWEEP_PRICE_CAP)]
     max_price: u64,
@@ -199,7 +202,7 @@ fn recipient_chain(url: String) -> RpcChain {
 
 fn run_scan(args: ScanArgs) -> anyhow::Result<()> {
     let recipient = args.keys.load()?;
-    let chain = recipient_chain(args.url);
+    let chain = recipient_chain(rpc_url(args.url));
     let filter = scan::PaymentFilter {
         min_amount: args.min_amount,
         ignore_payers: args.ignore_payer,
@@ -269,7 +272,7 @@ fn run_meta_address(args: MetaAddressArgs) -> anyhow::Result<()> {
 
 fn run_recover(args: RecoverArgs) -> anyhow::Result<()> {
     let recipient = args.keys.load()?;
-    let chain = recipient_chain(args.url);
+    let chain = recipient_chain(rpc_url(args.url));
     let report = history::recover(
         &chain,
         &chain,
@@ -341,7 +344,7 @@ fn run_register(args: RegisterArgs) -> anyhow::Result<()> {
 
 fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
     let recipient = args.keys.load()?;
-    let mut chain = recipient_chain(args.url);
+    let mut chain = recipient_chain(rpc_url(args.url));
     let opts = sweep::SweepOptions {
         max_price_per_cu: args.max_price,
         timeout: Duration::from_secs(args.timeout),
@@ -582,7 +585,7 @@ fn run_publish(args: PublishArgs) -> anyhow::Result<()> {
         rpc_url(args.url),
         solana_commitment_config::CommitmentConfig::confirmed(),
     );
-    let tx = scope_client::tx::v1_transaction(&wallet, &[], &[ix], rpc.get_latest_blockhash()?);
+    let tx = scope_client::tx::legacy_transaction(&wallet, &[ix], rpc.get_latest_blockhash()?);
     let signature = rpc.send_and_confirm_transaction(&tx)?;
     let (entry, _) = scope_client::address::meta_entry_address(&wallet.pubkey());
     println!(
@@ -644,8 +647,9 @@ struct VerifyArgs {
     /// Receipt file from `scope disclose`.
     receipt: PathBuf,
     /// An RPC node that keeps transaction history.
-    #[arg(long, default_value = "http://127.0.0.1:8899")]
-    url: String,
+    /// RPC node; defaults to $SCOPE_URL, else http://127.0.0.1:8899.
+    #[arg(long)]
+    url: Option<String>,
 }
 
 fn run_disclose(args: DiscloseArgs) -> anyhow::Result<()> {
@@ -701,7 +705,7 @@ fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
     let text = std::fs::read_to_string(&args.receipt)
         .with_context(|| format!("reading {}", args.receipt.display()))?;
     let receipt: receipt::Receipt = serde_json::from_str(&text).context("parsing the receipt")?;
-    let verified = receipt::verify(&recipient_chain(args.url), &receipt)?;
+    let verified = receipt::verify(&recipient_chain(rpc_url(args.url)), &receipt)?;
     println!("verified\t{}", verified.signature);
     println!("amount_base_units\t{}", verified.amount);
     println!("payer\t{}", verified.payer);
@@ -957,8 +961,27 @@ fn print_status(
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+/// Exit codes: 0 done, 1 refused or failed before anything was sent, 2 bad arguments (clap),
+/// 3 transient, retry or resume later, 4 stopped after sending, inspect then resume.
+fn exit_code(error: &anyhow::Error) -> u8 {
+    use scope_client::{chain::ChainError, pay::PayError};
+    for cause in error.chain() {
+        if let Some(pay) = cause.downcast_ref::<PayError>() {
+            return match pay {
+                PayError::FeeAboveCap { .. } | PayError::Chain(_) => 3,
+                PayError::Halted(_) | PayError::Simulation { .. } => 4,
+                _ => 1,
+            };
+        }
+        if cause.downcast_ref::<ChainError>().is_some() {
+            return 3;
+        }
+    }
+    1
+}
+
+fn main() -> std::process::ExitCode {
+    let result = match Cli::parse().command {
         Command::Pay(args) => run_pay(args),
         Command::Register(args) => run_register(args),
         Command::MetaAddress(args) => run_meta_address(args),
@@ -970,7 +993,14 @@ fn main() -> anyhow::Result<()> {
         Command::Disclose(args) => run_disclose(args),
         Command::Verify(args) => run_verify(args),
         Command::ExportSweepKey(args) => run_export_sweep_key(args),
-        other => bail!("{other:?} is not implemented yet"),
+        other => Err(anyhow::anyhow!("{other:?} is not implemented yet")),
+    };
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            std::process::ExitCode::from(exit_code(&error))
+        }
     }
 }
 
@@ -1061,6 +1091,19 @@ mod tests {
         assert_eq!(fs::read(&path).expect("unchanged"), before);
         drop(journal);
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn exit_codes_tell_retry_from_inspect_from_refused() {
+        use scope_client::{chain::ChainError, pay::PayError};
+        let code = |e: PayError| exit_code(&anyhow::Error::new(e));
+        assert_eq!(code(PayError::FeeAboveCap { price: 2, cap: 1 }), 3);
+        assert_eq!(code(PayError::Chain(ChainError("rpc".into()))), 3);
+        assert_eq!(code(PayError::Halted("source moved".into())), 4);
+        assert_eq!(code(PayError::Insufficient { have: 1, need: 2 }), 1);
+        assert_eq!(exit_code(&anyhow::anyhow!("plain")), 1);
+        let wrapped = anyhow::Error::new(PayError::Halted("x".into())).context("pay");
+        assert_eq!(exit_code(&wrapped), 4);
     }
 
     #[test]

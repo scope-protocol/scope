@@ -22,6 +22,20 @@ pub const DEFAULT_CU_LIMIT: u32 = 600_000;
 /// bytes; v1 defaults this to 0, which fails the transaction.
 pub const LOADED_ACCOUNTS_DATA_SIZE_LIMIT: u32 = 4 * 1024 * 1024;
 
+/// A legacy transaction for the small registry instructions, which need no v1 header.
+pub fn legacy_transaction(
+    fee_payer: &Keypair,
+    ixs: &[Instruction],
+    blockhash: solana_message::Hash,
+) -> solana_transaction::Transaction {
+    solana_transaction::Transaction::new_signed_with_payer(
+        ixs,
+        Some(&fee_payer.pubkey()),
+        &[fee_payer],
+        blockhash,
+    )
+}
+
 pub fn v1_transaction(
     fee_payer: &Keypair,
     extra_signers: &[&Keypair],
