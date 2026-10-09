@@ -27,9 +27,10 @@ pub enum ScopeError {
     InvalidSpendKey = 22,
     NotMetaAddressEntry = 23,
     RegistrantMismatch = 24,
+    CpiGuardEnabled = 25,
 }
 
-const ALL: [ScopeError; 25] = [
+const ALL: [ScopeError; 26] = [
     ScopeError::InvalidInstruction,
     ScopeError::InvalidInstructionData,
     ScopeError::PayerNotSigner,
@@ -55,6 +56,7 @@ const ALL: [ScopeError; 25] = [
     ScopeError::InvalidSpendKey,
     ScopeError::NotMetaAddressEntry,
     ScopeError::RegistrantMismatch,
+    ScopeError::CpiGuardEnabled,
 ];
 
 impl ScopeError {
