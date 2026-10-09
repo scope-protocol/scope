@@ -852,7 +852,7 @@ fn a_paid_stealth_row_sweeps_to_the_recipient_and_returns_both_rents_to_the_paye
     );
 
     let seed = alice
-        .derive_sweep_destination(&payment.ephemeral)
+        .derive_sweep_destination(&payment.ephemeral, &report.token_account.to_bytes())
         .expect("destination seed");
     let owner = Keypair::new_from_array(*seed.as_bytes());
     assert_eq!(owner.pubkey(), report.destination_owner);

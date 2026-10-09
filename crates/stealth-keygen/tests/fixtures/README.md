@@ -31,9 +31,11 @@ crate checks `ct_ikm`; `scope-client` checks the resulting ElGamal scalar and
 balance key, encryption, key-validity proofs, and disclosure reconstruction.
 
 Sweep fixtures derive a 32-byte Ed25519 seed with HKDF-SHA512, salt
-`stealth-dest/v1`, the canonical spend scalar as input, and `d-owner || R` as info.
+`stealth-dest/v1`, the canonical spend scalar as input, and `d-owner || B_spend || R || T` as info (T is the fixed `ct_ikm` context's token account).
 The generator independently expands that seed using RFC 8032 to produce the
 destination owner's public key and signature over the existing fixture message.
+
+The same generator writes `crates/client/tests/fixtures/run_secret.txt`: a Keypair seed's signature over the run-secret message, the run secret, one row's ephemeral secret and both openings.
 
 `meta_address.txt` fixes the public receiving address. The generator prepends
 version 1 to the spend and scan public keys, appends four bytes of double-SHA256,

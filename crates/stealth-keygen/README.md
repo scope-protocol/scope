@@ -34,7 +34,7 @@ A matching discovery tag only marks a candidate. Check that the token account's 
 | `recovered.sign(message)` | 64-byte standard Ed25519 signature by P. |
 | `payment.derive_ct_ikm(&context)` | `ConfidentialKeyMaterial` for one account; on both `SenderPayment` and `RecoveredPayment`. |
 | `ConfidentialKeyMaterial::from_bytes`, `as_bytes` | Import disclosed material for verification; borrow bytes for the SDK call or deliberate disclosure. |
-| `recipient.derive_sweep_destination(&R)` | `SweepDestinationSeed`, a 32-byte standard Ed25519 seed for the sweep owner D_owner. |
+| `recipient.derive_sweep_destination(&R, &T)` | `SweepDestinationSeed`, a 32-byte standard Ed25519 seed for the sweep owner D_owner; T is the payment's token account. |
 
 `SenderPayment` exposes `payment_public_key` (P, 32 bytes) and `announcement: PaymentAnnouncement { ephemeral_public_key, discovery_tag }`. `ConfidentialContext` holds `chain_id` (cluster genesis hash), `program_id`, `mint` and `token_account`, 32 bytes each; payer and recipient must use identical values. In SCOPE, `scope_client::confidential::context` builds it and `confidential::derive_confidential_keys` makes the zk-sdk call.
 
@@ -64,7 +64,7 @@ if let Some(found) = recover_payment(&recipient, &note)? {
     assert_eq!(found.payment_public_key, p_bytes);  // then check the account's owner
     let ct_ikm = found.derive_ct_ikm(&context)?;    // same bytes as the payer's
     let signature = found.sign(&message);
-    let d = recipient.derive_sweep_destination(&note.ephemeral_public_key)?;
+    let d = recipient.derive_sweep_destination(&note.ephemeral_public_key, &token_account)?;
 }
 ```
 

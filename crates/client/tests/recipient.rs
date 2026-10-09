@@ -385,7 +385,7 @@ fn sweep_moves_the_whole_balance_closes_accounts_and_refunds_rent() {
         payer_before + rent
     );
     let seed = alice
-        .derive_sweep_destination(&report.ephemeral)
+        .derive_sweep_destination(&report.ephemeral, &report.token_account.to_bytes())
         .expect("seed");
     let owner = solana_keypair::Keypair::new_from_array(*seed.as_bytes());
     let (keys, _) = solana_zk_sdk::encryption::derivation::derive_confidential_keys(&owner, b"")
@@ -473,11 +473,11 @@ fn sweep_burns_public_dust_and_handles_a_prefunded_destination() {
     let mut h = Harness::new();
     let alice = recipient(1);
     let (announcement, account, _) = fund(&mut h, &alice, 3);
-    let r = scan::scan(&SvmChain::new(&mut h.svm), &alice, None)
-        .expect("scan")
-        .payments[0]
-        .ephemeral;
-    let seed = alice.derive_sweep_destination(&r).expect("seed");
+    let found = scan::scan(&SvmChain::new(&mut h.svm), &alice, None).expect("scan");
+    let r = found.payments[0].ephemeral;
+    let seed = alice
+        .derive_sweep_destination(&r, &found.payments[0].token_account.to_bytes())
+        .expect("seed");
     let owner = solana_keypair::Keypair::new_from_array(*seed.as_bytes());
     let d = sweep::destination_address(&owner.pubkey());
     let mint_to = spl_token_2022_interface::instruction::mint_to(
@@ -598,7 +598,7 @@ fn sweep_preserves_recovery_details_when_rpc_fails_after_send() {
     assert!(chain.svm.get_account(&announcement).is_none());
     assert!(chain.svm.get_account(&report.destination).is_some());
     let seed = alice
-        .derive_sweep_destination(&report.ephemeral)
+        .derive_sweep_destination(&report.ephemeral, &report.token_account.to_bytes())
         .expect("seed");
     assert_eq!(
         solana_keypair::Keypair::new_from_array(*seed.as_bytes()).pubkey(),
@@ -636,7 +636,7 @@ fn sweep_timeout_preserves_recovery_details_after_execution() {
     assert!(chain.svm.get_account(&announcement).is_none());
     assert!(chain.svm.get_account(&report.destination).is_some());
     let seed = alice
-        .derive_sweep_destination(&report.ephemeral)
+        .derive_sweep_destination(&report.ephemeral, &report.token_account.to_bytes())
         .expect("seed");
     assert_eq!(
         solana_keypair::Keypair::new_from_array(*seed.as_bytes()).pubkey(),
@@ -820,7 +820,7 @@ fn sweep_moves_confidential_funds_when_permissioned_burning_blocks_cleanup() {
         ) if code == spl_token_2022_interface::error::TokenError::ConfidentialTransferDepositsAndTransfersDisabled as u32
     ));
     let seed = alice
-        .derive_sweep_destination(&report.ephemeral)
+        .derive_sweep_destination(&report.ephemeral, &report.token_account.to_bytes())
         .expect("seed");
     let owner = solana_keypair::Keypair::new_from_array(*seed.as_bytes());
     let (keys, _) =
@@ -1341,7 +1341,7 @@ fn scan_and_sweep_support_large_pending_balances() {
         assert_eq!(report.amount, amount);
         assert_eq!(report.reclaimed, Some(true));
         let seed = alice
-            .derive_sweep_destination(&report.ephemeral)
+            .derive_sweep_destination(&report.ephemeral, &report.token_account.to_bytes())
             .expect("seed");
         let owner = solana_keypair::Keypair::new_from_array(*seed.as_bytes());
         let (keys, _) =
@@ -1973,7 +1973,7 @@ fn restored_standard_owner_can_apply_and_spend_the_swept_balance() {
     .expect("sweep");
     let restored = RecipientSecretKeys::from_bytes(*alice.export().as_bytes()).expect("restore");
     let seed = restored
-        .derive_sweep_destination(&report.ephemeral)
+        .derive_sweep_destination(&report.ephemeral, &report.token_account.to_bytes())
         .expect("owner seed");
     let owner = Keypair::new_from_array(*seed.as_bytes());
     let path = std::env::temp_dir().join(format!(

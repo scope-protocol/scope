@@ -15,6 +15,7 @@ const HEADER: &[u8] = b"{\"format\":\"scope-recipient-recovery\",\"version\":1}\
 struct Record<'a> {
     genesis_hash: String,
     ephemeral: String,
+    token_account: String,
     destination: String,
     owner: String,
     payment_authority: String,
@@ -73,6 +74,7 @@ impl RecoveryJournal {
         let record = Record {
             genesis_hash: Address::new_from_array(report.genesis_hash).to_string(),
             ephemeral: Address::new_from_array(report.ephemeral).to_string(),
+            token_account: report.token_account.to_string(),
             destination: report.destination.to_string(),
             owner: report.destination_owner.to_string(),
             payment_authority: report.payment_authority.to_string(),
@@ -123,11 +125,12 @@ mod tests {
         let text = fs::read_to_string(&path).expect("saved");
         let record: serde_json::Value =
             serde_json::from_str(text.lines().nth(1).expect("record")).expect("json");
-        assert_eq!(record.as_object().expect("object").len(), 6);
+        assert_eq!(record.as_object().expect("object").len(), 7);
         assert_eq!(
             record["ephemeral"],
             Address::new_from_array(report.ephemeral).to_string()
         );
+        assert_eq!(record["token_account"], report.token_account.to_string());
         assert_eq!(record["owner"], report.destination_owner.to_string());
         assert_eq!(
             record["genesis_hash"],

@@ -41,13 +41,13 @@ fn sweep_destination_seed_builds_a_solana_signer() {
     let recipient = RecipientSecretKeys::generate(&mut TestRng(1)).expect("recipient");
     let sent = derive_payment(&recipient.derive_public_keys(), &mut TestRng(3)).expect("payment");
     let seed = recipient
-        .derive_sweep_destination(&sent.announcement.ephemeral_public_key)
+        .derive_sweep_destination(&sent.announcement.ephemeral_public_key, &[4; 32])
         .expect("sweep seed");
     let owner = Keypair::new_from_array(*seed.as_bytes());
     let restored =
         RecipientSecretKeys::from_bytes(*recipient.export().as_bytes()).expect("restore");
     let rebuilt_seed = restored
-        .derive_sweep_destination(&sent.announcement.ephemeral_public_key)
+        .derive_sweep_destination(&sent.announcement.ephemeral_public_key, &[4; 32])
         .expect("rebuilt sweep seed");
     let rebuilt = Keypair::new_from_array(*rebuilt_seed.as_bytes());
     assert_eq!(owner.pubkey(), rebuilt.pubkey());
