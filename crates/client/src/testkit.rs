@@ -130,6 +130,17 @@ impl Harness {
         h
     }
 
+    /// Adds a transfer hook that names no program to the mint, which the mint policy refuses.
+    /// Appended as a TLV entry so the existing token accounts stay valid.
+    pub fn add_null_transfer_hook(&mut self) {
+        const TRANSFER_HOOK: u16 = 14;
+        let mut mint = self.svm.get_account(&self.mint).expect("mint");
+        mint.data.extend(TRANSFER_HOOK.to_le_bytes());
+        mint.data.extend(64u16.to_le_bytes());
+        mint.data.extend([0u8; 64]);
+        self.svm.set_account(self.mint, mint).expect("set mint");
+    }
+
     // Returns litesvm's own result type so tests can match on its metadata.
     #[allow(clippy::result_large_err)]
     pub fn send(&mut self, ixs: &[Instruction], extra: &[&Keypair]) -> TransactionResult {

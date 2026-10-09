@@ -24,8 +24,9 @@ pub struct MintPolicy {
 }
 
 /// Extensions that make a confidential Transfer impossible or change what it means.
-/// Permanent delegate is allowed and is a trust limit (docs/privacy.md).
-const REFUSED: [(ExtensionType, &str); 5] = [
+/// Permanent delegate is allowed and is a trust limit (docs/privacy.md). Burn-only extensions
+/// are allowed: the sweep's burn is optional and falls back to a transfer-only sweep.
+const REFUSED: [(ExtensionType, &str); 3] = [
     (
         ExtensionType::NonTransferable,
         "tokens cannot be transferred",
@@ -37,14 +38,6 @@ const REFUSED: [(ExtensionType, &str); 5] = [
     (
         ExtensionType::TransferHook,
         "SCOPE passes no hook accounts, so a hook is refused even with no program set",
-    ),
-    (
-        ExtensionType::PermissionedBurn,
-        "burns need the mint's authority, which this path does not support or test",
-    ),
-    (
-        ExtensionType::ConfidentialMintBurn,
-        "confidential mint and burn is not supported or tested",
     ),
 ];
 
@@ -230,12 +223,14 @@ mod tests {
     }
 
     #[test]
-    fn a_permanent_delegate_and_a_close_authority_are_allowed() {
+    fn a_permanent_delegate_a_close_authority_and_burn_extensions_are_allowed() {
         check(&mint(
             &[
                 CT,
                 ExtensionType::PermanentDelegate,
                 ExtensionType::MintCloseAuthority,
+                ExtensionType::PermissionedBurn,
+                ExtensionType::ConfidentialMintBurn,
             ],
             |_| {},
         ))

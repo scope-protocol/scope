@@ -1650,12 +1650,13 @@ fn attempts_that_land_with_an_error_halt_the_row_with_that_error_after_three() {
 
 #[test]
 fn a_refused_mint_extension_stops_the_run_before_anything_is_sent() {
-    let mut h = Harness::with_permissioned_burn();
+    let mut h = Harness::new();
     let rs = recipients(&mut h, 1);
+    h.add_null_transfer_hook();
     let o = opts("refused-mint");
     let stopped = start(&mut h, &input(&rs), &o);
     assert!(
-        matches!(&stopped, Err(PayError::Mint { why, .. }) if why.contains("PermissionedBurn")),
+        matches!(&stopped, Err(PayError::Mint { why, .. }) if why.contains("TransferHook")),
         "{stopped:?}"
     );
     assert_no_run(&o);
@@ -1847,8 +1848,9 @@ fn a_dry_run_reports_the_run_and_changes_nothing() {
 
 #[test]
 fn a_dry_run_runs_the_same_preflights_as_a_real_run() {
-    let mut h = Harness::with_permissioned_burn();
+    let mut h = Harness::new();
     let rs = recipients(&mut h, 1);
+    h.add_null_transfer_hook();
     let o = opts("dry-run-refused");
     let k = keys(&h.source_elgamal, &h.source_ae);
     let chain = SvmChain::new(&mut h.svm);
