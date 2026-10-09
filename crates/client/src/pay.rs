@@ -179,6 +179,8 @@ struct Attempt {
 enum Outcome {
     Landed,
     Expired,
+    /// The transaction landed and failed, so it can never land again; its error text.
+    Failed(String),
 }
 
 fn ciphertext(bytes: &str) -> Option<[u8; 64]> {
@@ -906,6 +908,10 @@ pub fn resume<C: Chain>(
     engine.run(&order, &landed)
 }
 
+/// Consecutive expired or failed attempts of one row before the run halts. An attempt that
+/// passed simulation and still does not land points at something a rebuild will not fix.
+const REBUILD_LIMIT: usize = 3;
+
 /// Expired attempts per row before `reclaim` gives up; it is a backstop, safe to rerun.
 const RECLAIM_ATTEMPTS: usize = 3;
 
@@ -1198,7 +1204,7 @@ impl<C: Chain> Engine<'_, C> {
     }
 
     fn pay_row(&mut self, row: usize) -> Result<(), PayError> {
-        loop {
+        for expired in 1.. {
             let attempt = self.build(row)?;
             if let Err(logs) = self.chain.simulate(&attempt.tx)? {
                 return Err(PayError::Simulation { row, logs });
@@ -1217,11 +1223,27 @@ impl<C: Chain> Engine<'_, C> {
                     self.balance -= self.rows[row].amount;
                     return self.record_landed(&attempt);
                 }
+                Outcome::Expired if expired == REBUILD_LIMIT => {
+                    return Err(PayError::Halted(format!(
+                        "row {row}: {REBUILD_LIMIT} attempts expired without landing; resume to try again"
+                    )));
+                }
+                Outcome::Failed(error) if expired == REBUILD_LIMIT => {
+                    return Err(PayError::Halted(format!(
+                        "row {row}: {REBUILD_LIMIT} attempts landed with an error, the last: {error}"
+                    )));
+                }
                 Outcome::Expired => {
                     (self.opts.log)(&format!("row {row}: attempt expired, rebuilding"));
                 }
+                Outcome::Failed(error) => {
+                    (self.opts.log)(&format!(
+                        "row {row}: attempt landed with an error ({error}), rebuilding"
+                    ));
+                }
             }
         }
+        unreachable!("the loop returns on landing or the rebuild limit")
     }
 
     fn record_landed(&mut self, attempt: &Attempt) -> Result<(), PayError> {
@@ -1380,6 +1402,10 @@ impl<C: Chain> Engine<'_, C> {
                     "row {}: source changed outside this run",
                     attempt.row
                 )));
+            }
+            // A failed transaction cannot land again, and moved nothing; resending it is pointless.
+            if let Some(error) = self.chain.landed_error(&attempt.tx.signatures[0])? {
+                return Ok(Outcome::Failed(error));
             }
             if self.chain.finalized_block_height()? > attempt.last_valid_block_height {
                 let finalized = self.source_state(Commitment::Finalized)?.available;

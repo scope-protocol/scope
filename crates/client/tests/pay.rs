@@ -339,6 +339,12 @@ impl<C: Chain> Chain for Killer<C> {
         self.alive()?;
         self.inner.rent(space)
     }
+    fn landed_error(
+        &self,
+        signature: &solana_signature::Signature,
+    ) -> Result<Option<String>, ChainError> {
+        self.inner.landed_error(signature)
+    }
 }
 
 /// Kills a 4-row run at `at`, resumes it, and checks every row was paid exactly once.
@@ -755,6 +761,12 @@ impl Chain for Prefunder<'_> {
     fn rent(&self, space: usize) -> Result<u64, ChainError> {
         self.inner.rent(space)
     }
+    fn landed_error(
+        &self,
+        signature: &solana_signature::Signature,
+    ) -> Result<Option<String>, ChainError> {
+        self.inner.landed_error(signature)
+    }
 }
 
 #[test]
@@ -908,6 +920,12 @@ impl Chain for NoReclaim<'_> {
     }
     fn rent(&self, space: usize) -> Result<u64, ChainError> {
         self.0.rent(space)
+    }
+    fn landed_error(
+        &self,
+        signature: &solana_signature::Signature,
+    ) -> Result<Option<String>, ChainError> {
+        self.0.landed_error(signature)
     }
 }
 
@@ -1587,4 +1605,48 @@ fn the_duplicate_guard_sees_through_formatting_and_row_order() {
     start(&mut h, &format!("{a},1\n{b},2\n{c},4\n"), &o).expect("different amounts");
     // The same recipient listed twice is not the same input as listed once.
     start(&mut h, &format!("{a},1\n{a},1\n{b},2\n{c},3\n"), &o).expect("a repeated row");
+}
+
+fn attempts(o: &PayOptions, run_id: &str) -> usize {
+    journal(o, run_id)
+        .iter()
+        .filter(|r| matches!(r, Record::Attempt { .. }))
+        .count()
+}
+
+#[test]
+fn a_row_that_keeps_expiring_halts_after_three_attempts_and_resume_continues() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 1);
+    let o = opts("rebuild-cap");
+    let (mint, source, k) = (h.mint, h.source, keys(&h.source_elgamal, &h.source_ae));
+    let mut chain = SvmChain::new(&mut h.svm);
+    // Every attempt passes simulation and is never seen on chain.
+    chain.drop_sends = usize::MAX;
+    let stopped = pay::start(chain, &h.payer, k, mint, source, input(&rs).as_bytes(), &o);
+    assert!(
+        matches!(&stopped, Err(PayError::Halted(why)) if why.contains("3 attempts")),
+        "{stopped:?}"
+    );
+    let run_id = only_run(&o);
+    assert_eq!(attempts(&o, &run_id), 3);
+    let report = resume_run(&mut h, &o).expect("resume continues");
+    assert_eq!(report.paid.len(), 1);
+    assert_paid_once(&h, &rs);
+}
+
+#[test]
+fn attempts_that_land_with_an_error_halt_the_row_with_that_error_after_three() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 2);
+    let o = opts("lands-failed");
+    let (mint, source, k) = (h.mint, h.source, keys(&h.source_elgamal, &h.source_ae));
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.land_with_error = Some("InstructionError(3, Custom(7))".into());
+    let stopped = pay::start(chain, &h.payer, k, mint, source, input(&rs).as_bytes(), &o);
+    assert!(
+        matches!(&stopped, Err(PayError::Halted(why)) if why.contains("Custom(7)")),
+        "{stopped:?}"
+    );
+    assert_eq!(attempts(&o, &only_run(&o)), 3);
 }

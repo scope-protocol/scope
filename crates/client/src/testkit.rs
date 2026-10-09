@@ -13,6 +13,7 @@ use solana_instruction::Instruction;
 use solana_instruction_error::InstructionError;
 use solana_keypair::Keypair;
 use solana_message::Hash;
+use solana_signature::Signature;
 use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction_error::TransactionError;
@@ -343,6 +344,8 @@ pub struct SvmChain<'a> {
     pub sent_signatures: Vec<solana_signature::Signature>,
     pub failed_status_lag: Cell<usize>,
     pub height_delay: std::time::Duration,
+    /// Every sent transaction lands and fails with this error instead of executing.
+    pub land_with_error: Option<String>,
     /// The cluster's genesis hash.
     pub genesis: [u8; 32],
     sent: bool,
@@ -375,6 +378,7 @@ impl<'a> SvmChain<'a> {
             sent_signatures: Vec::new(),
             failed_status_lag: Cell::new(0),
             height_delay: std::time::Duration::ZERO,
+            land_with_error: None,
             genesis: [42; 32],
             sent: false,
         }
@@ -448,6 +452,9 @@ impl Chain for SvmChain<'_> {
             self.drop_sends -= 1;
             return Ok(());
         }
+        if self.land_with_error.is_some() {
+            return Ok(());
+        }
         if let Some(before) = self.before_send.take() {
             self.svm
                 .send_transaction(before)
@@ -487,6 +494,18 @@ impl Chain for SvmChain<'_> {
     }
     fn rent(&self, space: usize) -> Result<u64, ChainError> {
         Ok(self.svm.minimum_balance_for_rent_exemption(space))
+    }
+
+    fn landed_error(&self, signature: &Signature) -> Result<Option<String>, ChainError> {
+        if self.sent_signatures.contains(signature)
+            && let Some(error) = &self.land_with_error
+        {
+            return Ok(Some(error.clone()));
+        }
+        Ok(match self.svm.get_transaction(signature) {
+            Some(Err(failed)) => Some(format!("{:?}", failed.err)),
+            _ => None,
+        })
     }
 }
 

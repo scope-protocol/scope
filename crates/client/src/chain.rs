@@ -73,6 +73,13 @@ pub trait Chain {
     /// The cluster's genesis hash, which binds stealth confidential keys to one cluster.
     fn genesis_hash(&self) -> Result<[u8; 32], ChainError>;
     fn rent(&self, space: usize) -> Result<u64, ChainError>;
+
+    /// The error text of a transaction that landed (confirmed or better) and failed.
+    /// `None` when it succeeded or is not known to the node; a chain that cannot tell
+    /// keeps this default.
+    fn landed_error(&self, _signature: &Signature) -> Result<Option<String>, ChainError> {
+        Ok(None)
+    }
 }
 
 /// Cluster reads needed by recipient discovery and sweeping.
@@ -371,6 +378,19 @@ impl Chain for RpcChain {
     }
     fn rent(&self, space: usize) -> Result<u64, ChainError> {
         self.read(|| self.rpc().get_minimum_balance_for_rent_exemption(space))
+    }
+
+    fn landed_error(&self, signature: &Signature) -> Result<Option<String>, ChainError> {
+        let signatures = [*signature];
+        let statuses = self.read(|| self.rpc().get_signature_statuses_with_history(&signatures))?;
+        Ok(statuses
+            .value
+            .into_iter()
+            .next()
+            .flatten()
+            .filter(|status| status.satisfies_commitment(CommitmentConfig::confirmed()))
+            .and_then(|status| status.err)
+            .map(|err| format!("{err:?}")))
     }
 }
 
