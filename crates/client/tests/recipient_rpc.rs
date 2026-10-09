@@ -46,15 +46,19 @@ fn ui(account: &AccountData) -> Value {
         "rentEpoch":0, "space":account.data.len()})
 }
 
-#[test]
-fn scan_authenticates_payments_over_rpc_among_one_thousand_announcements() {
-    let h = Harness::new();
-    let alice = recipient(1, 2);
+/// Announcements and their token accounts: payment `i` is addressed to `owned` when
+/// `is_owned(i)`, else to a stranger.
+fn seed(
+    h: &Harness,
+    owned: &RecipientSecretKeys,
+    count: u64,
+    is_owned: impl Fn(u64) -> bool,
+) -> HashMap<Address, AccountData> {
     let foreign = recipient(2, 3);
     let template = h.svm.get_account(&h.source).expect("template");
     let mut accounts = HashMap::new();
-    for i in 0..1_000_u64 {
-        let recipient = if i == 999 { &alice } else { &foreign };
+    for i in 0..count {
+        let recipient = if is_owned(i) { owned } else { &foreign };
         let mut secret = [3; 32];
         secret[..8].copy_from_slice(&(i * 8 + 1).to_le_bytes());
         let sent = derive_payment_with_ephemeral(
@@ -113,14 +117,40 @@ fn scan_authenticates_payments_over_rpc_among_one_thousand_announcements() {
             data: vec![0; 1_000],
         },
     );
+    accounts
+}
+
+#[derive(Default, Debug)]
+struct Calls {
+    returned: usize,
+    single_reads: usize,
+    multi_calls: usize,
+    largest_multi: usize,
+}
+
+/// A JSON-RPC node over `accounts`; the `fail_multi`th getMultipleAccounts call (from 1)
+/// answers with an error.
+struct Node {
+    url: String,
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<Calls>,
+}
+
+impl Node {
+    fn finish(self) -> Calls {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread.join().expect("server")
+    }
+}
+
+fn serve(accounts: HashMap<Address, AccountData>, fail_multi: Option<usize>) -> Node {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listen");
     listener.set_nonblocking(true).expect("nonblocking");
     let url = format!("http://{}", listener.local_addr().expect("address"));
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = Arc::clone(&stop);
-    let server = std::thread::spawn(move || {
-        let mut returned = 0;
-        let mut reads = 0;
+    let thread = std::thread::spawn(move || {
+        let mut calls = Calls::default();
         while !stopping.load(Ordering::Relaxed) {
             let mut stream = match listener.accept() {
                 Ok((stream, _)) => stream,
@@ -153,7 +183,7 @@ fn scan_authenticates_payments_over_rpc_among_one_thousand_announcements() {
             let mut bytes = vec![0; length];
             reader.read_exact(&mut bytes).expect("body");
             let request: Value = serde_json::from_slice(&bytes).expect("json");
-            let result = match request["method"].as_str().expect("method") {
+            let response = match request["method"].as_str().expect("method") {
                 "getGenesisHash" => {
                     json!(solana_message::Hash::new_from_array([42; 32]).to_string())
                 }
@@ -183,11 +213,11 @@ fn scan_authenticates_payments_over_rpc_among_one_thousand_announcements() {
                         })
                         .map(|(address, a)| json!({"pubkey":address.to_string(), "account":ui(a)}))
                         .collect();
-                    returned = rows.len();
+                    calls.returned = rows.len();
                     json!(rows)
                 }
                 "getAccountInfo" => {
-                    reads += 1;
+                    calls.single_reads += 1;
                     let address: Address = request["params"][0]
                         .as_str()
                         .expect("address")
@@ -195,29 +225,100 @@ fn scan_authenticates_payments_over_rpc_among_one_thousand_announcements() {
                         .expect("pubkey");
                     json!({"context":{"slot":1}, "value":accounts.get(&address).map(ui)})
                 }
+                "getMultipleAccounts" => {
+                    calls.multi_calls += 1;
+                    let keys = request["params"][0].as_array().expect("keys");
+                    calls.largest_multi = calls.largest_multi.max(keys.len());
+                    if fail_multi == Some(calls.multi_calls) {
+                        let body = serde_json::to_vec(&json!({"jsonrpc":"2.0", "id":request["id"],
+                            "error":{"code":-32005, "message":"node is unhealthy"}}))
+                        .expect("error");
+                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).expect("headers");
+                        stream.write_all(&body).expect("error body");
+                        continue;
+                    }
+                    let rows: Vec<_> = keys
+                        .iter()
+                        .map(|k| {
+                            let address: Address =
+                                k.as_str().expect("key").parse().expect("pubkey");
+                            accounts.get(&address).map(ui)
+                        })
+                        .collect();
+                    json!({"context":{"slot":1}, "value":rows})
+                }
                 other => panic!("unexpected RPC: {other}"),
             };
-            let response =
-                serde_json::to_vec(&json!({"jsonrpc":"2.0", "id":request["id"], "result":result}))
-                    .expect("response");
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",response.len()).expect("headers");
-            stream.write_all(&response).expect("response");
+            let body = serde_json::to_vec(
+                &json!({"jsonrpc":"2.0", "id":request["id"], "result":response}),
+            )
+            .expect("response");
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).expect("headers");
+            stream.write_all(&body).expect("response");
         }
-        (returned, reads)
+        calls
     });
-    let chain = RpcChain::from(RpcClient::new(url));
+    Node { url, stop, thread }
+}
+
+#[test]
+fn scan_authenticates_payments_over_rpc_among_one_thousand_announcements() {
+    let h = Harness::new();
+    let alice = recipient(1, 2);
+    let node = serve(seed(&h, &alice, 1_000, |i| i == 999), None);
+    let chain = RpcChain::from(RpcClient::new(node.url.clone()));
     let start = Instant::now();
     let result = scan::scan(&chain, &alice, None);
-    stop.store(true, Ordering::Relaxed);
-    let (returned, reads) = server.join().expect("server");
+    let elapsed = start.elapsed();
+    let calls = node.finish();
     let report = result.expect("RPC scan");
     assert_eq!(report.payments.len(), 1);
     assert_eq!(report.payments[0].amount, 123);
     assert!(report.skipped.is_empty());
-    assert_eq!(returned, 1_000);
-    assert!((1..100).contains(&reads));
-    println!(
-        "1,000 seeded announcements, {reads} source reads, scan {:?}",
-        start.elapsed()
+    assert_eq!(calls.returned, 1_000);
+    assert_eq!(calls.single_reads, 0);
+    assert_eq!(calls.multi_calls, 1);
+    println!("1,000 seeded announcements, {calls:?}, scan {elapsed:?}");
+}
+
+#[test]
+fn scan_reads_candidate_accounts_in_batches_of_one_hundred() {
+    let h = Harness::new();
+    let alice = recipient(1, 2);
+    let node = serve(seed(&h, &alice, 250, |_| true), None);
+    let chain = RpcChain::from(RpcClient::new(node.url.clone()));
+    let report = scan::scan(&chain, &alice, None).expect("RPC scan");
+    let calls = node.finish();
+    assert_eq!(report.payments.len(), 250);
+    assert_eq!(calls.single_reads, 0);
+    assert_eq!(calls.multi_calls, 3);
+    assert_eq!(calls.largest_multi, 100);
+}
+
+#[test]
+fn a_failed_batch_stops_the_scan_with_the_progress_made() {
+    let h = Harness::new();
+    let alice = recipient(1, 2);
+    let node = serve(seed(&h, &alice, 250, |_| true), Some(2));
+    let chain = RpcChain::from(RpcClient::new(node.url.clone()));
+    let mut reported = 0;
+    let error = scan::scan_with_results(&chain, &alice, None, |_| {
+        reported += 1;
+        Ok(())
+    })
+    .expect_err("second batch fails");
+    node.finish();
+    assert!(
+        matches!(
+            error,
+            scan::ScanError::Incomplete {
+                read: 100,
+                total: 250,
+                ..
+            }
+        ),
+        "{error}"
     );
+    assert!(error.to_string().contains("after reading 100 of 250"));
+    assert_eq!(reported, 100);
 }

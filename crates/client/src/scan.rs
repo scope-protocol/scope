@@ -41,7 +41,18 @@ pub enum ScanError {
     Invalid { account: Address, why: String },
     #[error("writing scan results: {0}")]
     Output(#[source] std::io::Error),
+    /// Rows already reported are valid; the rest of the candidates were not read.
+    #[error("scan stopped after reading {read} of {total} candidate accounts: {source}")]
+    Incomplete {
+        read: usize,
+        total: usize,
+        #[source]
+        source: ChainError,
+    },
 }
+
+/// Candidate token accounts per `getMultipleAccounts` call, the RPC maximum.
+pub const ACCOUNT_BATCH: usize = 100;
 
 #[derive(Debug)]
 pub struct ScanReport {
@@ -75,22 +86,113 @@ pub fn scan_with_results<C: RecipientChain>(
     let genesis = chain.genesis_hash()?;
     let mut payments = Vec::new();
     let mut skipped = Vec::new();
-    for (address, account) in chain.announcements()? {
-        match inspect(chain, recipient, genesis, address, &account, mint) {
-            Ok(Some(payment)) => {
-                on_result(Ok(&payment.info)).map_err(ScanError::Output)?;
-                payments.push(payment.info);
+    let candidates: Vec<Candidate> = chain
+        .announcements()?
+        .into_iter()
+        .filter_map(|(address, account)| candidate(recipient, address, &account))
+        .collect();
+    let total = candidates.len();
+    let mut pending = candidates.into_iter();
+    let mut read = 0;
+    loop {
+        let batch: Vec<Candidate> = pending.by_ref().take(ACCOUNT_BATCH).collect();
+        if batch.is_empty() {
+            break;
+        }
+        let mut keys: Vec<Address> = Vec::with_capacity(batch.len());
+        for c in &batch {
+            if !keys.contains(&c.token_account) {
+                keys.push(c.token_account);
             }
-            Ok(None) => {}
-            Err(error @ ScanError::Invalid { .. }) => {
-                on_result(Err(&error)).map_err(ScanError::Output)?;
-                skipped.push(error);
+        }
+        let sources = chain
+            .accounts(&keys, Commitment::Confirmed)
+            .map_err(|source| ScanError::Incomplete {
+                read,
+                total,
+                source,
+            })?;
+        read += batch.len();
+        for c in batch {
+            let Some(source) = keys
+                .iter()
+                .position(|k| *k == c.token_account)
+                .and_then(|i| sources.get(i))
+                .cloned()
+                .flatten()
+            else {
+                continue;
+            };
+            match decode_source(c.info(), c.payment, genesis, source, mint) {
+                Ok(Some(payment)) => {
+                    on_result(Ok(&payment.info)).map_err(ScanError::Output)?;
+                    payments.push(payment.info);
+                }
+                Ok(None) => {}
+                Err(error @ ScanError::Invalid { .. }) => {
+                    on_result(Err(&error)).map_err(ScanError::Output)?;
+                    skipped.push(error);
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
         }
     }
     payments.sort_by_key(|p| p.announcement);
     Ok(ScanReport { payments, skipped })
+}
+
+/// An announcement that is canonical and addressed to this recipient by its view tag; the
+/// token account behind it is not read yet.
+struct Candidate {
+    announcement: Address,
+    token_account: Address,
+    payer: Address,
+    ephemeral: [u8; 32],
+    payment: RecoveredPayment,
+}
+
+impl Candidate {
+    fn info(&self) -> PaymentInfo {
+        PaymentInfo {
+            announcement: self.announcement,
+            token_account: self.token_account,
+            payer: self.payer,
+            mint: Address::default(),
+            ephemeral: self.ephemeral,
+            amount: 0,
+            public_amount: 0,
+        }
+    }
+}
+
+fn candidate(
+    recipient: &RecipientSecretKeys,
+    address: Address,
+    account: &AccountData,
+) -> Option<Candidate> {
+    if account.owner != program_id() || account.lamports == 0 {
+        return None;
+    }
+    let announcement = Announcement::from_bytes(&account.data).ok()?;
+    let payer = Address::new_from_array(announcement.payer);
+    let token_account = token_account_address(&payer, &announcement.ephemeral);
+    if announcement_address(&token_account) != (address, announcement.bump) {
+        return None;
+    }
+    let note = PaymentAnnouncement {
+        ephemeral_public_key: announcement.ephemeral,
+        discovery_tag: announcement.view_tag,
+    };
+    let Ok(Some(payment)) = recover_payment(recipient, &note) else {
+        return None;
+    };
+    Some(Candidate {
+        announcement: address,
+        token_account,
+        payer,
+        ephemeral: announcement.ephemeral,
+        payment,
+    })
 }
 
 pub(crate) fn inspect<C: RecipientChain>(
@@ -101,42 +203,13 @@ pub(crate) fn inspect<C: RecipientChain>(
     account: &AccountData,
     mint: Option<&Address>,
 ) -> Result<Option<OwnedPayment>, ScanError> {
-    if account.owner != program_id() || account.lamports == 0 {
-        return Ok(None);
-    }
-    let Ok(announcement) = Announcement::from_bytes(&account.data) else {
+    let Some(c) = candidate(recipient, address, account) else {
         return Ok(None);
     };
-    let payer = Address::new_from_array(announcement.payer);
-    let token_account = token_account_address(&payer, &announcement.ephemeral);
-    if announcement_address(&token_account) != (address, announcement.bump) {
-        return Ok(None);
-    }
-    let note = PaymentAnnouncement {
-        ephemeral_public_key: announcement.ephemeral,
-        discovery_tag: announcement.view_tag,
-    };
-    let Ok(Some(payment)) = recover_payment(recipient, &note) else {
+    let Some(source) = chain.account(&c.token_account, Commitment::Confirmed)? else {
         return Ok(None);
     };
-    let Some(source) = chain.account(&token_account, Commitment::Confirmed)? else {
-        return Ok(None);
-    };
-    decode_source(
-        PaymentInfo {
-            announcement: address,
-            token_account,
-            payer,
-            mint: Address::default(),
-            ephemeral: announcement.ephemeral,
-            amount: 0,
-            public_amount: 0,
-        },
-        payment,
-        genesis,
-        source,
-        mint,
-    )
+    decode_source(c.info(), c.payment, genesis, source, mint)
 }
 
 pub(crate) fn decode_source(

@@ -324,6 +324,8 @@ pub struct SvmChain<'a> {
     pub svm: &'a mut LiteSVM,
     height: Cell<u64>,
     pub account_reads: Cell<usize>,
+    /// Calls to `accounts`, each one round trip.
+    pub account_batches: Cell<usize>,
     /// Sends to swallow before executing any, to model lost transactions.
     pub drop_sends: usize,
     /// Model a source that has not appeared in finalized reads yet.
@@ -356,6 +358,7 @@ impl<'a> SvmChain<'a> {
             svm,
             height: Cell::new(0),
             account_reads: Cell::new(0),
+            account_batches: Cell::new(0),
             drop_sends: 0,
             finalized_missing_until_send: None,
             fail_finalized_after_send: false,
@@ -413,6 +416,18 @@ impl Chain for SvmChain<'_> {
                 lamports: a.lamports,
                 data: a.data,
             }))
+    }
+
+    fn accounts(
+        &self,
+        addresses: &[Address],
+        commitment: Commitment,
+    ) -> Result<Vec<Option<AccountData>>, ChainError> {
+        self.account_batches.set(self.account_batches.get() + 1);
+        addresses
+            .iter()
+            .map(|address| self.account(address, commitment))
+            .collect()
     }
 
     fn blockhash(&self) -> Result<(Hash, u64), ChainError> {

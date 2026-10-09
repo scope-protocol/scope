@@ -1351,7 +1351,7 @@ fn scan_and_sweep_support_large_pending_balances() {
 }
 
 #[test]
-fn scan_streams_valid_payments_and_skipped_candidates_before_the_next_read() {
+fn scan_reports_each_batch_before_the_next_read() {
     let mut h = Harness::new();
     let alice = recipient(1);
     let (first, source, ae) = fund(&mut h, &alice, 3);
@@ -1363,7 +1363,7 @@ fn scan_streams_valid_payments_and_skipped_candidates_before_the_next_read() {
     let mut valid = Vec::new();
     let mut skipped = Vec::new();
     let report = scan::scan_with_results(&chain, &alice, None, |result| {
-        assert_eq!(chain.account_reads.get(), valid.len() + skipped.len() + 1);
+        assert_eq!(chain.account_batches.get(), 1);
         match result {
             Ok(payment) => valid.push(payment.announcement),
             Err(ScanError::Invalid { account, .. }) => skipped.push(*account),
@@ -1377,13 +1377,13 @@ fn scan_streams_valid_payments_and_skipped_candidates_before_the_next_read() {
     assert_eq!(report.payments.len(), 1);
     assert_eq!(report.skipped.len(), 1);
     assert_ne!(first, second);
-    chain.account_reads.set(0);
+    chain.account_batches.set(0);
     let error = scan::scan_with_results(&chain, &alice, None, |_| {
         Err(std::io::Error::other("output closed"))
     })
     .expect_err("stop on output error");
     assert!(matches!(error, ScanError::Output(_)));
-    assert_eq!(chain.account_reads.get(), 1);
+    assert_eq!(chain.account_batches.get(), 1);
 }
 
 #[test]

@@ -52,6 +52,18 @@ pub trait Chain {
         commitment: Commitment,
     ) -> Result<Option<AccountData>, ChainError>;
 
+    /// Several accounts in one round trip where the node allows it, in the order asked.
+    fn accounts(
+        &self,
+        addresses: &[Address],
+        commitment: Commitment,
+    ) -> Result<Vec<Option<AccountData>>, ChainError> {
+        addresses
+            .iter()
+            .map(|address| self.account(address, commitment))
+            .collect()
+    }
+
     /// A recent blockhash and the last block height at which a transaction using it can land.
     fn blockhash(&self) -> Result<(Hash, u64), ChainError>;
 
@@ -150,6 +162,36 @@ impl Chain for RpcChain {
             lamports: a.lamports,
             data: a.data,
         }))
+    }
+
+    fn accounts(
+        &self,
+        addresses: &[Address],
+        commitment: Commitment,
+    ) -> Result<Vec<Option<AccountData>>, ChainError> {
+        // getMultipleAccounts accepts at most 100 keys.
+        let mut found = Vec::with_capacity(addresses.len());
+        for chunk in addresses.chunks(100) {
+            let rows = self
+                .call(
+                    self.rpc()
+                        .get_multiple_accounts_with_commitment(chunk, config(commitment)),
+                )?
+                .value;
+            if rows.len() != chunk.len() {
+                return Err(ChainError(
+                    "getMultipleAccounts returned a short list".into(),
+                ));
+            }
+            found.extend(rows.into_iter().map(|row| {
+                row.map(|a| AccountData {
+                    owner: a.owner,
+                    lamports: a.lamports,
+                    data: a.data,
+                })
+            }));
+        }
+        Ok(found)
     }
 
     fn blockhash(&self) -> Result<(Hash, u64), ChainError> {
