@@ -1,6 +1,6 @@
 ---
 status: verified
-last_verified: 2026-10-07
+last_verified: 2026-10-09
 ---
 
 # Protocol
@@ -144,10 +144,11 @@ Accounts: payer (signer, writable), T, announcement (writable), System program. 
 | 10 | T has ConfidentialTransferAccount | 11 `MissingConfidentialExtension` |
 | 11 | `maximum_pending_balance_credit_counter` = 1 | 12 `CreditCapNotOne` |
 | 12 | non-confidential credits disabled | 13 `PublicCreditsEnabled` |
+| 12b | no CpiGuard lock on T | 25 `CpiGuardEnabled` |
 | 13 | announcement is the canonical PDA `["ann", T]` | 14 `AnnouncementAddressMismatch` |
 | 14 | announcement has no data and is owned by System | 15 `AnnouncementInUse` |
 
-Then the program transfers any rent deficit from the payer, allocates and assigns the announcement by System CPIs signed by the PDA (so a pre-funded address still works, V33), and writes the 68 bytes. Checks 7 to 12 make the anti-griefing settings a property of every announced account, not a client promise. The program does not check the mint, its approval policy (V72), the amount, or that T's owner is the P the recipient will derive; the scanner checks those (V64).
+Then the program transfers any rent deficit from the payer, allocates and assigns the announcement by System CPIs signed by the PDA (so a pre-funded address still works, V33), and writes the 68 bytes. Checks 7 to 12b make the anti-griefing settings a property of every announced account, not a client promise. The program does not check the mint, its approval policy (V72), the amount, or that T's owner is the P the recipient will derive; the scanner checks those (V64).
 
 ### reclaim
 
