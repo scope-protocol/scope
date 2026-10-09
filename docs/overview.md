@@ -39,7 +39,8 @@ They do not combine today. Configuring a confidential account needs the owner's 
 Each limit is stated once, in the doc that owns it:
 
 - Who learns what (the public, an RPC provider, the payer, a mint authority), and every limit on privacy or trust: payer visibility, the payer seeing where its own payment goes, merging re-linking payments, the one-time public amount when the payer shields treasury, headcount, scanning and registry lookups: [privacy.md](privacy.md).
-- Not every mint: stealth rows need a mint that approves new confidential accounts itself, which PYUSD and USDG do not, and USDC is not a Token-2022 mint (verification: V14). The rules per row kind: [payer.md](payer.md).
+- Not every mint: stealth rows need a mint that approves new confidential accounts itself, and no row works on a mint with a transfer fee or transfer hook extension. PYUSD and USDG carry both and do not auto-approve, and USDC is not a Token-2022 mint (verification: V14), so no major stablecoin works today; the first use is a mint that approves accounts and carries neither. The rules per row kind: [payer.md](payer.md).
+- Recipient privacy ends where the recipient acts: the first public withdrawal or spend to a known counterparty links the destination to them ([privacy.md](privacy.md)).
 - Rent refunds depend on the recipient emptying the one-time account: [protocol.md](protocol.md).
 - The derivations have had no external cryptographic review [open, Q1 in plan.md].
 - No wallet shows confidential balances [unverified]. The rail is useful only as far as confidential balances are adopted.
@@ -65,7 +66,7 @@ A stealth row locks 4,008,120 lamports of payer rent that comes back at the swee
 
 ## What is in scope?
 
-Build: one Pinocchio program (`announce`, `reclaim`, and `register` and `deregister` for an optional registry in sRFC-42's layout); one Rust CLI, `scope`, with `register` (the recipient's local key backup), `pay`, `publish`, `lookup`, `scan`, `sweep`, `export-sweep-key`, `disclose`, `verify` and `bench`; a privacy model; adversarial tests; a chaos harness for the payer engine; a devnet demo; a write-up posted to the sRFC-42 discussion.
+Build: one Pinocchio program (`announce`, `reclaim`, and `register` and `deregister` for an optional registry in sRFC-42's layout); one Rust CLI, `scope` (commands: [README.md](../README.md)); a privacy model; adversarial tests; a chaos harness for the payer engine; a devnet demo; a write-up posted to the sRFC-42 discussion.
 
 Do not build: wallet integration, a web app beyond a status page, our own proof system, unlinkable consolidation (Q8), an indexer beyond demo scale, an issuer approver (a one-page spec ships in the write-up, Q9), mobile.
 
