@@ -100,7 +100,9 @@ fn redact(text: &str, endpoint: &str) -> String {
         let mut from = 0;
         while let Some(start) = text[from..].find(scheme).map(|i| i + from) {
             let end = text[start..]
-                .find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '>' | ',' | ']'))
+                .find(|c: char| {
+                    c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '>' | ',' | ']')
+                })
                 .map_or(text.len(), |i| start + i);
             text.replace_range(start..end, "<rpc url>");
             from = start + "<rpc url>".len();
@@ -137,9 +139,8 @@ impl Failure {
                     r.is_timeout()
                         || r.is_connect()
                         || r.is_request()
-                        || r.status().is_some_and(|s| {
-                            s.as_u16() == 429 || s.is_server_error()
-                        })
+                        || r.status()
+                            .is_some_and(|s| s.as_u16() == 429 || s.is_server_error())
                 }
                 _ => false,
             };

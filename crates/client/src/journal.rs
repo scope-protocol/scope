@@ -27,7 +27,12 @@ pub enum Record {
         #[serde(default)]
         genesis: String,
         run_id: String,
+        /// Hash of the input copy's bytes, which guards the copy against edits.
         input_sha256: String,
+        /// Hash of the rows, mint and payer (`pay::input_key`), which the duplicate guard
+        /// compares; empty in runs that predate it.
+        #[serde(default)]
+        input_key: String,
         mint: String,
         source: String,
         payer: String,
@@ -394,7 +399,10 @@ mod tests {
         }
         let locked = dir("private-lock").join("runs");
         drop(lock_dir(&locked).expect("lock"));
-        let mode = std::fs::metadata(&locked).expect("meta").permissions().mode();
+        let mode = std::fs::metadata(&locked)
+            .expect("meta")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o700);
     }
 

@@ -1551,3 +1551,40 @@ fn a_run_records_its_cluster_and_refuses_another_one() {
     let e = pay::resume(chain, &h.payer, k, &run_id, &o).expect_err("resume");
     assert!(is_wrong_cluster(&e), "{e}");
 }
+
+#[test]
+fn the_duplicate_guard_sees_through_formatting_and_row_order() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 3);
+    let o = opts("canonical");
+    let (a, b, c) = (rs[0].account, rs[1].account, rs[2].account);
+    start(
+        &mut h,
+        &format!("recipient,amount\n{a},1\n{b},2\n{c},3\n"),
+        &o,
+    )
+    .expect("first run");
+    let variants = [
+        ("reordered", format!("{c},3\n{a},1\n{b},2\n")),
+        (
+            "crlf",
+            format!("recipient,amount\r\n{a},1\r\n{b},2\r\n{c},3\r\n"),
+        ),
+        ("no trailing newline", format!("{a},1\n{b},2\n{c},3")),
+        (
+            "comments and spaces",
+            format!("# March\n{a} , 1.0 # first\n\n  {b},2.000000\n{c},3\n\n"),
+        ),
+    ];
+    for (name, text) in variants {
+        let again = start(&mut h, &text, &o);
+        assert!(
+            matches!(again, Err(PayError::DuplicateInput { .. })),
+            "{name}: {again:?}"
+        );
+    }
+    // A different amount is a different input.
+    start(&mut h, &format!("{a},1\n{b},2\n{c},4\n"), &o).expect("different amounts");
+    // The same recipient listed twice is not the same input as listed once.
+    start(&mut h, &format!("{a},1\n{a},1\n{b},2\n{c},3\n"), &o).expect("a repeated row");
+}

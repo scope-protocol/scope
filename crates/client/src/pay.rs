@@ -540,8 +540,32 @@ fn verified_balance(
     Ok(claimed)
 }
 
-/// Finds an earlier run of the same input, by the hash in each journal's first record.
-fn earlier_run(runs_dir: &Path, input_sha256: &str) -> Result<Option<String>, PayError> {
+/// What makes two inputs the same payout: the rows' recipients and base-unit amounts,
+/// in any order, on one mint from one payer. Formatting, comments and row order do not
+/// change it; a different mint does.
+pub fn input_key(rows: &[Row], mint: &Address, payer: &Address) -> String {
+    let mut lines: Vec<String> = rows
+        .iter()
+        .map(|r| match &r.recipient {
+            Recipient::Plain(a) => format!("plain {a} {}", r.amount),
+            Recipient::Stealth(k) => format!("stealth {} {}", k.to_meta_address(), r.amount),
+        })
+        .collect();
+    lines.sort();
+    let text = format!(
+        "scope-input/v1\nmint {mint}\npayer {payer}\n{}",
+        lines.join("\n")
+    );
+    hex(&solana_sha256_hasher::hash(text.as_bytes()).to_bytes())
+}
+
+/// Finds an earlier run of the same input: by `input_key` in each journal's first
+/// record, or for a journal that predates it by the hash of the raw input bytes.
+fn earlier_run(
+    runs_dir: &Path,
+    input_key: &str,
+    input_sha256: &str,
+) -> Result<Option<String>, PayError> {
     let io = |e| PayError::Journal(JournalError::Io(runs_dir.to_path_buf(), e));
     let entries = match std::fs::read_dir(runs_dir) {
         Ok(entries) => entries,
@@ -556,9 +580,17 @@ fn earlier_run(runs_dir: &Path, input_sha256: &str) -> Result<Option<String>, Pa
         match journal::read_header(&dir) {
             Ok(Some(Record::Run {
                 run_id,
-                input_sha256: h,
+                input_sha256: raw,
+                input_key: key,
                 ..
-            })) if h == input_sha256 => return Ok(Some(run_id)),
+            })) if if key.is_empty() {
+                raw == input_sha256
+            } else {
+                key == input_key
+            } =>
+            {
+                return Ok(Some(run_id));
+            }
             Ok(_) => {}
             // A crash between creating the directory and the journal leaves nothing to pay twice.
             Err(JournalError::Io(_, e))
@@ -624,11 +656,12 @@ pub fn start<C: Chain>(
     let text = std::str::from_utf8(input_bytes).map_err(|_| InputError::Shape { line: 0 })?;
     let rows = input::parse(text, info.decimals)?;
     let input_sha256 = hex(&solana_sha256_hasher::hash(input_bytes).to_bytes());
+    let input_key = input_key(&rows, &mint, &payer.pubkey());
     // Held from the duplicate check until the new journal records its input hash, so two
     // runs of one input cannot race.
     let runs_lock = journal::lock_dir(&opts.runs_dir)?;
     if !opts.again
-        && let Some(run_id) = earlier_run(&opts.runs_dir, &input_sha256)?
+        && let Some(run_id) = earlier_run(&opts.runs_dir, &input_key, &input_sha256)?
     {
         return Err(PayError::DuplicateInput { run_id });
     }
@@ -671,6 +704,7 @@ pub fn start<C: Chain>(
         genesis: hex(&chain.genesis_hash()?),
         run_id: run_id.clone(),
         input_sha256,
+        input_key,
         mint: mint.to_string(),
         source: source.to_string(),
         payer: payer.pubkey().to_string(),
@@ -1361,5 +1395,50 @@ impl<C: Chain> Engine<'_, C> {
                 )));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(amounts: &[u64]) -> Vec<Row> {
+        amounts
+            .iter()
+            .map(|&amount| Row {
+                recipient: Recipient::Plain(Address::new_from_array([amount as u8; 32])),
+                amount,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_input_key_ignores_order_and_binds_mint_and_payer() {
+        let (mint, other_mint) = (Address::new_unique(), Address::new_unique());
+        let (payer, other_payer) = (Address::new_unique(), Address::new_unique());
+        let mut shuffled = rows(&[1, 2, 3]);
+        shuffled.reverse();
+        let key = input_key(&rows(&[1, 2, 3]), &mint, &payer);
+        assert_eq!(key, input_key(&shuffled, &mint, &payer));
+        assert_ne!(key, input_key(&rows(&[1, 2, 3]), &other_mint, &payer));
+        assert_ne!(key, input_key(&rows(&[1, 2, 3]), &mint, &other_payer));
+        assert_ne!(key, input_key(&rows(&[1, 2, 4]), &mint, &payer));
+        let twice = [rows(&[1]), rows(&[1]), rows(&[2, 3])].concat();
+        assert_ne!(key, input_key(&twice, &mint, &payer));
+    }
+
+    #[test]
+    fn a_journal_without_an_input_key_still_matches_on_the_raw_hash() {
+        let runs = std::env::temp_dir().join(format!("scope-earlier-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&runs);
+        let dir = runs.join("ab");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let old = r#"{"t":"run","run_id":"ab","input_sha256":"beef","mint":"m","source":"s","payer":"p","order":[0]}"#;
+        std::fs::write(dir.join(journal::JOURNAL), format!("{old}\n")).expect("journal");
+        assert_eq!(
+            earlier_run(&runs, "key", "beef").expect("read"),
+            Some("ab".into())
+        );
+        assert_eq!(earlier_run(&runs, "key", "cafe").expect("read"), None);
     }
 }
