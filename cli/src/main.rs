@@ -8,6 +8,7 @@ use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
 use scope_client::{
     chain::RpcChain,
+    history,
     pay::{self, PayOptions, SourceKeys},
     receipt, scan, sweep,
 };
@@ -39,8 +40,12 @@ enum Command {
     Publish(PublishArgs),
     /// Print the meta-addresses wallets published, fetched in one query.
     Lookup(LookupArgs),
+    /// Print your meta-address from the key backup.
+    MetaAddress(MetaAddressArgs),
     /// Find payments addressed to you.
     Scan(ScanArgs),
+    /// List payments to you from transaction history, including swept ones.
+    Recover(RecoverArgs),
     /// Move a found payment into a fresh account of your own.
     Sweep(SweepArgs),
     #[command(about = "Export one sweep's owner as a private Solana keypair file.")]
@@ -78,6 +83,29 @@ struct RegisterArgs {
     /// Encrypt the new backup to this age public recipient (requires age).
     #[arg(long)]
     encrypt_to: Option<String>,
+    /// Age identity file; decrypts the new backup to check it can be read back.
+    #[arg(long, requires = "encrypt_to")]
+    verify_identity: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct MetaAddressArgs {
+    #[command(flatten)]
+    keys: RecipientKeys,
+}
+
+#[derive(Debug, Args)]
+struct RecoverArgs {
+    #[command(flatten)]
+    keys: RecipientKeys,
+    #[arg(long, default_value = "http://127.0.0.1:8899")]
+    url: String,
+    /// Program transactions to examine, newest first.
+    #[arg(long, default_value_t = history::DEFAULT_LIMIT)]
+    limit: usize,
+    /// Stop at this signature; earlier transactions are not examined.
+    #[arg(long)]
+    since: Option<solana_signature::Signature>,
 }
 
 #[derive(Debug, Args)]
@@ -89,15 +117,40 @@ struct ScanArgs {
     /// Show payments for only this mint.
     #[arg(long)]
     mint: Option<Address>,
+    /// Hide payments below this many base units.
+    #[arg(long, default_value_t = 0)]
+    min_amount: u64,
+    /// Hide payments from this payer; repeat for several.
+    #[arg(long = "ignore-payer")]
+    ignore_payer: Vec<Address>,
+    /// Add each payment's signature, looked up in transaction history (one extra query each).
+    #[arg(long)]
+    with_signature: bool,
 }
 
 #[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("target").required(true).args(["announcement", "all"])))]
 struct SweepArgs {
     #[command(flatten)]
     keys: RecipientKeys,
     /// Announcement address reported by `scope scan`.
     #[arg(long)]
-    announcement: Address,
+    announcement: Option<Address>,
+    /// Sweep every payment `scan` finds, one transaction each, stopping at the first failure.
+    #[arg(long)]
+    all: bool,
+    /// With --all: only this mint.
+    #[arg(long, conflicts_with = "announcement")]
+    mint: Option<Address>,
+    /// With --all: skip payments below this many base units.
+    #[arg(long, conflicts_with = "announcement", default_value_t = 1)]
+    min_amount: u64,
+    /// With --all: skip payments from this payer; repeat for several.
+    #[arg(long = "ignore-payer", conflicts_with = "announcement")]
+    ignore_payer: Vec<Address>,
+    /// With --all: wait a random 0 to this many seconds between sweeps (30 to 300 suggested).
+    #[arg(long, conflicts_with = "announcement", default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=86_400))]
+    jitter_secs: u64,
     #[arg(long, default_value = "http://127.0.0.1:8899")]
     url: String,
     /// Highest priority price paid, micro-lamports per CU; the payer funds P for this cap.
@@ -132,6 +185,9 @@ struct ExportSweepKeyArgs {
         help = "New owner-only keypair file; existing files are never overwritten."
     )]
     output: String,
+    /// Write the keypair JSON encrypted to this age public recipient (requires age).
+    #[arg(long)]
+    encrypt_to: Option<String>,
 }
 
 fn recipient_chain(url: String) -> RpcChain {
@@ -143,32 +199,143 @@ fn recipient_chain(url: String) -> RpcChain {
 
 fn run_scan(args: ScanArgs) -> anyhow::Result<()> {
     let recipient = args.keys.load()?;
+    let chain = recipient_chain(args.url);
+    let filter = scan::PaymentFilter {
+        min_amount: args.min_amount,
+        ignore_payers: args.ignore_payer,
+    };
     let mut output = io::stdout().lock();
+    write!(
+        output,
+        "announcement\ttoken_account\tpayer\tmint\tamount_base_units\tpublic_amount_base_units\tephemeral"
+    )?;
     writeln!(
         output,
-        "announcement\ttoken_account\tmint\tamount_base_units\tpublic_amount_base_units\tephemeral"
+        "{}",
+        if args.with_signature {
+            "\tsignature"
+        } else {
+            ""
+        }
     )?;
     scan::scan_with_results(
-        &recipient_chain(args.url),
+        &chain,
         &recipient,
         args.mint.as_ref(),
         |result| match result {
+            Ok(p) if !filter.accepts(p) => Ok(()),
             Ok(p) => {
-                writeln!(
+                write!(
                     output,
-                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     p.announcement,
                     p.token_account,
+                    p.payer,
                     p.mint,
                     p.amount,
                     p.public_amount,
                     Address::new_from_array(p.ephemeral)
                 )?;
+                if args.with_signature {
+                    match history::payment_signature(&chain, &p.token_account) {
+                        Ok(Some(signature)) => write!(output, "\t{signature}")?,
+                        Ok(None) => write!(output, "\tunknown")?,
+                        Err(error) => {
+                            writeln!(
+                                io::stderr().lock(),
+                                "signature for {}: {error}",
+                                p.token_account
+                            )?;
+                            write!(output, "\tunknown")?;
+                        }
+                    }
+                }
+                writeln!(output)?;
                 output.flush()
             }
             Err(error) => writeln!(io::stderr().lock(), "skipped {error}"),
         },
     )?;
+    Ok(())
+}
+
+fn run_meta_address(args: MetaAddressArgs) -> anyhow::Result<()> {
+    println!(
+        "{}",
+        args.keys.load()?.derive_public_keys().to_meta_address()
+    );
+    Ok(())
+}
+
+fn run_recover(args: RecoverArgs) -> anyhow::Result<()> {
+    let recipient = args.keys.load()?;
+    let chain = recipient_chain(args.url);
+    let report = history::recover(
+        &chain,
+        &chain,
+        &recipient,
+        &history::RecoverOptions {
+            limit: args.limit,
+            since: args.since,
+        },
+    )?;
+    let mut output = io::stdout().lock();
+    writeln!(
+        output,
+        "payer\tmint\ttoken_account\tephemeral\tsignature\tdestination\tdestination_exists\tdestination_lamports\tdestination_base_units"
+    )?;
+    for p in &report.found {
+        let (exists, lamports, amount) = match &p.destination_state {
+            Some(d) => (
+                "yes",
+                d.lamports.to_string(),
+                d.amount.map_or("unknown".into(), |a| a.to_string()),
+            ),
+            None => ("no", "-".into(), "-".into()),
+        };
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{exists}\t{lamports}\t{amount}",
+            p.payer,
+            p.mint,
+            p.token_account,
+            Address::new_from_array(p.ephemeral),
+            p.signature,
+            p.destination
+        )?;
+    }
+    eprintln!(
+        "examined {} transactions, found {} payments",
+        report.examined,
+        report.found.len()
+    );
+    if report.unavailable > 0 {
+        eprintln!(
+            "warning: the node would not return {} listed transactions; use an RPC that keeps history for the program",
+            report.unavailable
+        );
+    }
+    Ok(())
+}
+
+fn run_register(args: RegisterArgs) -> anyhow::Result<()> {
+    let path = expand_home(&args.recipient_key)?;
+    let address = recipient_keys::create(&path, args.encrypt_to.as_deref())?;
+    println!("{address}");
+    eprintln!("recipient backup: {}", path.display());
+    match &args.verify_identity {
+        Some(identity) => {
+            recipient_keys::verify_readback(&path, &expand_home(identity)?, &address)
+                .context("the new backup does not decrypt with that identity; do not rely on it")?;
+            eprintln!("backup decrypted and matches the meta-address");
+        }
+        None if args.encrypt_to.is_some() => eprintln!(
+            "warning: the encrypted backup was not read back; check it with `scope meta-address --identity <file>` or pass --verify-identity"
+        ),
+        None => eprintln!(
+            "warning: the backup is a plaintext file; anyone who can read it can spend your payments (use --encrypt-to)"
+        ),
+    }
     Ok(())
 }
 
@@ -193,9 +360,105 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
                 .with_context(|| format!("opening recovery journal {}", path.display()))?,
         )
     };
-    let prepared = sweep::prepare(&chain, &recipient, &args.announcement, &opts)?;
-    let report = sweep::submit_with_recovery(&mut chain, prepared, &opts, |report| {
-        checkpoint(&mut io::stdout().lock(), journal.as_mut(), report)
+    let Some(announcement) = args.announcement else {
+        let filter = scan::PaymentFilter {
+            min_amount: args.min_amount,
+            ignore_payers: args.ignore_payer,
+        };
+        let found =
+            scan::scan_with_results(
+                &chain,
+                &recipient,
+                args.mint.as_ref(),
+                |result| match result {
+                    Ok(_) => Ok(()),
+                    Err(error) => writeln!(io::stderr().lock(), "skipped {error}"),
+                },
+            )?;
+        let announcements: Vec<Address> = found
+            .payments
+            .iter()
+            .filter(|p| filter.accepts(p))
+            .map(|p| p.announcement)
+            .collect();
+        // A dry run sends nothing, so there is no timing to hide.
+        let jitter = if opts.dry_run { 0 } else { args.jitter_secs };
+        return sweep_all(
+            &announcements,
+            jitter,
+            &mut random_up_to,
+            &mut std::thread::sleep,
+            &mut |announcement| {
+                println!("announcement\t{announcement}");
+                sweep_one(
+                    &mut chain,
+                    &recipient,
+                    announcement,
+                    &opts,
+                    journal.as_mut(),
+                )
+            },
+            &mut io::stdout().lock(),
+        );
+    };
+    sweep_one(
+        &mut chain,
+        &recipient,
+        &announcement,
+        &opts,
+        journal.as_mut(),
+    )
+}
+
+/// A uniform-enough value in `0..=max`; the bias of a modulo over 64 bits is irrelevant for a delay.
+fn random_up_to(max: u64) -> u64 {
+    getrandom::u64().map_or(max, |value| value % (max + 1))
+}
+
+/// Sweeps each announcement in order, waiting a random 0 to `jitter_secs` between them, and
+/// stops at the first failure after saying how far it got.
+fn sweep_all(
+    announcements: &[Address],
+    jitter_secs: u64,
+    random: &mut dyn FnMut(u64) -> u64,
+    sleep: &mut dyn FnMut(Duration),
+    sweep: &mut dyn FnMut(&Address) -> anyhow::Result<()>,
+    output: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let total = announcements.len();
+    if total == 0 {
+        writeln!(output, "no payments to sweep")?;
+        return Ok(());
+    }
+    for (done, announcement) in announcements.iter().enumerate() {
+        if done > 0 && jitter_secs > 0 {
+            let wait = random(jitter_secs);
+            writeln!(output, "waiting {wait}s before the next sweep")?;
+            output.flush()?;
+            sleep(Duration::from_secs(wait));
+        }
+        if let Err(error) = sweep(announcement) {
+            writeln!(
+                output,
+                "stopped: {done} of {total} swept, {announcement} failed"
+            )?;
+            return Err(error.context(format!("sweeping {announcement}")));
+        }
+    }
+    writeln!(output, "swept {total} of {total}")?;
+    Ok(())
+}
+
+fn sweep_one(
+    chain: &mut RpcChain,
+    recipient: &stealth_keygen::RecipientSecretKeys,
+    announcement: &Address,
+    opts: &sweep::SweepOptions,
+    mut journal: Option<&mut recovery::RecoveryJournal>,
+) -> anyhow::Result<()> {
+    let prepared = sweep::prepare(chain, recipient, announcement, opts)?;
+    let report = sweep::submit_with_recovery(chain, prepared, opts, |report| {
+        checkpoint(&mut io::stdout().lock(), journal.as_deref_mut(), report)
     })?;
     println!(
         "{}: {} base units to {}",
@@ -254,6 +517,7 @@ fn run_export_sweep_key(args: ExportSweepKeyArgs) -> anyhow::Result<()> {
         &recipient,
         &args.ephemeral.to_bytes(),
         &args.token_account.to_bytes(),
+        args.encrypt_to.as_deref(),
     )?;
     println!(
         "owner\t{}\ndestination\t{}",
@@ -356,8 +620,12 @@ struct DiscloseArgs {
     #[arg(long, default_value = "runs")]
     runs: PathBuf,
     /// As a stealth recipient: the payment transaction's signature.
-    #[arg(long, required_unless_present = "run")]
+    #[arg(long, required_unless_present_any = ["run", "token_account"])]
     signature: Option<String>,
+    /// As a stealth recipient without the signature: the payment's token account from `scan`,
+    /// `recover` or the recovery journal; the signature is found in transaction history.
+    #[arg(long, conflicts_with_all = ["run", "signature"])]
+    token_account: Option<Address>,
     #[command(flatten)]
     keys: RecipientKeys,
     /// Write the receipt to this new file, owner-only, instead of stdout.
@@ -397,7 +665,16 @@ fn run_disclose(args: DiscloseArgs) -> anyhow::Result<()> {
                 signature.parse().context("--signature")?;
             receipt::disclose_as_recipient(&chain, &args.keys.load()?, &signature)?
         }
-        (None, None) => bail!("--run or --signature"),
+        (None, None) => {
+            let token_account = args
+                .token_account
+                .context("--run, --signature or --token-account")?;
+            let signature = history::payment_signature(&chain, &token_account)?.with_context(|| {
+                format!("no payment transaction for {token_account} in this node's history; pass --signature")
+            })?;
+            eprintln!("payment signature: {signature}");
+            receipt::disclose_as_recipient(&chain, &args.keys.load()?, &signature)?
+        }
     };
     receipt::verify(&chain, &receipt)
         .context("the receipt does not verify against the chain; nothing written")?;
@@ -539,13 +816,9 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Pay(args) => run_pay(args),
-        Command::Register(args) => {
-            let path = expand_home(&args.recipient_key)?;
-            let address = recipient_keys::create(&path, args.encrypt_to.as_deref())?;
-            println!("{address}");
-            eprintln!("recipient backup: {}", path.display());
-            Ok(())
-        }
+        Command::Register(args) => run_register(args),
+        Command::MetaAddress(args) => run_meta_address(args),
+        Command::Recover(args) => run_recover(args),
         Command::Publish(args) => run_publish(args),
         Command::Lookup(args) => run_lookup(args),
         Command::Scan(args) => run_scan(args),
@@ -728,5 +1001,213 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    fn parse(args: &[&str]) -> Result<Command, clap::Error> {
+        Cli::try_parse_from(std::iter::once("scope").chain(args.iter().copied()))
+            .map(|cli| cli.command)
+    }
+
+    #[test]
+    fn sweep_takes_one_announcement_or_all_and_all_only_flags_need_all() {
+        let a = Address::new_unique().to_string();
+        assert!(parse(&["sweep"]).is_err());
+        assert!(parse(&["sweep", "--announcement", &a, "--all"]).is_err());
+        assert!(parse(&["sweep", "--announcement", &a, "--jitter-secs", "30"]).is_err());
+        assert!(parse(&["sweep", "--announcement", &a, "--min-amount", "5"]).is_err());
+        assert!(parse(&["sweep", "--announcement", &a, "--ignore-payer", &a]).is_err());
+        assert!(parse(&["sweep", "--announcement", &a, "--mint", &a]).is_err());
+        assert!(parse(&["sweep", "--all", "--jitter-secs", "86401"]).is_err());
+        let Command::Sweep(args) = parse(&[
+            "sweep",
+            "--all",
+            "--jitter-secs",
+            "120",
+            "--min-amount",
+            "1000",
+            "--ignore-payer",
+            &a,
+            "--ignore-payer",
+            &Address::default().to_string(),
+            "--mint",
+            &a,
+        ])
+        .expect("sweep --all") else {
+            panic!("not a sweep");
+        };
+        assert!(args.all && args.announcement.is_none());
+        assert_eq!((args.jitter_secs, args.min_amount), (120, 1000));
+        assert_eq!(args.ignore_payer.len(), 2);
+        let Command::Sweep(args) = parse(&["sweep", "--all"]).expect("defaults") else {
+            panic!("not a sweep");
+        };
+        assert_eq!((args.jitter_secs, args.min_amount), (0, 1));
+    }
+
+    #[test]
+    fn scan_filters_and_register_verification_parse() {
+        let a = Address::new_unique().to_string();
+        let Command::Scan(args) = parse(&[
+            "scan",
+            "--min-amount",
+            "7",
+            "--ignore-payer",
+            &a,
+            "--with-signature",
+        ])
+        .expect("scan") else {
+            panic!("not a scan");
+        };
+        assert_eq!(
+            (
+                args.min_amount,
+                args.ignore_payer.len(),
+                args.with_signature
+            ),
+            (7, 1, true)
+        );
+        assert!(parse(&["register", "--verify-identity", "id.txt"]).is_err());
+        assert!(
+            parse(&[
+                "register",
+                "--encrypt-to",
+                "age1x",
+                "--verify-identity",
+                "id.txt"
+            ])
+            .is_ok()
+        );
+        assert!(matches!(
+            parse(&["meta-address", "--identity", "id.txt"]),
+            Ok(Command::MetaAddress(_))
+        ));
+        assert!(matches!(
+            parse(&["recover", "--limit", "50"]),
+            Ok(Command::Recover(_))
+        ));
+    }
+
+    #[test]
+    fn disclose_needs_a_run_a_signature_or_a_token_account_and_only_one() {
+        let a = Address::new_unique().to_string();
+        let signature = solana_signature::Signature::default().to_string();
+        assert!(parse(&["disclose"]).is_err());
+        assert!(parse(&["disclose", "--token-account", &a]).is_ok());
+        assert!(parse(&["disclose", "--signature", &signature]).is_ok());
+        assert!(parse(&["disclose", "--signature", &signature, "--token-account", &a]).is_err());
+        assert!(
+            parse(&[
+                "disclose",
+                "--run",
+                "r",
+                "--row",
+                "0",
+                "--token-account",
+                &a
+            ])
+            .is_err()
+        );
+    }
+
+    fn addresses(n: usize) -> Vec<Address> {
+        (0..n).map(|_| Address::new_unique()).collect()
+    }
+
+    #[test]
+    fn sweep_all_waits_between_sweeps_with_the_drawn_delay() {
+        let found = addresses(3);
+        let mut waits = Vec::new();
+        let mut swept = Vec::new();
+        let mut draws = vec![17, 4].into_iter();
+        let mut bounds = Vec::new();
+        let mut output = Vec::new();
+        sweep_all(
+            &found,
+            300,
+            &mut |max| {
+                bounds.push(max);
+                draws.next().expect("draw")
+            },
+            &mut |d| waits.push(d),
+            &mut |a| {
+                swept.push(*a);
+                Ok(())
+            },
+            &mut output,
+        )
+        .expect("all swept");
+        assert_eq!(swept, found);
+        assert_eq!(waits, [Duration::from_secs(17), Duration::from_secs(4)]);
+        assert_eq!(bounds, [300, 300]);
+        assert!(
+            String::from_utf8(output)
+                .expect("text")
+                .ends_with("swept 3 of 3\n")
+        );
+    }
+
+    #[test]
+    fn sweep_all_without_jitter_never_sleeps_and_an_empty_list_is_fine() {
+        let found = addresses(2);
+        let mut output = Vec::new();
+        sweep_all(
+            &found,
+            0,
+            &mut |_| panic!("no draw without jitter"),
+            &mut |_| panic!("no sleep without jitter"),
+            &mut |_| Ok(()),
+            &mut output,
+        )
+        .expect("swept");
+        output.clear();
+        sweep_all(
+            &[],
+            60,
+            &mut |_| 0,
+            &mut |_| panic!("sleep"),
+            &mut |_| panic!("sweep"),
+            &mut output,
+        )
+        .expect("nothing to do");
+        assert_eq!(
+            String::from_utf8(output).expect("text"),
+            "no payments to sweep\n"
+        );
+    }
+
+    #[test]
+    fn sweep_all_stops_at_the_first_failure_and_says_how_far_it_got() {
+        let found = addresses(4);
+        let mut attempted = Vec::new();
+        let mut output = Vec::new();
+        let error = sweep_all(
+            &found,
+            10,
+            &mut |_| 1,
+            &mut |_| {},
+            &mut |a| {
+                attempted.push(*a);
+                if attempted.len() == 3 {
+                    anyhow::bail!("payment authority is not funded")
+                }
+                Ok(())
+            },
+            &mut output,
+        )
+        .expect_err("third sweep fails");
+        assert_eq!(attempted, found[..3]);
+        assert!(format!("{error:#}").contains("payment authority is not funded"));
+        let text = String::from_utf8(output).expect("text");
+        assert!(text.contains(&format!("stopped: 2 of 4 swept, {} failed", found[2])));
+        assert!(!text.contains("swept 4 of 4"));
+    }
+
+    #[test]
+    fn the_jitter_draw_stays_within_its_bound() {
+        for max in [0, 1, 30, 300] {
+            for _ in 0..200 {
+                assert!(random_up_to(max) <= max);
+            }
+        }
     }
 }

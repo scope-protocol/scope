@@ -33,6 +33,19 @@ pub struct PaymentInfo {
     pub public_amount: u64,
 }
 
+/// Which found payments a caller wants; the scan itself reads them all.
+#[derive(Clone, Debug, Default)]
+pub struct PaymentFilter {
+    pub min_amount: u64,
+    pub ignore_payers: Vec<Address>,
+}
+
+impl PaymentFilter {
+    pub fn accepts(&self, payment: &PaymentInfo) -> bool {
+        payment.amount >= self.min_amount && !self.ignore_payers.contains(&payment.payer)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ScanError {
     #[error(transparent)]
