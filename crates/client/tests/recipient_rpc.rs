@@ -13,6 +13,7 @@ use solana_rpc_client::{
     api::{config::RpcProgramAccountsConfig, filter::RpcFilterType},
     rpc_client::RpcClient,
 };
+use solana_signature::Signature;
 use solana_signer::Signer;
 use spl_token_2022_interface::{
     extension::{
@@ -120,12 +121,17 @@ fn seed(
     accounts
 }
 
+fn signature() -> Signature {
+    Signature::from([1; 64])
+}
+
 #[derive(Default, Debug)]
 struct Calls {
     returned: usize,
     single_reads: usize,
     multi_calls: usize,
     largest_multi: usize,
+    signature_query: Option<Value>,
 }
 
 /// A JSON-RPC node over `accounts`; the `fail_multi`th getMultipleAccounts call (from 1)
@@ -247,6 +253,16 @@ fn serve(accounts: HashMap<Address, AccountData>, fail_multi: Option<usize>) -> 
                         .collect();
                     json!({"context":{"slot":1}, "value":rows})
                 }
+                "getSignaturesForAddress" => {
+                    calls.signature_query = Some(request["params"].clone());
+                    json!([
+                        {"signature": signature().to_string(), "slot": 7, "err": null,
+                         "memo": null, "blockTime": null, "confirmationStatus": "finalized"},
+                        {"signature": Signature::from([2; 64]).to_string(), "slot": 6,
+                         "err": {"InstructionError": [0, {"Custom": 1}]}, "memo": null,
+                         "blockTime": null, "confirmationStatus": "finalized"}
+                    ])
+                }
                 other => panic!("unexpected RPC: {other}"),
             };
             let body = serde_json::to_vec(
@@ -321,4 +337,49 @@ fn a_failed_batch_stops_the_scan_with_the_progress_made() {
     );
     assert!(error.to_string().contains("after reading 100 of 250"));
     assert_eq!(reported, 100);
+}
+
+#[test]
+fn signatures_for_address_passes_the_query_and_reads_the_listing() {
+    use scope_client::{
+        chain::Commitment,
+        history::{SignatureEntry, SignatureHistory, SignatureQuery},
+    };
+    let h = Harness::new();
+    let node = serve(seed(&h, &recipient(1, 2), 0, |_| true), None);
+    let chain = RpcChain::from(RpcClient::new(node.url.clone()));
+    let before = Signature::from([5; 64]);
+    let address = Address::new_from_array([6; 32]);
+    let rows = chain
+        .signatures_for_address(
+            &address,
+            &SignatureQuery {
+                before: Some(&before),
+                until: None,
+                limit: 25,
+                commitment: Commitment::Finalized,
+            },
+        )
+        .expect("listing");
+    let calls = node.finish();
+    assert_eq!(
+        rows,
+        [
+            SignatureEntry {
+                signature: signature(),
+                slot: 7,
+                succeeded: true
+            },
+            SignatureEntry {
+                signature: Signature::from([2; 64]),
+                slot: 6,
+                succeeded: false
+            }
+        ]
+    );
+    let query = calls.signature_query.expect("query");
+    assert_eq!(query[0], address.to_string());
+    assert_eq!(query[1]["before"], before.to_string());
+    assert_eq!(query[1]["limit"], 25);
+    assert_eq!(query[1]["commitment"], "finalized");
 }

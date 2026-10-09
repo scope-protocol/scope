@@ -37,7 +37,9 @@ use spl_token_2022_interface::{
     },
     instruction::decode_instruction_data,
 };
-use stealth_keygen::{ConfidentialKeyMaterial, PaymentAnnouncement, RecipientSecretKeys};
+use stealth_keygen::{
+    ConfidentialKeyMaterial, PaymentAnnouncement, RecipientSecretKeys, RecoveredPayment,
+};
 
 pub const RECEIPT_VERSION: u8 = 1;
 
@@ -150,14 +152,14 @@ pub enum ReceiptError {
 
 /// The first confidential Transfer in `tx` and its validity proof's context; a payer
 /// transaction holds exactly one.
-struct Transfer {
-    source: Address,
-    mint: Address,
-    destination: Address,
-    context: BatchedGroupedCiphertext3HandlesValidityProofContext,
+pub(crate) struct Transfer {
+    pub(crate) source: Address,
+    pub(crate) mint: Address,
+    pub(crate) destination: Address,
+    pub(crate) context: BatchedGroupedCiphertext3HandlesValidityProofContext,
 }
 
-fn find_transfer(tx: &VersionedTransaction) -> Result<Transfer, ReceiptError> {
+pub(crate) fn find_transfer(tx: &VersionedTransaction) -> Result<Transfer, ReceiptError> {
     let keys = tx.message.static_account_keys();
     let instructions = tx.message.instructions();
     let program = |index: u8| keys.get(usize::from(index));
@@ -207,7 +209,7 @@ fn find_transfer(tx: &VersionedTransaction) -> Result<Transfer, ReceiptError> {
 
 /// The successful transaction `signature` names. It must be signed by that signature and
 /// all its others, so the node can misreport only whether it landed, not what it holds.
-fn fetch<A: TransactionArchive>(
+pub(crate) fn fetch<A: TransactionArchive>(
     archive: &A,
     signature: &Signature,
 ) -> Result<VersionedTransaction, ReceiptError> {
@@ -333,6 +335,33 @@ pub fn verify<A: TransactionArchive>(
     })
 }
 
+/// The key material of `payment` when `transfer` pays the ElGamal key it derives. A view-tag
+/// match alone is a 1-in-256 coincidence, so the derived key decides.
+pub(crate) fn payment_key(
+    transfer: &Transfer,
+    genesis: [u8; 32],
+    payment: &RecoveredPayment,
+) -> Result<ConfidentialKeyMaterial, ReceiptError> {
+    let material = payment
+        .derive_ct_ikm(&confidential::context(
+            genesis,
+            &transfer.mint,
+            &transfer.destination,
+        ))
+        .map_err(|_| ReceiptError::Key)?;
+    let (keys, _) =
+        confidential::derive_confidential_keys(&material).map_err(|_| ReceiptError::Key)?;
+    let destination_key: ElGamalPubkey = transfer
+        .context
+        .second_pubkey
+        .try_into()
+        .map_err(|_| ReceiptError::NoTransfer)?;
+    if *keys.pubkey() != destination_key {
+        return Err(ReceiptError::NotOurs);
+    }
+    Ok(material)
+}
+
 /// The recipient's receipt for a stealth payment, from the payment transaction alone:
 /// R and the view tag are in its `announce` data, the mint and one-time account in its
 /// transfer.
@@ -369,24 +398,7 @@ pub fn disclose_as_recipient<A: TransactionArchive>(
         let Ok(Some(payment)) = stealth_keygen::recover_payment(recipient, &note) else {
             return Err(ReceiptError::NotOurs);
         };
-        let material = payment
-            .derive_ct_ikm(&confidential::context(
-                genesis,
-                &transfer.mint,
-                &transfer.destination,
-            ))
-            .map_err(|_| ReceiptError::Key)?;
-        // A 1-in-256 view-tag match is not a payment to us; the derived key decides.
-        let (keys, _) =
-            confidential::derive_confidential_keys(&material).map_err(|_| ReceiptError::Key)?;
-        let destination_key: ElGamalPubkey = transfer
-            .context
-            .second_pubkey
-            .try_into()
-            .map_err(|_| ReceiptError::NoTransfer)?;
-        if *keys.pubkey() != destination_key {
-            return Err(ReceiptError::NotOurs);
-        }
+        let material = payment_key(&transfer, genesis, &payment)?;
         return Ok(Receipt::AccountKey {
             version: RECEIPT_VERSION,
             cluster: hex(&genesis),

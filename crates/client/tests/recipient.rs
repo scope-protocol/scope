@@ -2020,3 +2020,253 @@ fn restored_standard_owner_can_apply_and_spend_the_swept_balance() {
         Some(0)
     );
 }
+
+mod history {
+    use super::*;
+    use scope_client::{
+        address::program_id,
+        chain::ChainError,
+        history::{
+            self, DEFAULT_LIMIT, PAGE, RecoverOptions, SignatureEntry, SignatureHistory,
+            SignatureQuery,
+        },
+        receipt::{ArchivedTransaction, TransactionArchive},
+        sweep::{self, SweepOptions},
+        tx::v1_transaction,
+    };
+    use solana_signature::Signature;
+    use solana_transaction::versioned::VersionedTransaction;
+    use std::cell::Cell;
+
+    /// Transactions in the order they landed, answering like an archival node.
+    #[derive(Default)]
+    struct Archive {
+        txs: Vec<(Signature, VersionedTransaction)>,
+        listings: Cell<usize>,
+    }
+
+    impl Archive {
+        fn push(&mut self, tx: VersionedTransaction) -> Signature {
+            let signature = tx.signatures[0];
+            self.txs.push((signature, tx));
+            signature
+        }
+    }
+
+    impl SignatureHistory for Archive {
+        fn signatures_for_address(
+            &self,
+            address: &Address,
+            query: &SignatureQuery<'_>,
+        ) -> Result<Vec<SignatureEntry>, ChainError> {
+            self.listings.set(self.listings.get() + 1);
+            let newest_first = self
+                .txs
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, (_, tx))| tx.message.static_account_keys().contains(address))
+                .map(|(slot, (signature, _))| (slot, *signature));
+            let mut after_before =
+                newest_first.skip_while(|(_, s)| query.before.is_some_and(|b| b != s));
+            if query.before.is_some() {
+                after_before.next();
+            }
+            Ok(after_before
+                .take_while(|(_, s)| query.until != Some(s))
+                .take(query.limit)
+                .map(|(slot, signature)| SignatureEntry {
+                    signature,
+                    slot: slot as u64,
+                    succeeded: true,
+                })
+                .collect())
+        }
+    }
+
+    impl TransactionArchive for Archive {
+        fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+            Ok([42; 32])
+        }
+
+        fn transaction(&self, signature: &Signature) -> Result<ArchivedTransaction, ChainError> {
+            self.txs
+                .iter()
+                .find(|(s, _)| s == signature)
+                .map(|(_, tx)| ArchivedTransaction {
+                    transaction: tx.clone(),
+                    succeeded: true,
+                })
+                .ok_or_else(|| ChainError(format!("{signature}: not found")))
+        }
+    }
+
+    fn pay(
+        h: &mut Harness,
+        archive: &mut Archive,
+        recipient: &RecipientSecretKeys,
+        r: u8,
+    ) -> (Signature, Address) {
+        let (ixs, _, account, _) = payment_instructions(h, recipient, r, AMOUNT);
+        let tx = v1_transaction(&h.payer, &[], &ixs, h.svm.latest_blockhash());
+        h.svm.send_transaction(tx.clone()).expect("payment");
+        h.svm.expire_blockhash();
+        h.source_balance -= AMOUNT;
+        (archive.push(tx), account)
+    }
+
+    /// A transaction that touches `address` and nothing else of interest.
+    fn noise(h: &Harness, address: Address, lamports: u64) -> VersionedTransaction {
+        v1_transaction(
+            &h.payer,
+            &[],
+            &[solana_system_interface::instruction::transfer(
+                &h.payer.pubkey(),
+                &address,
+                lamports,
+            )],
+            h.svm.latest_blockhash(),
+        )
+    }
+
+    #[test]
+    fn recover_finds_swept_and_unswept_payments_and_ignores_others() {
+        let mut h = Harness::new();
+        let (alice, bob) = (recipient(1), recipient(2));
+        let mut archive = Archive::default();
+        let (first, first_account) = pay(&mut h, &mut archive, &alice, 3);
+        pay(&mut h, &mut archive, &bob, 4);
+        let (third, third_account) = pay(&mut h, &mut archive, &alice, 5);
+        let announcement = announcement_address(&first_account).0;
+        let mut chain = SvmChain::new(&mut h.svm);
+        let swept = sweep::sweep(
+            &mut chain,
+            &alice,
+            &announcement,
+            &SweepOptions {
+                poll: std::time::Duration::ZERO,
+                ..Default::default()
+            },
+        )
+        .expect("sweep");
+        assert!(
+            scan::scan(&chain, &alice, None)
+                .expect("scan")
+                .payments
+                .iter()
+                .all(|p| p.token_account != first_account)
+        );
+
+        let report = history::recover(
+            &chain,
+            &archive,
+            &alice,
+            &RecoverOptions {
+                limit: DEFAULT_LIMIT,
+                since: None,
+            },
+        )
+        .expect("recover");
+        assert_eq!(report.examined, 3);
+        assert_eq!(report.unavailable, 0);
+        let signatures: Vec<_> = report.found.iter().map(|f| f.signature).collect();
+        assert_eq!(
+            signatures,
+            [third, first],
+            "newest first, Bob's payment absent"
+        );
+        let (open, closed) = (&report.found[0], &report.found[1]);
+        assert_eq!(open.token_account, third_account);
+        assert_eq!(open.payer, h.payer.pubkey());
+        assert_eq!(open.mint, h.mint);
+        assert!(open.destination_state.is_none());
+        assert_eq!(closed.token_account, first_account);
+        assert_eq!(closed.destination, swept.destination);
+        assert_eq!(closed.destination_owner, swept.destination_owner);
+        let state = closed.destination_state.as_ref().expect("D exists");
+        assert_eq!(state.amount, Some(AMOUNT));
+        assert!(state.lamports > 0);
+        assert_eq!(
+            history::payment_signature(&archive, &first_account).expect("lookup"),
+            Some(first),
+            "the signature is found after reclaim closed the one-time account"
+        );
+    }
+
+    #[test]
+    fn recover_honors_the_limit_and_since() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let (first, _) = pay(&mut h, &mut archive, &alice, 3);
+        let (second, _) = pay(&mut h, &mut archive, &alice, 4);
+        let chain = SvmChain::new(&mut h.svm);
+        let run = |limit, since| {
+            history::recover(&chain, &archive, &alice, &RecoverOptions { limit, since })
+                .expect("recover")
+                .found
+                .iter()
+                .map(|f| f.signature)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(1, None), [second]);
+        assert_eq!(run(2, None), [second, first]);
+        assert_eq!(run(10, Some(first)), [second]);
+        assert!(run(0, None).is_empty());
+    }
+
+    #[test]
+    fn recover_pages_through_long_histories() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        pay(&mut h, &mut archive, &alice, 3);
+        for lamports in 1..=PAGE as u64 + 100 {
+            archive.push(noise(&h, program_id(), lamports));
+        }
+        let chain = SvmChain::new(&mut h.svm);
+        let find = |limit| {
+            archive.listings.set(0);
+            let report = history::recover(
+                &chain,
+                &archive,
+                &alice,
+                &RecoverOptions { limit, since: None },
+            )
+            .expect("recover");
+            (report.found.len(), report.examined, archive.listings.get())
+        };
+        assert_eq!(find(PAGE), (0, PAGE, 1), "the limit ends the walk");
+        assert_eq!(find(2 * PAGE), (1, PAGE + 101, 2));
+    }
+
+    #[test]
+    fn payment_signature_skips_earlier_transfers_to_the_address_and_reads_every_page() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let sent = derive_payment_with_ephemeral(
+            &alice.derive_public_keys(),
+            &EphemeralSecret::from_bytes([3; 32]),
+        )
+        .expect("payment");
+        let account =
+            token_account_address(&h.payer.pubkey(), &sent.announcement.ephemeral_public_key);
+        archive.push(noise(&h, account, 1));
+        let (signature, paid) = pay(&mut h, &mut archive, &alice, 3);
+        assert_eq!(paid, account);
+        for lamports in 2..=PAGE as u64 + 50 {
+            archive.push(noise(&h, account, lamports));
+        }
+        assert_eq!(
+            history::payment_signature(&archive, &account).expect("lookup"),
+            Some(signature)
+        );
+        assert_eq!(archive.listings.get(), 2);
+        let unrelated = Address::new_from_array([9; 32]);
+        assert_eq!(
+            history::payment_signature(&archive, &unrelated).expect("lookup"),
+            None
+        );
+    }
+}

@@ -7,6 +7,7 @@ pub mod address;
 pub mod chain;
 pub mod confidential;
 pub mod fees;
+pub mod history;
 pub mod input;
 pub mod ix;
 pub mod journal;

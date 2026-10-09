@@ -14,7 +14,7 @@ use solana_rpc_client::{
         },
         filter::{Memcmp, RpcFilterType},
     },
-    rpc_client::RpcClient,
+    rpc_client::{GetConfirmedSignaturesForAddress2Config, RpcClient},
 };
 use solana_signature::Signature;
 use solana_transaction::versioned::VersionedTransaction;
@@ -405,6 +405,33 @@ impl crate::receipt::TransactionArchive for RpcChain {
             transaction,
             succeeded,
         })
+    }
+}
+
+impl crate::history::SignatureHistory for RpcChain {
+    fn signatures_for_address(
+        &self,
+        address: &Address,
+        query: &crate::history::SignatureQuery<'_>,
+    ) -> Result<Vec<crate::history::SignatureEntry>, ChainError> {
+        let rows = self.call(self.rpc().get_signatures_for_address_with_config(
+            address,
+            GetConfirmedSignaturesForAddress2Config {
+                before: query.before.copied(),
+                until: query.until.copied(),
+                limit: Some(query.limit),
+                commitment: Some(config(query.commitment)),
+            },
+        ))?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(crate::history::SignatureEntry {
+                    signature: row.signature.parse().map_err(rpc_err)?,
+                    slot: row.slot,
+                    succeeded: row.err.is_none(),
+                })
+            })
+            .collect()
     }
 }
 
