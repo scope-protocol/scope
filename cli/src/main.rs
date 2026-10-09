@@ -7,7 +7,7 @@ mod recovery;
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
 use scope_client::{
-    chain::RpcChain,
+    chain::{Chain, RpcChain},
     pay::{self, PayOptions, SourceKeys},
     receipt, scan, sweep,
 };
@@ -291,16 +291,18 @@ struct PublishArgs {
     /// Remove the wallet's entry and return its rent instead.
     #[arg(long)]
     remove: bool,
-    #[arg(long, default_value = "http://127.0.0.1:8899")]
-    url: String,
+    /// RPC node; defaults to $SCOPE_URL, else http://127.0.0.1:8899.
+    #[arg(long)]
+    url: Option<String>,
 }
 
 #[derive(Debug, Args)]
 struct LookupArgs {
     #[arg(required = true)]
     wallets: Vec<Address>,
-    #[arg(long, default_value = "http://127.0.0.1:8899")]
-    url: String,
+    /// RPC node; defaults to $SCOPE_URL, else http://127.0.0.1:8899.
+    #[arg(long)]
+    url: Option<String>,
 }
 
 fn run_publish(args: PublishArgs) -> anyhow::Result<()> {
@@ -313,7 +315,7 @@ fn run_publish(args: PublishArgs) -> anyhow::Result<()> {
         scope_client::ix::register(&wallet.pubkey(), &args.keys.load()?.derive_public_keys())
     };
     let rpc = RpcClient::new_with_commitment(
-        args.url,
+        rpc_url(args.url),
         solana_commitment_config::CommitmentConfig::confirmed(),
     );
     let tx = scope_client::tx::v1_transaction(&wallet, &[], &[ix], rpc.get_latest_blockhash()?);
@@ -327,7 +329,8 @@ fn run_publish(args: PublishArgs) -> anyhow::Result<()> {
 }
 
 fn run_lookup(args: LookupArgs) -> anyhow::Result<()> {
-    for (wallet, keys) in scope_client::registry::lookup(&recipient_chain(args.url), &args.wallets)?
+    for (wallet, keys) in
+        scope_client::registry::lookup(&recipient_chain(rpc_url(args.url)), &args.wallets)?
     {
         match keys {
             Some(keys) => println!("{wallet}\t{}", keys.to_meta_address()),
@@ -353,8 +356,8 @@ struct DiscloseArgs {
     /// Payer keypair, with --run.
     #[arg(long, default_value = "~/.config/solana/id.json")]
     keypair: String,
-    #[arg(long, default_value = "runs")]
-    runs: PathBuf,
+    #[arg(long, default_value = DEFAULT_RUNS)]
+    runs: String,
     /// As a stealth recipient: the payment transaction's signature.
     #[arg(long, required_unless_present = "run")]
     signature: Option<String>,
@@ -363,8 +366,9 @@ struct DiscloseArgs {
     /// Write the receipt to this new file, owner-only, instead of stdout.
     #[arg(long)]
     out: Option<PathBuf>,
-    #[arg(long, default_value = "http://127.0.0.1:8899")]
-    url: String,
+    /// RPC node; defaults to $SCOPE_URL, else http://127.0.0.1:8899.
+    #[arg(long)]
+    url: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -377,14 +381,14 @@ struct VerifyArgs {
 }
 
 fn run_disclose(args: DiscloseArgs) -> anyhow::Result<()> {
-    let chain = recipient_chain(args.url);
+    let chain = recipient_chain(rpc_url(args.url));
     let receipt = match (args.run, args.signature) {
         (Some(run_id), _) => {
             let keypair_path = expand_home(&args.keypair)?;
             let payer = read_keypair_file(&keypair_path)
                 .map_err(|e| anyhow::anyhow!("{}: {e}", keypair_path.display()))?;
             let opts = PayOptions {
-                runs_dir: args.runs,
+                runs_dir: runs_dir(&args.runs)?,
                 max_price_per_cu: 0,
                 poll: Duration::from_secs(2),
                 again: false,
@@ -434,32 +438,44 @@ fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
 struct PayArgs {
     /// `recipient,amount` rows; recipient is a configured confidential token account (plain row)
     /// or a `scope:` meta-address (stealth row).
-    #[arg(long, required_unless_present_any = ["resume", "status"], conflicts_with_all = ["resume", "status"])]
+    #[arg(long, required_unless_present_any = ["resume", "status", "reclaim_all"], conflicts_with_all = ["resume", "status", "reclaim_all"])]
     input: Option<PathBuf>,
     /// Token-2022 mint with confidential transfers enabled.
-    #[arg(long, required_unless_present_any = ["resume", "status"], conflicts_with_all = ["resume", "status"])]
+    #[arg(long, required_unless_present_any = ["resume", "status", "reclaim_all"], conflicts_with_all = ["resume", "status", "reclaim_all"])]
     mint: Option<Address>,
     /// The payer's confidential token account to pay from, configured with the keys
     /// spl-token-cli derives from --keypair.
-    #[arg(long, required_unless_present_any = ["resume", "status"], conflicts_with_all = ["resume", "status"])]
+    #[arg(long, required_unless_present_any = ["resume", "status", "reclaim_all"], conflicts_with_all = ["resume", "status", "reclaim_all"])]
     source: Option<Address>,
     /// Continue an interrupted run.
-    #[arg(long, value_name = "RUN_ID", conflicts_with = "status")]
+    #[arg(long, value_name = "RUN_ID", conflicts_with_all = ["status", "reclaim_all", "dry_run"])]
     resume: Option<String>,
-    /// Show where each stealth row of a run stands: unpaid, unresolved, open, swept or reclaimed.
-    #[arg(long, value_name = "RUN_ID")]
+    /// Show a run's rows landed and state, plain rows, and where each stealth row stands:
+    /// unpaid, unresolved, open, swept or reclaimed.
+    #[arg(long, value_name = "RUN_ID", conflicts_with_all = ["reclaim_all", "dry_run"])]
     status: Option<String>,
     /// With --status, return the rent of every swept stealth row to the payer.
     #[arg(long, requires = "status")]
     reclaim: bool,
+    /// Return the rent of every swept one-time account this payer ever made, found on chain
+    /// and without a run journal.
+    #[arg(long, conflicts_with_all = ["dry_run", "yes"])]
+    reclaim_all: bool,
+    /// Run every preflight and print the plan and its cost; send nothing, write no journal.
+    #[arg(long, conflicts_with_all = ["resume", "status", "reclaim_all"])]
+    dry_run: bool,
+    /// Confirm a real run on mainnet-beta.
+    #[arg(long)]
+    yes: bool,
     /// Payer keypair: owns the source and pays every fee.
     #[arg(long, default_value = "~/.config/solana/id.json")]
     keypair: String,
-    #[arg(long, default_value = "http://127.0.0.1:8899")]
-    url: String,
+    /// RPC node; defaults to $SCOPE_URL, else http://127.0.0.1:8899.
+    #[arg(long)]
+    url: Option<String>,
     /// Directory holding one journal per run.
-    #[arg(long, default_value = "runs")]
-    runs: PathBuf,
+    #[arg(long, default_value = DEFAULT_RUNS)]
+    runs: String,
     /// Stop, resumable, when the sampled priority fee is above this, in micro-lamports per CU.
     #[arg(long, default_value_t = 1_000_000)]
     max_price: u64,
@@ -477,13 +493,32 @@ fn expand_home(path: &str) -> anyhow::Result<PathBuf> {
     }
 }
 
+const DEFAULT_URL: &str = "http://127.0.0.1:8899";
+const DEFAULT_RUNS: &str = "~/.local/share/scope/runs";
+
+/// `--url`, else `SCOPE_URL`, else the local validator.
+fn rpc_url(flag: Option<String>) -> String {
+    pick_url(flag, std::env::var("SCOPE_URL").ok())
+}
+
+fn pick_url(flag: Option<String>, env: Option<String>) -> String {
+    flag.or(env.filter(|url| !url.is_empty()))
+        .unwrap_or_else(|| DEFAULT_URL.into())
+}
+
+/// The journal directory as an absolute path, so a run can be resumed from anywhere.
+fn runs_dir(path: &str) -> anyhow::Result<PathBuf> {
+    let path = expand_home(path)?;
+    std::path::absolute(&path).with_context(|| format!("resolving {}", path.display()))
+}
+
 fn run_pay(args: PayArgs) -> anyhow::Result<()> {
     let keypair_path = expand_home(&args.keypair)?;
     let payer = read_keypair_file(&keypair_path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", keypair_path.display()))?;
-    let chain = RpcChain::from(RpcClient::new(args.url));
+    let chain = RpcChain::from(RpcClient::new(rpc_url(args.url)));
     let opts = PayOptions {
-        runs_dir: args.runs,
+        runs_dir: runs_dir(&args.runs)?,
         max_price_per_cu: args.max_price,
         poll: Duration::from_secs(2),
         again: args.again,
@@ -491,27 +526,42 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
     };
     if let Some(run_id) = args.status {
         let mut chain = chain;
-        let rows = if args.reclaim {
-            pay::reclaim(&mut chain, &payer, &run_id, &opts)?
-        } else {
-            pay::status(&chain, &payer, &run_id, &opts)?
-        };
-        println!("row\ttoken_account\tannouncement\tstate");
-        for s in rows {
-            let state = match s.state {
-                pay::StealthState::Unpaid => "unpaid",
-                pay::StealthState::Unresolved => "unresolved, resume the run",
-                pay::StealthState::Open => "open",
-                pay::StealthState::Swept => "swept",
-                pay::StealthState::Reclaimed => "reclaimed",
+        return print_status(&mut chain, &payer, &run_id, args.reclaim, &opts);
+    }
+    if args.reclaim_all {
+        let mut chain = chain;
+        println!("announcement\ttoken_account\toutcome");
+        for r in pay::reclaim_all(&mut chain, &payer, &opts)? {
+            let outcome = match r.outcome {
+                pay::ReclaimOutcome::Reclaimed => "reclaimed".to_string(),
+                pay::ReclaimOutcome::StillHolding => "still holds a balance".to_string(),
+                pay::ReclaimOutcome::Failed(why) => format!("failed: {why}"),
             };
-            println!(
-                "{}\t{}\t{}\t{state}",
-                s.row, s.token_account, s.announcement
+            println!("{}\t{}\t{outcome}", r.announcement, r.token_account);
+        }
+        return Ok(());
+    }
+    if args.dry_run {
+        let (input, mint, source) = (
+            args.input.context("--input")?,
+            args.mint.context("--mint")?,
+            args.source.context("--source")?,
+        );
+        let bytes =
+            std::fs::read(&input).with_context(|| format!("reading {}", input.display()))?;
+        let keys = SourceKeys::from_signer(&payer)?;
+        let plan = pay::dry_run(&chain, &payer, &keys, mint, source, &bytes, &opts)?;
+        print_plan(&plan, opts.max_price_per_cu);
+        if plan.payer_have < plan.payer_need {
+            bail!(
+                "the payer needs {} SOL and has {}",
+                pay::sol(plan.payer_need),
+                pay::sol(plan.payer_have)
             );
         }
         return Ok(());
     }
+    pay::mainnet_gate(&chain.genesis_hash()?, args.yes).map_err(anyhow::Error::msg)?;
     let report = match args.resume {
         Some(run_id) => {
             let keys = SourceKeys::from_signer(&payer)?;
@@ -532,6 +582,100 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
     println!("run {}: {} rows paid", report.run_id, report.paid.len());
     for p in &report.paid {
         println!("{}\t{}\t{}", p.row, p.recipient, p.signature);
+    }
+    Ok(())
+}
+
+fn print_plan(plan: &pay::DryRun, max_price: u64) {
+    let short = plan.payer_need.saturating_sub(plan.payer_have);
+    println!("cluster\t{}", plan.cluster);
+    println!(
+        "rows\t{} ({} plain, {} stealth)",
+        plan.rows, plan.plain_rows, plan.stealth_rows
+    );
+    println!(
+        "total\t{} ({} base units)",
+        pay::token_amount(plan.total, plan.decimals),
+        plan.total
+    );
+    println!(
+        "payer SOL\tneeds {}, has {}{}",
+        pay::sol(plan.payer_need),
+        pay::sol(plan.payer_have),
+        if short > 0 {
+            format!(", short by {}", pay::sol(short))
+        } else {
+            String::new()
+        }
+    );
+    println!(
+        "fee cap per row\t{} lamports plain, {} stealth, at {max_price} micro-lamports/CU",
+        plan.fee_cap_plain, plan.fee_cap_stealth
+    );
+    println!("fee price now\t{} micro-lamports/CU", plan.price);
+    println!("nothing sent, no journal written");
+}
+
+fn print_status(
+    chain: &mut RpcChain,
+    payer: &solana_keypair::Keypair,
+    run_id: &str,
+    reclaim: bool,
+    opts: &PayOptions,
+) -> anyhow::Result<()> {
+    let stealth = if reclaim {
+        pay::reclaim(chain, payer, run_id, opts)?
+    } else {
+        pay::status(chain, payer, run_id, opts)?
+    };
+    let summary = pay::summary(chain, payer, run_id, opts)?;
+    let state = match &summary.state {
+        pay::RunState::Done => "done".to_string(),
+        pay::RunState::Halted(why) => format!("halted: {why}"),
+        pay::RunState::Unfinished => format!("unfinished; scope pay --resume {run_id}"),
+    };
+    println!(
+        "run {run_id}: {}/{} rows landed, {state}",
+        summary.landed, summary.rows
+    );
+    println!(
+        "journal: {}",
+        opts.runs_dir
+            .join(run_id)
+            .join(scope_client::journal::JOURNAL)
+            .display()
+    );
+    if !summary.plain.is_empty() {
+        println!("row\trecipient\tstate\tsignature");
+        for p in &summary.plain {
+            let state = match p.state {
+                pay::PlainState::Unpaid => "unpaid",
+                pay::PlainState::Attempted => "unresolved, resume the run",
+                pay::PlainState::Landed => "landed",
+            };
+            println!(
+                "{}\t{}\t{state}\t{}",
+                p.row,
+                p.recipient,
+                p.signature.as_deref().unwrap_or("")
+            );
+        }
+    }
+    if !stealth.is_empty() {
+        println!("row\ttoken_account\tannouncement\tstate");
+        for s in stealth {
+            let state = match s.state {
+                pay::StealthState::Unpaid => "unpaid",
+                pay::StealthState::Unresolved => "unresolved, resume the run",
+                pay::StealthState::Open => "open",
+                pay::StealthState::Swept => "swept",
+                pay::StealthState::Reclaimed => "reclaimed",
+            };
+            println!(
+                "{}\t{}\t{}\t{state}",
+                s.row, s.token_account, s.announcement
+            );
+        }
     }
     Ok(())
 }
@@ -727,6 +871,71 @@ mod tests {
                 "0"
             ])
             .is_err()
+        );
+    }
+
+    fn parse_pay(args: &[&str]) -> Result<PayArgs, clap::Error> {
+        let mut argv = vec!["scope", "pay"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv).map(|cli| match cli.command {
+            Command::Pay(args) => args,
+            other => panic!("{other:?}"),
+        })
+    }
+
+    #[test]
+    fn pay_defaults_to_an_absolute_runs_directory_and_an_unset_url() {
+        let args = parse_pay(&["--status", "ab"]).expect("status");
+        assert_eq!(args.runs, "~/.local/share/scope/runs");
+        assert!(args.url.is_none());
+        let dir = runs_dir(&args.runs).expect("runs dir");
+        assert!(dir.is_absolute());
+        assert!(dir.ends_with(".local/share/scope/runs"));
+        assert!(runs_dir("runs").expect("relative").is_absolute());
+    }
+
+    #[test]
+    fn the_rpc_url_comes_from_the_flag_then_the_environment_then_localhost() {
+        let own = Some("https://flag".to_string());
+        let env = Some("https://env".to_string());
+        assert_eq!(pick_url(own.clone(), env.clone()), "https://flag");
+        assert_eq!(pick_url(None, env), "https://env");
+        assert_eq!(pick_url(None, Some(String::new())), DEFAULT_URL);
+        assert_eq!(pick_url(None, None), DEFAULT_URL);
+        assert_eq!(pick_url(own, None), "https://flag",);
+    }
+
+    #[test]
+    fn pay_flags_parse_and_conflict_where_they_must() {
+        let mint = Address::new_unique().to_string();
+        let source = Address::new_unique().to_string();
+        let new_run = ["--input", "in.csv", "--mint", &mint, "--source", &source];
+        let args = parse_pay(&new_run).expect("new run");
+        assert!(!args.dry_run && !args.yes && !args.reclaim_all);
+        let mut dry = new_run.to_vec();
+        dry.push("--dry-run");
+        assert!(parse_pay(&dry).expect("dry run").dry_run);
+        let mut yes = new_run.to_vec();
+        yes.push("--yes");
+        assert!(parse_pay(&yes).expect("yes").yes);
+        // A dry run needs the run's inputs, and excludes the other modes.
+        assert!(parse_pay(&["--dry-run"]).is_err());
+        assert!(parse_pay(&["--dry-run", "--resume", "ab"]).is_err());
+        assert!(parse_pay(&["--dry-run", "--status", "ab"]).is_err());
+        // Reclaim-all stands alone.
+        assert!(
+            parse_pay(&["--reclaim-all"])
+                .expect("reclaim all")
+                .reclaim_all
+        );
+        let mut both = new_run.to_vec();
+        both.push("--reclaim-all");
+        assert!(parse_pay(&both).is_err());
+        assert!(parse_pay(&["--reclaim-all", "--resume", "ab"]).is_err());
+        assert!(parse_pay(&["--reclaim-all", "--dry-run"]).is_err());
+        assert!(
+            parse_pay(&["--reclaim"]).is_err(),
+            "--reclaim needs --status"
         );
     }
 }
