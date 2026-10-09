@@ -48,6 +48,18 @@ pub fn program_elf() -> PathBuf {
             so.display()
         );
     }
+    // Feature and version edits change the binary without touching its sources. Cargo.lock
+    // is not compared: it also changes for unrelated crates, and CI always rebuilds.
+    for file in ["programs/scope/Cargo.toml", "crates/interface/Cargo.toml"] {
+        let changed = std::fs::metadata(root.join(file))
+            .and_then(|m| m.modified())
+            .expect("manifest");
+        assert!(
+            changed <= built,
+            "stale {}: {file} is newer; run `cargo build-sbf --manifest-path programs/scope/Cargo.toml`",
+            so.display()
+        );
+    }
     so
 }
 
