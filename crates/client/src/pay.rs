@@ -733,7 +733,11 @@ pub fn start<C: Chain>(
         derived_openings: true,
     })?;
     drop(runs_lock);
-    (opts.log)(&format!("run {run_id}: {} rows", rows.len()));
+    (opts.log)(&format!(
+        "run {run_id}: {} rows\njournal: {}",
+        rows.len(),
+        dir.join(journal::JOURNAL).display()
+    ));
     let mut engine = Engine {
         chain,
         payer,
@@ -956,6 +960,7 @@ pub fn resume<C: Chain>(
                 });
                 open = None;
             }
+            Record::Halted { .. } => {}
             Record::Done => {
                 return Ok(Report {
                     run_id: run_id.into(),
@@ -1104,6 +1109,97 @@ pub struct StealthStatus {
     pub token_account: Address,
     pub announcement: Address,
     pub state: StealthState,
+}
+
+/// Where a run as a whole stands, from its journal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunState {
+    Done,
+    /// The last thing the run recorded was an error it stopped on.
+    Halted(String),
+    /// Neither done nor halted: running now, or killed; resume to find out.
+    Unfinished,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlainState {
+    Unpaid,
+    /// Attempted and not recorded as landed; resuming settles it.
+    Attempted,
+    Landed,
+}
+
+#[derive(Debug)]
+pub struct PlainStatus {
+    pub row: usize,
+    pub recipient: Address,
+    pub state: PlainState,
+    pub signature: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct RunSummary {
+    pub rows: usize,
+    pub landed: usize,
+    pub state: RunState,
+    pub plain: Vec<PlainStatus>,
+}
+
+/// The run's row counts, its overall state and each plain row, read from the journal
+/// without locking it.
+pub fn summary<C: Chain>(
+    chain: &C,
+    payer: &Keypair,
+    run_id: &str,
+    opts: &PayOptions,
+) -> Result<RunSummary, PayError> {
+    let dir = opts.runs_dir.join(run_id);
+    let records = journal::read_unlocked(&dir)?;
+    let run = load_run(chain, payer, &dir, &records)?;
+    let mut landed: HashMap<usize, String> = HashMap::new();
+    let mut attempted = HashSet::new();
+    for r in &records {
+        match r {
+            Record::Landed { row, signature } => {
+                landed.insert(*row, signature.clone());
+            }
+            Record::Attempt { row, .. } => {
+                attempted.insert(*row);
+            }
+            _ => {}
+        }
+    }
+    let state = match records.last() {
+        Some(Record::Done) => RunState::Done,
+        Some(Record::Halted { reason }) => RunState::Halted(reason.clone()),
+        _ => RunState::Unfinished,
+    };
+    let plain = run
+        .rows
+        .iter()
+        .enumerate()
+        .filter_map(|(row, r)| match &r.recipient {
+            Recipient::Plain(recipient) => Some(PlainStatus {
+                row,
+                recipient: *recipient,
+                state: if landed.contains_key(&row) {
+                    PlainState::Landed
+                } else if attempted.contains(&row) {
+                    PlainState::Attempted
+                } else {
+                    PlainState::Unpaid
+                },
+                signature: landed.get(&row).cloned(),
+            }),
+            Recipient::Stealth(_) => None,
+        })
+        .collect();
+    Ok(RunSummary {
+        rows: run.rows.len(),
+        landed: landed.len(),
+        state,
+        plain,
+    })
 }
 
 /// Where each stealth row of run `run_id` stands. Reads the journal without locking it,
@@ -1458,7 +1554,31 @@ impl<C: Chain> Engine<'_, C> {
         )
     }
 
+    /// Runs the rows; an error that stops the run is journaled and reported with the path
+    /// and the command that resumes it.
     fn run(&mut self, order: &[usize], landed: &HashSet<usize>) -> Result<Report, PayError> {
+        let result = self.run_rows(order, landed);
+        if let Err(error) = &result {
+            if let PayError::Halted(why) = error {
+                let _ = self.journal.append(&Record::Halted {
+                    reason: why.clone(),
+                });
+            }
+            (self.opts.log)(&format!(
+                "run {} stopped: {error}\njournal: {}\nresume with: scope pay --resume {}",
+                self.run_id,
+                self.opts
+                    .runs_dir
+                    .join(&self.run_id)
+                    .join(journal::JOURNAL)
+                    .display(),
+                self.run_id
+            ));
+        }
+        result
+    }
+
+    fn run_rows(&mut self, order: &[usize], landed: &HashSet<usize>) -> Result<Report, PayError> {
         for &row in order.iter().filter(|r| !landed.contains(*r)) {
             self.pay_row(row)?;
         }

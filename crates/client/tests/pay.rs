@@ -1879,3 +1879,61 @@ fn a_dry_run_runs_the_same_preflights_as_a_real_run() {
         "{again:?}"
     );
 }
+
+#[test]
+fn the_run_summary_counts_rows_and_tells_done_from_halted_from_unfinished() {
+    use pay::RunState;
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 2);
+    let alice = stealth_recipient(51);
+    let text = format!(
+        "{}{},1\n",
+        input(&rs),
+        alice.derive_public_keys().to_meta_address()
+    );
+    let summary = |h: &mut Harness, o: &PayOptions, run_id: &str| {
+        pay::summary(&SvmChain::new(&mut h.svm), &h.payer, run_id, o).expect("summary")
+    };
+
+    // Killed after the first row: unfinished.
+    let o = opts("summary-killed");
+    let (mint, source) = (h.mint, h.source);
+    let killed = pay::start(
+        Killer::new(SvmChain::new(&mut h.svm), KillAt::Simulate(2)),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        mint,
+        source,
+        text.as_bytes(),
+        &o,
+    );
+    assert!(killed.is_err());
+    let run_id = only_run(&o);
+    let s = summary(&mut h, &o, &run_id);
+    assert_eq!((s.rows, s.landed), (3, 1));
+    assert_eq!(s.state, RunState::Unfinished);
+
+    // Halted by the rebuild cap, then resumed to done.
+    let o = opts("summary-halted");
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.drop_sends = usize::MAX;
+    let k = keys(&h.source_elgamal, &h.source_ae);
+    pay::start(chain, &h.payer, k, mint, source, text.as_bytes(), &o).expect_err("halts");
+    let run_id = only_run(&o);
+    let s = summary(&mut h, &o, &run_id);
+    assert!(
+        matches!(&s.state, RunState::Halted(why) if why.contains("3 attempts")),
+        "{:?}",
+        s.state
+    );
+    assert_eq!(s.landed, 0);
+    resume_run(&mut h, &o).expect("resume");
+    let s = summary(&mut h, &o, &run_id);
+    assert_eq!((s.rows, s.landed, s.state), (3, 3, RunState::Done));
+    assert_eq!(s.plain.len(), 2, "plain rows are listed");
+    assert!(
+        s.plain
+            .iter()
+            .all(|p| p.state == pay::PlainState::Landed && p.signature.is_some())
+    );
+}

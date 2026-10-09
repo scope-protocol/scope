@@ -58,6 +58,10 @@ pub enum Record {
         signature: String,
     },
     Done,
+    /// The run stopped on an error it cannot get past by itself; shown by `--status`.
+    Halted {
+        reason: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
