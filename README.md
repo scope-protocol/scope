@@ -4,7 +4,6 @@ Stealth Confidential Payments Engine: a confidential payout rail on Solana. A vi
 
 ## Status
 
-Built and tested in LiteSVM: the program, the payer engine, the recipient flow and receipts. Not deployed anywhere yet; devnet is next.
 What is built, what is next and what is open: [docs/plan.md](docs/plan.md).
 
 ## Quick look
@@ -52,7 +51,7 @@ One cargo workspace.
 | `crates/interface` | `scope-interface` | `no_std`, no dependencies: program id, announcement and registry entry layouts, instruction data, seeds, error codes, a read-only view of Token-2022 token accounts. Shared by the program and the client |
 | `crates/client` | `scope-client` | Address derivation, instruction and v1 transaction builders, payer engine and journal, recipient scan and sweep, receipts, registry lookup, RPC and LiteSVM (feature `litesvm`) backends, and spike binaries in `examples/` |
 | `crates/stealth-keygen` | `stealth-keygen` | Recipient keys, HKDF stealth derivation, raw-scalar signing, and protected account-scoped `ct_ikm`. Off-chain |
-| `cli` | `scope-cli`, binary `scope` | Argument parsing and output over `crates/client`: `register` (local recipient backup), `pay`, `publish`, `lookup`, `scan`, `sweep`, `export-sweep-key`, `disclose`, `verify`, and `bench` (a stub) |
+| `cli` | `scope-cli`, binary `scope` | Argument parsing and output over `crates/client`: `register` (local recipient backup), `meta-address`, `pay`, `publish`, `lookup`, `scan`, `recover`, `sweep`, `export-sweep-key`, `disclose`, `verify`, and `bench` (a stub). Exit codes: 0 done, 1 refused before sending, 2 bad arguments, 3 transient (retry or resume), 4 stopped after sending (inspect, then resume) |
 | `docs/` | | Start at [docs/README.md](docs/README.md) |
 
 The program and the client depend on `crates/interface`, which depends on nothing. `scope-client::confidential` turns the `ct_ikm` from `crates/stealth-keygen` into ElGamal and symmetric keys with the workspace ZK SDK.

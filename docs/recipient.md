@@ -1,12 +1,12 @@
 ---
 status: decided
-last_verified: 2026-10-09
+last_verified: 2026-10-10
 ---
 
 # Receiving with `scope`
 
 TL;DR: for a recipient of stealth payments. After reading you can create and back up your keys, optionally publish your meta-address, find payments (even after they were swept), sweep them into an account of your own and spend from it.
-Plain rows need none of this: they arrive in your own confidential token account. Payer-side commands are in [payer.md](payer.md), receipts in [audit.md](audit.md).
+Plain rows need none of this. Payer commands: [payer.md](payer.md); receipts: [audit.md](audit.md).
 
 ## Before you start
 
@@ -51,6 +51,7 @@ destination	<D>
 owner	<D_owner>
 payment_authority	<P>
 ephemeral	<R>
+token_account	<T>
 attempt_signature	<signature>
 ```
 
@@ -63,7 +64,7 @@ finalized_signature	<signature>
 rent reclaimed
 ```
 
-`swept` reads `simulated` on a dry run and `prepared amount` when the payment completed but this attempt's own success was not verified. Further lines report burned or remaining public balance, the rent outcome (`reclaimed`, `not reclaimed by this attempt; funds swept without cleanup` or `reclaim status unknown`) and, in the saved record, `finalized_signature` and `last_send_error`. A dry run says `predicted` where the real run says `remaining`.
+`swept` reads `simulated` on a dry run and `prepared amount` when this attempt's own success was not verified. Further lines report burned or remaining public balance and the rent outcome (`reclaimed`, `not reclaimed by this attempt; funds swept without cleanup` or `reclaim status unknown`).
 
 ## Flags
 
@@ -75,7 +76,7 @@ Every command that loads keys takes `--recipient-key` (default `~/.config/scope/
 | `register` | `--verify-identity <file>` | none | with `--encrypt-to`: decrypt the new file with this age identity and check it matches |
 | `publish` | `--keypair <file>` | `~/.config/solana/id.json` | wallet the entry is published under; signs and pays its rent |
 | `publish` | `--remove` | off | close the wallet's entry and return its rent |
-| `publish`, `scan`, `sweep`, `recover` | `--url <rpc>` | `http://127.0.0.1:8899` | RPC node |
+| every RPC command | `--url <rpc>` | `$SCOPE_URL`, else `http://127.0.0.1:8899` | RPC node |
 | `scan` | `--mint <address>` | all mints | show payments in this mint only |
 | `scan` | `--min-amount <base units>` | `0` | hide smaller payments |
 | `scan` | `--ignore-payer <address>` | none | hide a payer's payments; repeatable |
@@ -110,7 +111,6 @@ scope scan --recipient-key ./recipient.age --identity ./identity.txt --url <rpc-
 
 `register` warns on stderr about a plaintext backup, and about an encrypted one it did not read back (check it with `scope meta-address --identity <file>`). With `--verify-identity` it decrypts the file it wrote and fails unless the meta-address matches.
 
-Back up the key file and the recovery journal together (Recovery, below).
 
 ## Publishing
 
@@ -134,7 +134,7 @@ If the full transaction fails simulation, the sweep simulates a transfer-only ve
 
 The sweep resends one signed transaction while its outcome is unknown. Only a finalized failure or blockhash expiry allows a rebuild, at most two, each transfer-only, refreshing balances, mint policy, proofs, blockhash, rent deficit and price. A rebuild samples the current p75 price and refuses one above `--max-price`; a resend keeps its signed fee (verification: V65, V69). The payer funded P for three attempts at the 1,000,000 cap ([payer.md](payer.md)).
 
-`--timeout` starts after preparation and the first recovery record and bounds RPC calls, retry preparation and polling; no new send starts after it, but a sent transaction can still finalize. On timeout the sweep exits with "sweep completion has not been observed; check chain state before retrying" and the last recovery record (verification: V65).
+`--timeout` starts after preparation and the first recovery record; no new send starts after it, but a sent transaction can still finalize. On timeout the sweep exits with "sweep completion has not been observed; check chain state before retrying" and the last recovery record (verification: V65).
 
 Success is a finalized successful signature for this attempt, even if follow-up reads fail (they print `unknown`). Without it, the sweep counts as complete only when the one-time account is empty or closed and D is your authenticated account (verification: V69).
 
@@ -144,7 +144,7 @@ The recovery journal (default `<recipient-key>.sweeps.jsonl`) is a locked, owner
 
 Once an announcement is reclaimed (a full sweep does this itself), scan no longer lists that payment. Exact R plus the key backup rebuilds D_owner and D's keys, so keep the journal or the saved output.
 
-Without them, `scope recover` rebuilds the list from history. It walks the program's transactions newest first, finds each `announce`, applies the one-byte tag check, and keeps a payment only when the transaction's own confidential transfer pays the key derived for you. It needs an RPC that keeps transaction history for the program and examines `--limit` transactions (1,000 by default); raise the limit for older payments. Transactions the node lists but will not return are counted in a stderr warning. Tests use a fake history; no public RPC provider has been tried [unverified].
+Without them, `scope recover` rebuilds the list from history. It walks the program's transactions newest first, finds each `announce`, applies the one-byte tag check, and keeps a payment only when the transaction's own confidential transfer pays the key derived for you. It needs an RPC that keeps transaction history for the program and examines `--limit` transactions (1,000 by default); raise the limit for older payments. Tests use a fake history; no public RPC provider has been tried [unverified].
 
 ```sh
 scope recover --recipient-key ~/.config/scope/recipient.key --url <archival-rpc-url> --limit 5000

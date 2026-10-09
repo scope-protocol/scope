@@ -1,12 +1,22 @@
 ---
 status: decided
-last_verified: 2026-10-09
+last_verified: 2026-10-10
 ---
 
 # Decisions
 
 TL;DR: why SCOPE is built the way it is: append-only, newest first; each entry says what was decided, why, and what was rejected. Docs describe the present; this file holds the why.
 Entries before 2026-10-06 are in [decisions-archive.md](decisions-archive.md). Design history from before this repository is not kept here.
+
+## 2026-10-10 Reliability, recovery and the mint reality
+
+- **Q17 is `scope recover`, not a counter-derived destination.** The `announce` instruction stays in the payment transaction, and T follows from (payer, R), so a node that keeps the program's history lists every payment, swept or not. `disclose` finds its own signature the same way. Cost: up to `--limit` `getTransaction` calls; tested only against a fake archive (V88).
+- **The sweep applies D's pending balance.** Funds are spendable at once, at 3,402 bytes and 276,007 CU, 89% of the 310,000 limit. The limit stays: it sets P's funding, so raising it changes every fixed figure in payer.md. Revisit if a mint extension adds compute.
+- **One mint policy, and PYUSD and USDG are refused.** Both mainnet mints carry a 0 bps fee config and a hook with no program; SCOPE has no `TransferWithFee` path and passes no hook accounts. Building the fee path is out of scope (Q9 stays a spec); the first usable mint approves accounts and carries neither. A paused mint is refused up front; burn-only extensions are allowed, because the sweep's burn falls back to a transfer-only sweep.
+- **A row halts after three failed or expired attempts.** An attempt that lands with an error counts, so a prefunded one-time address still rebuilds (V76).
+- **The duplicate guard hashes parsed rows, the mint and the payer.** Formatting and order cannot slip a payroll past it; another mint's run is not a duplicate.
+- **Exit codes carry the next step:** 1 refused before sending, 3 retry or resume later, 4 stopped after sending.
+- **Registry instructions go as legacy transactions.** A 109-byte account needs no v1 header.
 
 ## 2026-10-09 Pre-deploy hardening
 
@@ -33,11 +43,3 @@ Entries before 2026-10-06 are in [decisions-archive.md](decisions-archive.md). D
 - **Send order stays random, recorded in the run header.** Deriving it from the run secret adds nothing the header does not already give resume. Rejected: deriving the order from the run secret.
 - **Prefunded one-time addresses are created anyway.** An expired attempt publishes T's address; anyone can then send it lamports, which makes CreateAccountWithSeed fail. The rebuild tops up, allocates and assigns instead. Rejected: halting, which would let one transfer of dust stop a run.
 - **Compute limits per shape and one funding rule for P.** The fee is paid on the header's CU limit, so each shape gets its own limit about 15% above measurement (V73), and the payer funds P with exactly what the sweep needs at the 1,000,000 micro-lamport cap (V74). Rejected: one 600,000 limit for everything, and a funding estimate the sweep did not share.
-
-## 2026-10-06 Recipient outcomes and retry pricing
-
-- **Completion survives metadata failures.** A successful finalized signature is authoritative. Later balance reads are optional and share the remaining deadline; absent observations remain explicit `None` values. Account-state completion similarly survives optional reporting failures. Rejected: returning `Pending` after observing completion or presenting a predicted balance as a measured one.
-
-- **New attempts get current prices.** Preparation and safe rebuilds share the payer's p75-plus-cap policy. Identical resends retain the same fee and signature. Unresolved submission retains its latest send error without treating it as proof of failure. Rejected: reusing stale prices on new attempts or aborting solely on a transport error.
-
-- **Recovery is durable and the destination is usable.** Every non-dry-run attempt is synchronized to a private, locked recovery journal before stdout and broadcast. Public R and the backup can export D_owner as a standard private keypair file; its wallet keys can apply and spend D's pending balance. New directory entries are synchronized, and incomplete journal tails are repaired under the lock. Historical transaction discovery remains Q17. Rejected: relying on terminal output alone, exporting secrets to stdout, overwriting key files, or changing the derivations.

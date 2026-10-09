@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-09
+last_verified: 2026-10-10
 ---
 
 # Cryptography

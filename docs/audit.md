@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-10-07
+last_verified: 2026-10-10
 ---
 
 # Proving an amount
@@ -24,7 +24,7 @@ As the payer, name the run and the row number from its `scope pay` output ([paye
 
 ```sh
 scope disclose --run 3f9c0a1b2d4e5f60 --row 1 \
-  --keypair ~/.config/solana/id.json --runs runs --url <archival-rpc-url> --out row1.receipt.json
+  --keypair ~/.config/solana/id.json --runs ~/.local/share/scope/runs --url <archival-rpc-url> --out row1.receipt.json
 ```
 
 It reads the run's journal and input copy, takes the row's landed signature and amount, and re-derives the row's two Pedersen amount openings from the run secret, so nothing was stored for this ([crypto.md](crypto.md)). It refuses a row that has not landed, and a run whose header has `derived_openings` false (verification: V79).
@@ -53,7 +53,7 @@ scope disclose --token-account <T> \
 | `--run <RUN_ID>` | | payer receipt; needs `--row`; conflicts with `--signature` |
 | `--row <i>` | | row number, from 0, counting rows only |
 | `--keypair <file>` | `~/.config/solana/id.json` | payer keypair, with `--run` |
-| `--runs <dir>` | `runs` | run journals, with `--run` |
+| `--runs <dir>` | `~/.local/share/scope/runs` | run journals, with `--run` |
 | `--signature <sig>` | | recipient receipt for this payment |
 | `--token-account <T>` | | recipient receipt, signature found in history; conflicts with `--signature` and `--run` |
 | `--recipient-key`, `--identity` | `~/.config/scope/recipient.key`, none | recipient backup, with `--signature` or `--token-account` |

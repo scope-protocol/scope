@@ -1,12 +1,20 @@
 ---
 status: decided
-last_verified: 2026-10-07
+last_verified: 2026-10-10
 ---
 
 # Decisions archive
 
-TL;DR: decisions from 2026-09-28 to 2026-10-05, newest first, kept as written; a marker under a reversed line names the entry that replaced it.
-Current decisions, from 2026-10-06 on, are in [decisions.md](decisions.md).
+TL;DR: decisions from 2026-09-28 to 2026-10-06, newest first, kept as written; a marker under a reversed line names the entry that replaced it.
+Current decisions, from 2026-10-06 on (the older ones of that day moved here), are in [decisions.md](decisions.md).
+
+## 2026-10-06 Recipient outcomes and retry pricing
+
+- **Completion survives metadata failures.** A successful finalized signature is authoritative. Later balance reads are optional and share the remaining deadline; absent observations remain explicit `None` values. Account-state completion similarly survives optional reporting failures. Rejected: returning `Pending` after observing completion or presenting a predicted balance as a measured one.
+
+- **New attempts get current prices.** Preparation and safe rebuilds share the payer's p75-plus-cap policy. Identical resends retain the same fee and signature. Unresolved submission retains its latest send error without treating it as proof of failure. Rejected: reusing stale prices on new attempts or aborting solely on a transport error.
+
+- **Recovery is durable and the destination is usable.** Every non-dry-run attempt is synchronized to a private, locked recovery journal before stdout and broadcast. Public R and the backup can export D_owner as a standard private keypair file; its wallet keys can apply and spend D's pending balance. New directory entries are synchronized, and incomplete journal tails are repaired under the lock. Historical transaction discovery remains Q17. Rejected: relying on terminal output alone, exporting secrets to stdout, overwriting key files, or changing the derivations.
 
 ## 2026-10-05 Recipient state refresh and discovery
 
