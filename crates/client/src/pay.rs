@@ -1011,6 +1011,25 @@ pub fn status<C: Chain>(
     Ok(out)
 }
 
+/// Whether the token account exists and every balance of it is empty.
+fn token_account_empty<C: Chain>(chain: &C, token_account: &Address) -> Result<bool, PayError> {
+    Ok(match chain.account(token_account, Commitment::Confirmed)? {
+        Some(a) if a.owner == token_2022() => StateWithExtensions::<Account>::unpack(&a.data)
+            .ok()
+            .and_then(|state| {
+                let ext = state.get_extension::<ConfidentialTransferAccount>().ok()?;
+                Some(
+                    state.base.amount == 0
+                        && ext.available_balance.0 == [0; 64]
+                        && ext.pending_balance_lo.0 == [0; 64]
+                        && ext.pending_balance_hi.0 == [0; 64],
+                )
+            })
+            .unwrap_or(false),
+        _ => false,
+    })
+}
+
 /// What the journal says about a row.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Journaled {
@@ -1038,21 +1057,7 @@ fn stealth_state<C: Chain>(
             Journaled::Nothing => StealthState::Unpaid,
         });
     }
-    let empty = match chain.account(&s.token_account, Commitment::Confirmed)? {
-        Some(a) if a.owner == token_2022() => StateWithExtensions::<Account>::unpack(&a.data)
-            .ok()
-            .and_then(|state| {
-                let ext = state.get_extension::<ConfidentialTransferAccount>().ok()?;
-                Some(
-                    state.base.amount == 0
-                        && ext.available_balance.0 == [0; 64]
-                        && ext.pending_balance_lo.0 == [0; 64]
-                        && ext.pending_balance_hi.0 == [0; 64],
-                )
-            })
-            .unwrap_or(false),
-        _ => false,
-    };
+    let empty = token_account_empty(chain, &s.token_account)?;
     // Every row pays a nonzero amount, so empty balances under an open announcement mean swept.
     Ok(if empty {
         StealthState::Swept
@@ -1061,10 +1066,78 @@ fn stealth_state<C: Chain>(
     })
 }
 
+/// Why one `reclaim` could not be completed.
+enum ReclaimError {
+    Simulation(String),
+    GaveUp,
+    Other(PayError),
+}
+
+impl<E: Into<PayError>> From<E> for ReclaimError {
+    fn from(e: E) -> Self {
+        Self::Other(e.into())
+    }
+}
+
+/// Calls the permissionless `reclaim` until the announcement is closed. Anyone may call
+/// it, so another caller can win the race; that is success too. Each attempt pays the
+/// sampled priority price under `--max-price`.
+fn reclaim_announcement<C: Chain>(
+    chain: &mut C,
+    payer: &Keypair,
+    announcement: &Address,
+    token_account: &Address,
+    label: &str,
+    opts: &PayOptions,
+) -> Result<(), ReclaimError> {
+    let ix = ix::reclaim(announcement, token_account, &payer.pubkey());
+    let closed = |chain: &C| -> Result<bool, PayError> {
+        Ok(chain
+            .account(announcement, Commitment::Confirmed)?
+            .is_none_or(|a| a.owner != program_id()))
+    };
+    let mut attempts = 0;
+    'attempts: while !closed(chain)? {
+        if attempts == RECLAIM_ATTEMPTS {
+            return Err(ReclaimError::GaveUp);
+        }
+        attempts += 1;
+        let price = fees::priority_price(chain.recent_prices()?, opts.max_price_per_cu)?;
+        let (blockhash, last_valid_block_height) = chain.blockhash()?;
+        let tx = v1_transaction_with_fee(
+            payer,
+            &[],
+            std::slice::from_ref(&ix),
+            blockhash,
+            RECLAIM_CU_LIMIT,
+            fees::priority_fee_lamports(price, RECLAIM_CU_LIMIT),
+        );
+        if let Err(logs) = chain.simulate(&tx)? {
+            if closed(chain)? {
+                break;
+            }
+            return Err(ReclaimError::Simulation(logs));
+        }
+        loop {
+            if let Err(e) = chain.send(&tx) {
+                (opts.log)(&format!("{label}: reclaim send failed, will retry: {e}"));
+            }
+            std::thread::sleep(opts.poll);
+            if closed(chain)? {
+                break 'attempts;
+            }
+            if chain.finalized_block_height()? > last_valid_block_height {
+                continue 'attempts;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Calls `reclaim` for every swept stealth row of the run, then returns the new status.
 /// Token-2022 refuses to close an account with any balance (verification: V4), so this
-/// cannot touch funds. Each attempt pays the sampled priority price under `--max-price`;
-/// after `RECLAIM_ATTEMPTS` expired attempts for a row it stops and says so.
+/// cannot touch funds. After `RECLAIM_ATTEMPTS` expired attempts for a row it stops and
+/// says so.
 pub fn reclaim<C: Chain>(
     chain: &mut C,
     payer: &Keypair,
@@ -1076,53 +1149,26 @@ pub fn reclaim<C: Chain>(
         .filter(|s| s.state == StealthState::Swept)
         .collect();
     for s in swept {
-        let ix = ix::reclaim(&s.announcement, &s.token_account, &payer.pubkey());
-        let closed = |chain: &C| -> Result<bool, PayError> {
-            Ok(chain
-                .account(&s.announcement, Commitment::Confirmed)?
-                .is_none_or(|a| a.owner != program_id()))
-        };
-        // Anyone may call reclaim, so another caller can win the race; that is success too.
-        let mut attempts = 0;
-        'attempts: while !closed(chain)? {
-            if attempts == RECLAIM_ATTEMPTS {
+        let label = format!("row {}", s.row);
+        match reclaim_announcement(
+            chain,
+            payer,
+            &s.announcement,
+            &s.token_account,
+            &label,
+            opts,
+        ) {
+            Ok(()) => {}
+            Err(ReclaimError::Simulation(logs)) => {
+                return Err(PayError::Simulation { row: s.row, logs });
+            }
+            Err(ReclaimError::GaveUp) => {
                 return Err(PayError::Halted(format!(
                     "row {}: reclaim did not land in {RECLAIM_ATTEMPTS} attempts; try again later",
                     s.row
                 )));
             }
-            attempts += 1;
-            let price = fees::priority_price(chain.recent_prices()?, opts.max_price_per_cu)?;
-            let (blockhash, last_valid_block_height) = chain.blockhash()?;
-            let tx = v1_transaction_with_fee(
-                payer,
-                &[],
-                std::slice::from_ref(&ix),
-                blockhash,
-                RECLAIM_CU_LIMIT,
-                fees::priority_fee_lamports(price, RECLAIM_CU_LIMIT),
-            );
-            if let Err(logs) = chain.simulate(&tx)? {
-                if closed(chain)? {
-                    break;
-                }
-                return Err(PayError::Simulation { row: s.row, logs });
-            }
-            loop {
-                if let Err(e) = chain.send(&tx) {
-                    (opts.log)(&format!(
-                        "row {}: reclaim send failed, will retry: {e}",
-                        s.row
-                    ));
-                }
-                std::thread::sleep(opts.poll);
-                if closed(chain)? {
-                    break 'attempts;
-                }
-                if chain.finalized_block_height()? > last_valid_block_height {
-                    continue 'attempts;
-                }
-            }
+            Err(ReclaimError::Other(e)) => return Err(e),
         }
         (opts.log)(&format!(
             "row {}: rent reclaimed from {}",
@@ -1130,6 +1176,77 @@ pub fn reclaim<C: Chain>(
         ));
     }
     status(chain, payer, run_id, opts)
+}
+
+/// What `reclaim_all` did with one announcement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReclaimOutcome {
+    /// The announcement is closed and its rent is back with the payer.
+    Reclaimed,
+    /// The one-time account still holds a balance, so Token-2022 would refuse to close it.
+    StillHolding,
+    Failed(String),
+}
+
+#[derive(Debug)]
+pub struct ReclaimReport {
+    pub announcement: Address,
+    pub token_account: Address,
+    pub outcome: ReclaimOutcome,
+}
+
+/// Reclaims every announcement the payer made, found on chain, whose one-time account is
+/// swept. It needs no journal, so it also covers runs whose journal is lost.
+pub fn reclaim_all<C: Chain>(
+    chain: &mut C,
+    payer: &Keypair,
+    opts: &PayOptions,
+) -> Result<Vec<ReclaimReport>, PayError> {
+    let mut found: Vec<(Address, Address)> = chain
+        .announcements_by_payer(&payer.pubkey())?
+        .into_iter()
+        .filter(|(_, a)| a.owner == program_id())
+        .filter_map(|(address, a)| {
+            let announcement = scope_interface::state::Announcement::from_bytes(&a.data).ok()?;
+            (announcement.payer == payer.pubkey().to_bytes()).then(|| {
+                (
+                    address,
+                    token_account_address(&payer.pubkey(), &announcement.ephemeral),
+                )
+            })
+        })
+        .collect();
+    found.sort();
+    let mut report = Vec::new();
+    for (announcement, token_account) in found {
+        let outcome = if !token_account_empty(chain, &token_account)? {
+            ReclaimOutcome::StillHolding
+        } else {
+            match reclaim_announcement(
+                chain,
+                payer,
+                &announcement,
+                &token_account,
+                &announcement.to_string(),
+                opts,
+            ) {
+                Ok(()) => ReclaimOutcome::Reclaimed,
+                Err(ReclaimError::Simulation(logs)) => {
+                    ReclaimOutcome::Failed(format!("simulation failed: {logs}"))
+                }
+                Err(ReclaimError::GaveUp) => ReclaimOutcome::Failed(format!(
+                    "did not land in {RECLAIM_ATTEMPTS} attempts; try again later"
+                )),
+                Err(ReclaimError::Other(e)) => return Err(e),
+            }
+        };
+        report.push(ReclaimReport {
+            announcement,
+            token_account,
+            outcome,
+        });
+    }
+    Ok(report)
 }
 
 /// The payer's receipt for one paid row: its amount and the two openings the run secret

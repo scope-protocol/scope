@@ -1747,3 +1747,57 @@ fn counts_every_row_to_one_recipient_against_its_credit_room() {
     start(&mut h, &format!("{a},1\n{a},2\n"), &o).expect("two rows fit");
     assert_eq!(pending(&h, &rs[0]), 3_000_000);
 }
+
+#[test]
+fn reclaim_all_closes_swept_announcements_without_a_journal() {
+    use pay::ReclaimOutcome::{Reclaimed, StillHolding};
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let (alice, bob) = (stealth_recipient(31), stealth_recipient(32));
+    let o = opts("reclaim-all");
+    let input = format!(
+        "{},1\n{},2\n",
+        alice.derive_public_keys().to_meta_address(),
+        bob.derive_public_keys().to_meta_address()
+    );
+    start(&mut h, &input, &o).expect("pay");
+    let alices = found_announcement(&mut h, &alice);
+    sweep::sweep(
+        &mut NoReclaim(SvmChain::new(&mut h.svm)),
+        &alice,
+        &alices,
+        &SweepOptions {
+            poll: Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect("transfer-only sweep");
+    // The journal is not needed.
+    std::fs::remove_dir_all(&o.runs_dir).expect("remove journals");
+
+    let stranger = Keypair::new();
+    let none =
+        pay::reclaim_all(&mut SvmChain::new(&mut h.svm), &stranger, &o).expect("other payer");
+    assert!(
+        none.is_empty(),
+        "only the payer's own announcements are listed"
+    );
+
+    let report = pay::reclaim_all(&mut SvmChain::new(&mut h.svm), &h.payer, &o).expect("reclaim");
+    assert_eq!(report.len(), 2);
+    let outcome = |a: &Address| {
+        report
+            .iter()
+            .find(|r| &r.announcement == a)
+            .expect("listed")
+            .outcome
+            .clone()
+    };
+    let bobs = found_announcement(&mut h, &bob);
+    assert_eq!(outcome(&alices), Reclaimed);
+    assert_eq!(outcome(&bobs), StillHolding);
+    assert!(h.svm.get_account(&alices).is_none_or(|a| a.lamports == 0));
+    let again = pay::reclaim_all(&mut SvmChain::new(&mut h.svm), &h.payer, &o).expect("again");
+    assert_eq!(again.len(), 1, "only bob's announcement is left");
+    assert_eq!(again[0].outcome, StillHolding);
+}

@@ -496,6 +496,35 @@ impl Chain for SvmChain<'_> {
         Ok(self.svm.minimum_balance_for_rent_exemption(space))
     }
 
+    fn announcements_by_payer(
+        &self,
+        payer: &Address,
+    ) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        use scope_interface::state::ANNOUNCEMENT_LEN;
+        // The payer is the announcement's last field.
+        const PAYER_OFFSET: usize = ANNOUNCEMENT_LEN - 32;
+        Ok(self
+            .svm
+            .get_program_accounts(&program_id())
+            .into_iter()
+            .filter(|(_, a)| {
+                a.data.len() == ANNOUNCEMENT_LEN
+                    && a.data[0] == scope_interface::state::ANNOUNCEMENT_DISCRIMINATOR
+                    && a.data[PAYER_OFFSET..] == *payer.as_ref()
+            })
+            .map(|(address, a)| {
+                (
+                    address,
+                    AccountData {
+                        owner: a.owner,
+                        lamports: a.lamports,
+                        data: a.data,
+                    },
+                )
+            })
+            .collect())
+    }
+
     fn landed_error(&self, signature: &Signature) -> Result<Option<String>, ChainError> {
         if self.sent_signatures.contains(signature)
             && let Some(error) = &self.land_with_error

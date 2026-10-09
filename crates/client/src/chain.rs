@@ -80,6 +80,15 @@ pub trait Chain {
     fn landed_error(&self, _signature: &Signature) -> Result<Option<String>, ChainError> {
         Ok(None)
     }
+
+    /// Every announcement whose rent refund goes to `payer`, found with a size filter and a
+    /// memcmp on the payer field.
+    fn announcements_by_payer(
+        &self,
+        _payer: &Address,
+    ) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        Err(ChainError("this chain cannot list announcements".into()))
+    }
 }
 
 /// Cluster reads needed by recipient discovery and sweeping.
@@ -378,6 +387,51 @@ impl Chain for RpcChain {
     }
     fn rent(&self, space: usize) -> Result<u64, ChainError> {
         self.read(|| self.rpc().get_minimum_balance_for_rent_exemption(space))
+    }
+
+    fn announcements_by_payer(
+        &self,
+        payer: &Address,
+    ) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        use scope_interface::state::ANNOUNCEMENT_LEN;
+        // The payer is the announcement's last field.
+        const PAYER_OFFSET: usize = ANNOUNCEMENT_LEN - 32;
+        let program = crate::address::program_id();
+        let accounts = self.read(|| {
+            self.rpc().get_program_ui_accounts_with_config(
+                &program,
+                RpcProgramAccountsConfig {
+                    filters: Some(vec![
+                        RpcFilterType::DataSize(ANNOUNCEMENT_LEN as u64),
+                        RpcFilterType::Memcmp(Memcmp::new_base58_encoded(
+                            PAYER_OFFSET,
+                            payer.as_ref(),
+                        )),
+                    ]),
+                    account_config: RpcAccountInfoConfig {
+                        encoding: Some(UiAccountEncoding::Base64),
+                        commitment: Some(CommitmentConfig::confirmed()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+        })?;
+        accounts
+            .into_iter()
+            .map(|(address, a)| {
+                Ok((
+                    address,
+                    AccountData {
+                        owner: a.owner.parse().map_err(rpc_err)?,
+                        lamports: a.lamports,
+                        data: a.data.decode().ok_or_else(|| {
+                            ChainError(format!("invalid RPC account encoding for {address}"))
+                        })?,
+                    },
+                ))
+            })
+            .collect()
     }
 
     fn landed_error(&self, signature: &Signature) -> Result<Option<String>, ChainError> {
