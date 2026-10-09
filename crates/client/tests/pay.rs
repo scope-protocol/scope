@@ -856,21 +856,18 @@ fn a_paid_stealth_row_sweeps_to_the_recipient_and_returns_both_rents_to_the_paye
         .expect("destination seed");
     let owner = Keypair::new_from_array(*seed.as_bytes());
     assert_eq!(owner.pubkey(), report.destination_owner);
-    let (keys, _) = derive_confidential_keys(&owner, b"").expect("wallet keys");
+    let (_, ae) = derive_confidential_keys(&owner, b"").expect("wallet keys");
     let account = h.svm.get_account(&report.destination).expect("D");
     let state = StateWithExtensions::<Account>::unpack(&account.data).expect("unpack");
     let ext = state
         .get_extension::<ConfidentialTransferAccount>()
         .expect("ct");
-    let lo: ElGamalCiphertext = ext.pending_balance_lo.try_into().expect("lo");
-    let hi: ElGamalCiphertext = ext.pending_balance_hi.try_into().expect("hi");
-    let lo = keys.secret().decrypt_u32(&lo).expect("lo");
-    let hi = keys.secret().decrypt_u32(&hi).expect("hi");
     assert_eq!(
-        lo + (hi << 16),
-        2_500_000,
-        "D holds the amount, under the owner's wallet keys"
+        ae.decrypt(&ext.decryptable_available_balance.try_into().expect("hint")),
+        Some(2_500_000),
+        "D holds the amount as an applied balance, under the owner's wallet keys"
     );
+    assert_eq!(u64::from(ext.pending_balance_credit_counter), 0);
 }
 
 /// Fails simulation of anything that calls our program, so a sweep falls back to its
