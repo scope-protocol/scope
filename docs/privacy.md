@@ -6,7 +6,7 @@ last_verified: 2026-10-10
 # Privacy
 
 TL;DR: for anyone deciding whether SCOPE protects them enough. After reading you know what each party can learn or do, and every known leak with its evidence.
-Hidden from the public: who received a stealth payment and every amount. Visible: who paid, how many one-time accounts a run paid, and links the recipient creates by merging or spending. No formal analysis yet.
+Hidden from the public: who received a stealth payment and every amount. Visible: who paid, how many one-time accounts a run paid, and links the recipient creates by merging or spending. Inbound payments are unlinkable to the recipient until the recipient exits: the first public withdrawal, or a spend to a known counterparty, ties D to them. No formal analysis yet.
 
 Transaction contents referred to here are listed in [protocol.md](protocol.md). Marks and citation format: [README.md](README.md), Rules.
 
@@ -20,7 +20,7 @@ Transaction contents referred to here are listed in [protocol.md](protocol.md). 
 | For a plain row: the recipient's fixed confidential account | For a stealth row: who the recipient is, without b_scan |
 | For a stealth row: that the payer funded a fresh one-time account T and its owner P, at a given time | Which meta-address a stealth payment belongs to |
 | How many rows a run paid, and their timing | Which row of an input file went to which one-time account: send order is shuffled (V48) |
-| That P, D and D_owner belong together, and that D was funded from this payer's T: the sweep transaction names T, D, D_owner and, through `reclaim`, the payer | Anything linking two stealth payments to the same recipient, unless the recipient links them |
+| That P, D and D_owner belong together, and that D was funded from this payer's T: the sweep transaction names T, D, D_owner and, through `reclaim`, the payer | Anything in the accounts linking two stealth payments to the same recipient, unless the recipient links them (timing is a separate limit below) |
 | That a published registry entry ties a wallet to a meta-address, permanently | |
 | That a wallet uses this program or confidential transfers at all | |
 
@@ -81,13 +81,18 @@ A payer receipt reveals the amount, the destination and the payer of one payment
 - **Merging re-links.** Sweeping or spending into an account another payment also reached clusters everything that touched it. Inherent to stealth addresses; BIP-352 has the same property [unverified]. The sweep refuses an existing destination and offers no reuse override [unverified]; this is client policy, not a program rule. Reusing one fee payer for later spends from several D also links them. Unlinkable consolidation is out of scope (Q8, [plan.md](plan.md)).
 - **Partial spends from T.** Spending part of T's balance directly shows the payer the split. The client always sweeps the whole balance (V65).
 - **Headcount and timing.** A run's transactions land close together from one payer, and every announcement stores the payer, so an observer counts a run's stealth recipients exactly. Shuffled send order hides order, not count (V48). Spreading sends over time helps; not solved.
-- **Scan and lookup leak to the RPC provider.** See the RPC table (V67, V81).
+- **Sweeps made close together link by timing.** Sweeps from one session share an IP, a transaction shape and a priority price sampled from the same fee window, so an observer or RPC provider can group them. `sweep --all --jitter-secs` spreads them; the default does not.
+- **Scan and lookup leak to the RPC provider.** See the RPC table (V67, V81). Every candidate account a scan fetches, and every `--dry-run`, names its accounts to the provider from the recipient's IP.
+- **Sweep destinations are recognizable.** D is created with the fixed seed `scope-sweep/v1`, so any D marks its owner as a SCOPE recipient.
+- **Announcement spam.** Anyone can announce an account carrying a copied tag; it costs a few transaction fees because `reclaim` is permissionless. Scans do extra work and extra RPC reads for it; the owner and ElGamal key checks reject the fakes (V64).
+- **A leaked payer key exposes past runs.** The run secret derives from the payer's signature, so a leaked key, or any software that obtains that one signature, lists every recipient and amount of the run.
+- **Permanent delegates.** A mint's permanent delegate can move or burn public balances; this design keeps no public balance on T or D beyond dust, and it is not known whether the delegate can reach confidential balances [unverified].
 - **Registration is public and permanent.** Publishing is optional; a meta-address string handed to the payer works without it. For grants or donations, publish from a wallet with no other history.
 - **The recipient depends on the payer to announce.** A payer that skips `announce` makes the payment invisible to scan.
 - **Mint powers.** Freeze, dust and approval are the issuer's, per mint; see the mint table.
 - **Program fingerprint.** Calling this program, or confidential-transfer instructions at all, marks a wallet as privacy-seeking while usage is low [unverified]. True of every privacy tool on Solana.
 - **View tag.** One byte of a hash of S is public, standard for stealth schemes (V53). It narrows a scanner's work and gives an observer nothing without b_scan.
-- **Local recovery journal.** The recipient's journal groups its destinations; it is owner-only and holds no amounts or secrets (V70), but anyone who reads it links them.
+- **Local recovery journal.** The recipient's journal groups its destinations and token accounts; it is owner-only and holds no amounts or secrets (V70), but anyone who reads it links them. It is plaintext even when the key backup is encrypted.
 - **No cryptographic review yet.** The derivations from one shared secret are written and tested but not externally reviewed (Q1, [plan.md](plan.md)).
 
 ## What SCOPE does not claim

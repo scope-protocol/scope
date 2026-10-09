@@ -1,5 +1,5 @@
 ---
-status: verified
+status: decided
 last_verified: 2026-10-10
 ---
 
