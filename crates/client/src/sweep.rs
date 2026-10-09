@@ -17,6 +17,7 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_zk_sdk::{
     encryption::{
+        auth_encryption::AeKey,
         derivation::derive_confidential_keys,
         elgamal::{ElGamalCiphertext, ElGamalKeypair, ElGamalPubkey},
     },
@@ -179,6 +180,7 @@ struct Destination {
     owner: Keypair,
     address: Address,
     keys: ElGamalKeypair,
+    ae: AeKey,
     space: usize,
     setup: Vec<Instruction>,
     auditor: Option<ElGamalPubkey>,
@@ -276,6 +278,7 @@ fn destination_from_mint(
         owner,
         address,
         keys,
+        ae,
         space,
         setup,
         auditor,
@@ -402,6 +405,18 @@ fn instructions(
             authority,
             &[],
             ProofLocation::InstructionOffset(offset(1), &zero),
+        )
+        .map_err(invalid)?,
+    );
+    // The transfer is D's first credit; applying it here leaves the funds spendable at once.
+    ixs.push(
+        ct::apply_pending_balance(
+            &t22,
+            &destination.address,
+            1,
+            &destination.ae.encrypt(payment.info.amount).into(),
+            &destination.owner.pubkey(),
+            &[],
         )
         .map_err(invalid)?,
     );

@@ -184,6 +184,34 @@ fn enable_cpi_guard(h: &mut Harness, address: Address) {
     h.svm.set_account(address, source).expect("set");
 }
 
+/// Asserts that `destination` holds `amount` as an applied, available balance and no pending credit.
+fn assert_available(
+    svm: &litesvm::LiteSVM,
+    destination: &Address,
+    owner: &solana_keypair::Keypair,
+    amount: u64,
+) {
+    let (keys, ae) = solana_zk_sdk::encryption::derivation::derive_confidential_keys(owner, b"")
+        .expect("destination keys");
+    let account = svm.get_account(destination).expect("destination");
+    let state = StateWithExtensions::<Account>::unpack(&account.data).expect("account");
+    let ext = state
+        .get_extension::<ConfidentialTransferAccount>()
+        .expect("extension");
+    let available: ElGamalCiphertext = ext.available_balance.try_into().expect("available");
+    assert_eq!(
+        keys.secret().decrypt(&available).target,
+        solana_zk_sdk::encryption::pedersen::G * curve25519_dalek::scalar::Scalar::from(amount)
+    );
+    assert_eq!(
+        ae.decrypt(&ext.decryptable_available_balance.try_into().expect("hint")),
+        Some(amount)
+    );
+    assert_eq!(ext.pending_balance_lo.0, [0; 64]);
+    assert_eq!(ext.pending_balance_hi.0, [0; 64]);
+    assert_eq!(u64::from(ext.pending_balance_credit_counter), 0);
+}
+
 #[test]
 fn scan_recovers_backed_up_recipient_and_ignores_other_payments() {
     let mut h = Harness::new();
@@ -388,22 +416,10 @@ fn sweep_moves_the_whole_balance_closes_accounts_and_refunds_rent() {
         .derive_sweep_destination(&report.ephemeral, &report.token_account.to_bytes())
         .expect("seed");
     let owner = solana_keypair::Keypair::new_from_array(*seed.as_bytes());
-    let (keys, _) = solana_zk_sdk::encryption::derivation::derive_confidential_keys(&owner, b"")
-        .expect("destination keys");
     let destination = h.svm.get_account(&report.destination).expect("destination");
     let state = StateWithExtensions::<Account>::unpack(&destination.data).expect("account");
     assert_eq!(state.base.owner, report.destination_owner);
-    let ext = state
-        .get_extension::<ConfidentialTransferAccount>()
-        .expect("extension");
-    let lo: ElGamalCiphertext = ext.pending_balance_lo.try_into().expect("lo");
-    let hi: ElGamalCiphertext = ext.pending_balance_hi.try_into().expect("hi");
-    assert_eq!(
-        keys.secret().decrypt_u32(&lo).expect("lo")
-            + (keys.secret().decrypt_u32(&hi).expect("hi") << 16),
-        AMOUNT
-    );
-    assert_eq!(u64::from(ext.pending_balance_credit_counter), 1);
+    assert_available(&h.svm, &report.destination, &owner, AMOUNT);
     assert!(
         h.svm
             .get_account(&report.destination_owner)
@@ -823,21 +839,7 @@ fn sweep_moves_confidential_funds_when_permissioned_burning_blocks_cleanup() {
         .derive_sweep_destination(&report.ephemeral, &report.token_account.to_bytes())
         .expect("seed");
     let owner = solana_keypair::Keypair::new_from_array(*seed.as_bytes());
-    let (keys, _) =
-        solana_zk_sdk::encryption::derivation::derive_confidential_keys(&owner, b"").expect("keys");
-    let destination = h.svm.get_account(&report.destination).expect("destination");
-    let state =
-        StateWithExtensions::<Account>::unpack(&destination.data).expect("destination state");
-    let ext = state
-        .get_extension::<ConfidentialTransferAccount>()
-        .expect("extension");
-    let lo: ElGamalCiphertext = ext.pending_balance_lo.try_into().expect("low");
-    let hi: ElGamalCiphertext = ext.pending_balance_hi.try_into().expect("high");
-    assert_eq!(
-        keys.secret().decrypt_u32(&lo).expect("low")
-            + (keys.secret().decrypt_u32(&hi).expect("high") << 16),
-        AMOUNT
-    );
+    assert_available(&h.svm, &report.destination, &owner, AMOUNT);
 }
 
 #[test]
@@ -1344,24 +1346,7 @@ fn scan_and_sweep_support_large_pending_balances() {
             .derive_sweep_destination(&report.ephemeral, &report.token_account.to_bytes())
             .expect("seed");
         let owner = solana_keypair::Keypair::new_from_array(*seed.as_bytes());
-        let (keys, _) =
-            solana_zk_sdk::encryption::derivation::derive_confidential_keys(&owner, b"")
-                .expect("keys");
-        let account = chain
-            .svm
-            .get_account(&report.destination)
-            .expect("destination");
-        let state = StateWithExtensions::<Account>::unpack(&account.data).expect("state");
-        let ext = state
-            .get_extension::<ConfidentialTransferAccount>()
-            .expect("ct");
-        let lo: ElGamalCiphertext = ext.pending_balance_lo.try_into().expect("low");
-        let hi: ElGamalCiphertext = ext.pending_balance_hi.try_into().expect("high");
-        assert_eq!(
-            keys.secret().decrypt_u32(&lo).expect("low")
-                + (keys.secret().decrypt_u32(&hi).expect("high") << 16),
-            amount
-        );
+        assert_available(chain.svm, &report.destination, &owner, amount);
     }
 }
 
@@ -2003,17 +1988,7 @@ fn restored_standard_owner_can_apply_and_spend_the_swept_balance() {
     h.source_elgamal = keys;
     h.source_ae = ae;
     h.source_balance = AMOUNT;
-    let apply = ct::apply_pending_balance(
-        &token_2022(),
-        &h.source,
-        1,
-        &h.source_ae.encrypt(AMOUNT).into(),
-        &h.payer.pubkey(),
-        &[],
-    )
-    .expect("apply");
-    h.send(&[apply], &[])
-        .expect("apply with restored standard owner");
+    assert_available(&h.svm, &report.destination, &h.payer, AMOUNT);
     h.send(
         &transfer(&h, destination, receiver_keys.pubkey(), AMOUNT),
         &[],
