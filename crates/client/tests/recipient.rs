@@ -2403,10 +2403,9 @@ mod history {
         let (pruned, _) = pay(&mut h, &mut archive, &alice, 4);
         let (middle, _) = pay(&mut h, &mut archive, &alice, 5);
         let (newest, _) = pay(&mut h, &mut archive, &alice, 6);
-        archive.fetch_errors.push((
-            pruned,
-            scope_client::chain::ChainError::not_found(&pruned).0,
-        ));
+        archive
+            .fetch_errors
+            .push((pruned, ChainError::not_found(&pruned).0));
         // Listed newest first: newest, middle, pruned, oldest.
         archive
             .fetch_errors
