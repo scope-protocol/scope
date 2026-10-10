@@ -481,7 +481,9 @@ impl Chain for RpcChain {
     fn landed_error(&self, signature: &Signature) -> Result<Option<String>, ChainError> {
         let signatures = [*signature];
         let statuses = self.read(|| self.rpc().get_signature_statuses(&signatures))?;
-        Ok(finalized_error(statuses.value.first().and_then(Option::as_ref)))
+        Ok(finalized_error(
+            statuses.value.first().and_then(Option::as_ref),
+        ))
     }
 }
 

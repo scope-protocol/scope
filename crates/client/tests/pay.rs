@@ -1418,7 +1418,7 @@ fn reclaim_stops_after_three_lost_attempts() {
     chain.drop_sends = usize::MAX;
     let stopped = pay::reclaim(&mut chain, &h.payer, &run_id, &o);
     assert!(
-        matches!(&stopped, Err(PayError::Halted(why)) if why.contains("3 attempts")),
+        matches!(&stopped, Err(PayError::Halted(why)) if why.contains("10 attempts")),
         "{stopped:?}"
     );
 }
@@ -1518,6 +1518,37 @@ fn a_landed_stealth_row_resumes_after_the_mint_stops_auto_approving() {
 }
 
 #[test]
+fn a_landed_row_settles_even_when_the_mint_is_refused_and_the_wallet_is_short() {
+    let (mut h, o, alice) = stealth_row_killed_after_send("settle-first", 1);
+    h.add_null_transfer_hook();
+    set_payer_lamports(&mut h, 1_000);
+    let report = resume_run(&mut h, &o).expect("the paid row settles");
+    assert_eq!(report.paid.len(), 1);
+    assert_eq!(found(&mut h, &alice).len(), 1);
+}
+
+#[test]
+fn rows_still_to_pay_are_refused_on_a_mint_that_is_now_refused() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 2);
+    let o = opts("refused-after-start");
+    let (mint, source) = (h.mint, h.source);
+    let killed = pay::start(
+        Killer::new(SvmChain::new(&mut h.svm), KillAt::AfterSend(1)),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        mint,
+        source,
+        input(&rs).as_bytes(),
+        &o,
+    );
+    assert!(matches!(killed, Err(PayError::Chain(_))), "got {killed:?}");
+    h.add_null_transfer_hook();
+    let stopped = resume_run(&mut h, &o);
+    assert!(matches!(stopped, Err(PayError::Mint { .. })), "{stopped:?}");
+}
+
+#[test]
 fn resuming_a_payment_that_nearly_drains_the_source_does_not_underflow() {
     let whole = SOURCE_FUNDS / 1_000_000 * 3 / 5;
     let (mut h, o, alice) = stealth_row_killed_after_send("near-empty", whole);
@@ -1612,7 +1643,7 @@ fn attempts(o: &PayOptions, run_id: &str) -> usize {
 }
 
 #[test]
-fn a_row_that_keeps_expiring_halts_after_three_attempts_and_resume_continues() {
+fn a_row_that_keeps_expiring_halts_after_ten_attempts_and_resume_continues() {
     let mut h = Harness::new();
     let rs = recipients(&mut h, 1);
     let o = opts("rebuild-cap");
@@ -1622,11 +1653,11 @@ fn a_row_that_keeps_expiring_halts_after_three_attempts_and_resume_continues() {
     chain.drop_sends = usize::MAX;
     let stopped = pay::start(chain, &h.payer, k, mint, source, input(&rs).as_bytes(), &o);
     assert!(
-        matches!(&stopped, Err(PayError::Halted(why)) if why.contains("3 attempts")),
+        matches!(&stopped, Err(PayError::Halted(why)) if why.contains("10 attempts")),
         "{stopped:?}"
     );
     let run_id = only_run(&o);
-    assert_eq!(attempts(&o, &run_id), 3);
+    assert_eq!(attempts(&o, &run_id), 10);
     let report = resume_run(&mut h, &o).expect("resume continues");
     assert_eq!(report.paid.len(), 1);
     assert_paid_once(&h, &rs);
@@ -1686,7 +1717,7 @@ fn refuses_a_run_the_payers_sol_cannot_cover_before_sending() {
     set_payer_lamports(&mut h, 8_000_000);
     let stopped = start(&mut h, &stealth_row, &o);
     assert!(
-        matches!(&stopped, Err(PayError::PayerFunds { have: 8_000_000, need }) if *need > 8_630_800),
+        matches!(&stopped, Err(PayError::PayerFunds { have: 8_000_000, need, .. }) if *need > 8_630_800),
         "{stopped:?}"
     );
     assert_no_run(&o);
@@ -1700,6 +1731,39 @@ fn refuses_a_run_the_payers_sol_cannot_cover_before_sending() {
     );
     let message = stopped.expect_err("funds").to_string();
     assert!(message.contains("SOL"), "{message}");
+}
+
+#[test]
+fn the_payers_fees_follow_the_sampled_price_not_the_cap() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 2);
+    let rent0 = h.svm.minimum_balance_for_rent_exemption(0);
+    let k = keys(&h.source_elgamal, &h.source_ae);
+    let o = opts("fee-budget");
+    let need = |samples: Vec<Vec<u64>>, h: &mut Harness| {
+        let mut chain = SvmChain::new(&mut h.svm);
+        chain.price_samples = samples;
+        pay::dry_run(
+            &chain,
+            &h.payer,
+            &k,
+            h.mint,
+            h.source,
+            input(&rs).as_bytes(),
+            &o,
+        )
+        .expect("dry run")
+        .payer_need
+    };
+    // A quiet network: price 1 budgeted at 3 micro-lamports/CU, 1 lamport on top of 5,000.
+    assert_eq!(need(vec![vec![1]], &mut h), rent0 + 2 * 5_001);
+    // A busy one: 3 x 400,000 is capped at the 1,000,000 default.
+    assert_eq!(
+        need(vec![vec![400_000]], &mut h),
+        rent0 + 2 * (5_000 + 275_000)
+    );
+    // An empty block still budgets a price of 1.
+    assert_eq!(need(vec![vec![]], &mut h), rent0 + 2 * 5_001);
 }
 
 #[test]
@@ -1921,7 +1985,7 @@ fn the_run_summary_counts_rows_and_tells_done_from_halted_from_unfinished() {
     let run_id = only_run(&o);
     let s = summary(&mut h, &o, &run_id);
     assert!(
-        matches!(&s.state, RunState::Halted(why) if why.contains("3 attempts")),
+        matches!(&s.state, RunState::Halted(why) if why.contains("10 attempts")),
         "{:?}",
         s.state
     );

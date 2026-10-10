@@ -100,8 +100,15 @@ pub enum PayError {
     Recipient { recipient: Address, why: String },
     #[error("source holds {have}, the run needs {need} (base units)")]
     Insufficient { have: u64, need: u64 },
-    #[error("the payer needs {} SOL, has {}", sol(*need), sol(*have))]
-    PayerFunds { have: u64, need: u64 },
+    #[error(
+        "the payer needs {} SOL, has {} (rent {}, funding for one-time accounts {}, fees {})",
+        sol(*need), sol(*have), sol(parts.rent), sol(parts.funding), sol(parts.fees)
+    )]
+    PayerFunds {
+        have: u64,
+        need: u64,
+        parts: NeedParts,
+    },
     #[error(
         "this input was already run as {run_id}; resume it if it did not finish, or pass --again to pay it twice"
     )]
@@ -296,23 +303,42 @@ fn credits_to(rows: &[Row], skip: &HashSet<usize>, address: &Address) -> u64 {
         .count() as u64
 }
 
-/// What the payer's wallet must hold for the rows not in `skip`: for each stealth row the
-/// one-time account's rent, the announcement's rent and P's funding, for every row the
-/// fee at the price cap, and once the wallet's own rent reserve.
+/// What the payer's wallet must hold, by kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NeedParts {
+    /// The wallet's own rent reserve and, per stealth row, the one-time account's and the
+    /// announcement's rent; the stealth rents come back on reclaim.
+    pub rent: u64,
+    /// P's funding for each stealth row, priced at the cap because the sweep may come weeks later.
+    pub funding: u64,
+    /// The payer's own transaction fees at the budgeted price.
+    pub fees: u64,
+}
+
+impl NeedParts {
+    pub fn total(&self) -> u64 {
+        self.rent
+            .saturating_add(self.funding)
+            .saturating_add(self.fees)
+    }
+}
+
+/// What the payer's wallet must hold for the rows not in `skip`. Rent and P's funding are
+/// exact; the payer's own fees use `fees::budget_price` of the current sample, not the cap.
 pub fn payer_need<C: Chain>(
     chain: &C,
     rows: &[Row],
     skip: &HashSet<usize>,
     rents: (u64, u64),
     max_price_per_cu: u64,
-) -> Result<u64, PayError> {
+) -> Result<NeedParts, PayError> {
     let (rent, reserve) = rents;
-    let fee =
-        |limit| fees::LAMPORTS_PER_SIGNATURE + fees::priority_fee_lamports(max_price_per_cu, limit);
-    let mut need = 0u64;
+    let price = fees::budget_price(chain.recent_prices()?, max_price_per_cu);
+    let fee = |limit| fees::LAMPORTS_PER_SIGNATURE + fees::priority_fee_lamports(price, limit);
+    let mut parts = NeedParts::default();
     let mut stealth_rows = 0u64;
     for (_, r) in rows.iter().enumerate().filter(|(i, _)| !skip.contains(i)) {
-        need = need.saturating_add(match r.recipient {
+        parts.fees = parts.fees.saturating_add(match r.recipient {
             Recipient::Plain(_) => fee(PLAIN_TRANSFER_CU_LIMIT),
             Recipient::Stealth(_) => {
                 stealth_rows += 1;
@@ -321,21 +347,27 @@ pub fn payer_need<C: Chain>(
         });
     }
     if stealth_rows > 0 {
-        let per_row = rent
-            .saturating_add(chain.rent(scope_interface::state::ANNOUNCEMENT_LEN)?)
-            .saturating_add(fees::sweep_funding(rent, reserve, fees::SWEEP_PRICE_CAP));
-        need = need.saturating_add(per_row.saturating_mul(stealth_rows));
+        let rents = rent.saturating_add(chain.rent(scope_interface::state::ANNOUNCEMENT_LEN)?);
+        parts.rent = rents.saturating_mul(stealth_rows);
+        parts.funding =
+            fees::sweep_funding(rent, reserve, fees::SWEEP_PRICE_CAP).saturating_mul(stealth_rows);
     }
-    Ok(need.saturating_add(chain.rent(0)?))
+    parts.rent = parts.rent.saturating_add(chain.rent(0)?);
+    Ok(parts)
 }
 
 /// Refuses a run whose lamport cost the payer's wallet cannot cover.
-fn check_payer_funds<C: Chain>(chain: &C, payer: &Address, need: u64) -> Result<(), PayError> {
+fn check_payer_funds<C: Chain>(
+    chain: &C,
+    payer: &Address,
+    parts: NeedParts,
+) -> Result<(), PayError> {
     let have = chain
         .account(payer, Commitment::Confirmed)?
         .map_or(0, |a| a.lamports);
+    let need = parts.total();
     if have < need {
-        return Err(PayError::PayerFunds { have, need });
+        return Err(PayError::PayerFunds { have, need, parts });
     }
     Ok(())
 }
@@ -716,13 +748,15 @@ pub fn start<C: Chain>(
     let need = payer_need(&chain, &rows, &HashSet::new(), rents, opts.max_price_per_cu)?;
     check_payer_funds(&chain, &payer.pubkey(), need)?;
 
+    // Read before the directory exists, so an RPC failure leaves no header-less run.
+    let genesis = hex(&chain.genesis_hash()?);
     let dir = opts.runs_dir.join(&run_id);
     let mut journal = Journal::create(&dir)?;
     journal::write_private(&dir.join(INPUT_COPY), input_bytes)?;
     let order = shuffled(rows.len());
     journal.append(&Record::Run {
         format: journal::FORMAT,
-        genesis: hex(&chain.genesis_hash()?),
+        genesis,
         run_id: run_id.clone(),
         input_sha256,
         input_key,
@@ -899,7 +933,7 @@ pub fn dry_run<C: Chain>(
         payer_have: chain
             .account(&payer.pubkey(), Commitment::Confirmed)?
             .map_or(0, |a| a.lamports),
-        payer_need,
+        payer_need: payer_need.total(),
         price,
         fee_cap_plain: fee_cap(PLAIN_TRANSFER_CU_LIMIT),
         fee_cap_stealth: fee_cap(STEALTH_PAYMENT_CU_LIMIT),
@@ -979,34 +1013,25 @@ pub fn resume<C: Chain>(
         Commitment::Confirmed,
     )?;
     let balance = verified_balance(&keys, &state, &source)?;
-    // Payment policy binds new payments only; it is checked once outcomes are reconciled.
-    let info = mint_info(&chain, &mint)?;
-    let rents = stealth_rents(&chain, &stealth, info.space)?;
-    // The open attempt's row may have landed, which can leave its recipient unable to take
-    // another credit; it is preflighted only if the attempt turns out not to have landed.
-    let open_row = match &open {
-        Some(Record::Attempt { row, .. }) => Some(*row),
-        _ => None,
-    };
-    let skip: HashSet<usize> = landed.iter().copied().chain(open_row).collect();
-    let plain = plain_rows(&chain, &rows, &skip, &mint)?;
-    let need = payer_need(&chain, &rows, &landed, rents, opts.max_price_per_cu)?;
-    check_payer_funds(&chain, &payer.pubkey(), need)?;
+    // Payment policy and the payer's SOL bind new payments only. They are checked once
+    // outcomes are reconciled, and only if rows remain, so a paused mint or a short wallet
+    // cannot block settling a row that already paid.
+    let policy = mint_info(&chain, &mint);
     let mut engine = Engine {
         chain,
         payer,
         keys,
         mint,
         source,
-        auditor: info.auditor,
+        auditor: None,
         opts,
         journal,
         rows,
-        plain,
+        plain: HashMap::new(),
         stealth,
         run_secret,
-        space: info.space,
-        rents,
+        space: 0,
+        rents: (0, 0),
         current: state.available,
         balance,
         paid,
@@ -1048,13 +1073,6 @@ pub fn resume<C: Chain>(
                 "row {row}: source matches neither side of the open attempt"
             )));
         }
-        if !landed.contains(&row)
-            && let Recipient::Plain(address) = &engine.rows[row].recipient
-        {
-            let credits = credits_to(&engine.rows, &landed, address);
-            let key = preflight(&engine.chain, address, &engine.mint, credits)?;
-            engine.plain.insert(row, key);
-        }
         // A landed attempt changed the balance; read it back verified rather than trusting arithmetic.
         let state = engine.source_state(Commitment::Confirmed)?;
         engine.balance = verified_balance(&engine.keys, &state, &engine.source)?;
@@ -1067,22 +1085,41 @@ pub fn resume<C: Chain>(
             "source is not where the last landed row left it".into(),
         ));
     }
-    check_stealth_mint(
-        engine
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !landed.contains(i))
-            .map(|(_, r)| r),
-        &engine.mint,
-        &info,
-    )?;
+    if landed.len() < engine.rows.len() {
+        let info = policy?;
+        check_stealth_mint(
+            engine
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !landed.contains(i))
+                .map(|(_, r)| r),
+            &engine.mint,
+            &info,
+        )?;
+        engine.rents = stealth_rents(&engine.chain, &engine.stealth, info.space)?;
+        engine.plain = plain_rows(&engine.chain, &engine.rows, &landed, &engine.mint)?;
+        let need = payer_need(
+            &engine.chain,
+            &engine.rows,
+            &landed,
+            engine.rents,
+            opts.max_price_per_cu,
+        )?;
+        check_payer_funds(&engine.chain, &payer.pubkey(), need)?;
+        engine.auditor = info.auditor;
+        engine.space = info.space;
+    }
     engine.run(&order, &landed)
 }
 
-/// Consecutive expired or failed attempts of one row before the run halts. An attempt that
-/// passed simulation and still does not land points at something a rebuild will not fix.
-const REBUILD_LIMIT: usize = 3;
+/// Attempts of one row that landed with an error before the run halts. An attempt that
+/// passed simulation and still fails points at something a rebuild will not fix.
+const FAILED_LIMIT: usize = 3;
+
+/// Expired attempts of one row before the run halts. Congestion alone can expire attempts,
+/// and every rebuild reprices and refuses a price above `--max-price`, so the limit is loose.
+const EXPIRED_LIMIT: usize = 10;
 
 /// Expired attempts per row before `reclaim` gives up; it is a backstop, safe to rerun.
 const RECLAIM_ATTEMPTS: usize = 3;
@@ -1608,7 +1645,8 @@ impl<C: Chain> Engine<'_, C> {
     }
 
     fn pay_row(&mut self, row: usize) -> Result<(), PayError> {
-        for expired in 1.. {
+        let (mut expired, mut failed) = (0, 0);
+        loop {
             let attempt = self.build(row)?;
             if let Err(logs) = self.chain.simulate(&attempt.tx)? {
                 return Err(PayError::Simulation { row, logs });
@@ -1627,27 +1665,28 @@ impl<C: Chain> Engine<'_, C> {
                     self.balance -= self.rows[row].amount;
                     return self.record_landed(&attempt);
                 }
-                Outcome::Expired if expired == REBUILD_LIMIT => {
-                    return Err(PayError::Halted(format!(
-                        "row {row}: {REBUILD_LIMIT} attempts expired without landing; resume to try again"
-                    )));
-                }
-                Outcome::Failed(error) if expired == REBUILD_LIMIT => {
-                    return Err(PayError::Halted(format!(
-                        "row {row}: {REBUILD_LIMIT} attempts landed with an error, the last: {error}"
-                    )));
-                }
                 Outcome::Expired => {
+                    expired += 1;
+                    if expired == EXPIRED_LIMIT {
+                        return Err(PayError::Halted(format!(
+                            "row {row}: {EXPIRED_LIMIT} attempts expired without landing; resume to try again"
+                        )));
+                    }
                     (self.opts.log)(&format!("row {row}: attempt expired, rebuilding"));
                 }
                 Outcome::Failed(error) => {
+                    failed += 1;
+                    if failed == FAILED_LIMIT {
+                        return Err(PayError::Halted(format!(
+                            "row {row}: {FAILED_LIMIT} attempts landed with an error, the last: {error}"
+                        )));
+                    }
                     (self.opts.log)(&format!(
                         "row {row}: attempt landed with an error ({error}), rebuilding"
                     ));
                 }
             }
         }
-        unreachable!("the loop returns on landing or the rebuild limit")
     }
 
     fn record_landed(&mut self, attempt: &Attempt) -> Result<(), PayError> {
