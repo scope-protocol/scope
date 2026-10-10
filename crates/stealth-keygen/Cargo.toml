@@ -18,3 +18,4 @@ zeroize = "1.9.0"
 
 [dev-dependencies]
 ed25519-dalek = "2.2.0"
+proptest.workspace = true

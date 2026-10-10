@@ -39,7 +39,8 @@ They do not combine today. Configuring a confidential account needs the owner's 
 Each limit is stated once, in the doc that owns it:
 
 - Who learns what (the public, an RPC provider, the payer, a mint authority), and every limit on privacy or trust: payer visibility, the payer seeing where its own payment goes, merging re-linking payments, the one-time public amount when the payer shields treasury, headcount, scanning and registry lookups: [privacy.md](privacy.md).
-- Not every mint: stealth rows need a mint that approves new confidential accounts itself, which PYUSD and USDG do not, and USDC is not a Token-2022 mint (verification: V14). The rules per row kind: [payer.md](payer.md).
+- Not every mint: stealth rows need a mint that approves new confidential accounts itself, and no row works on a mint with a transfer fee or transfer hook extension. PYUSD and USDG carry both and do not auto-approve, and USDC is not a Token-2022 mint (verification: V14, V90), so no major stablecoin works today; the first use is a mint that approves accounts and carries neither. The rules per row kind: [payer.md](payer.md).
+- Recipient privacy ends where the recipient acts: the first public withdrawal or spend to a known counterparty links the destination to them ([privacy.md](privacy.md)).
 - Rent refunds depend on the recipient emptying the one-time account: [protocol.md](protocol.md).
 - The derivations have had no external cryptographic review [open, Q1 in plan.md].
 - No wallet shows confidential balances [unverified]. The rail is useful only as far as confidential balances are adopted.
@@ -61,7 +62,7 @@ Stablecoin payroll and B2B settlement platforms serving payers who are public an
 
 ## How much does a payment cost?
 
-A stealth row locks 4,008,120 lamports of payer rent that comes back at the sweep, funds the recipient's sweep with 4,622,680 lamports, and pays a transaction fee of 5,000 lamports plus a priority fee. A plain row costs only its fee. The priority fee is the only cost that grows with congestion. Breakdown and formulas: [payer.md](payer.md); rent per account: [protocol.md](protocol.md).
+A stealth row locks payer rent that comes back at the sweep, funds the recipient's sweep, and pays a transaction fee plus a priority fee. A plain row costs only its fee. The priority fee is the only cost that grows with congestion. Figures and formulas: [payer.md](payer.md); rent per account: [protocol.md](protocol.md).
 
 ## What is in scope?
 

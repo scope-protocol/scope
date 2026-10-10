@@ -2,8 +2,8 @@ use scope_interface::token_account::{CLOSE_ACCOUNT_INSTRUCTION, read_token_accou
 use solana_address::Address;
 use spl_token_2022_interface::{
     extension::{
-        BaseStateWithExtensionsMut, ExtensionType, StateWithExtensionsMut,
-        confidential_transfer::ConfidentialTransferAccount,
+        BaseStateWithExtensions, BaseStateWithExtensionsMut, ExtensionType, StateWithExtensions,
+        StateWithExtensionsMut, confidential_transfer::ConfidentialTransferAccount,
     },
     instruction::close_account,
     state::{Account, AccountState},
@@ -180,5 +180,34 @@ proptest! {
         let ct = v.confidential.expect("ct");
         prop_assert_eq!(ct.maximum_pending_balance_credit_counter, cap);
         prop_assert_eq!(ct.allow_non_confidential_credits, allow_public);
+
+        // The same bytes through the official unpacker.
+        let official = StateWithExtensions::<Account>::unpack(&data).expect("unpack");
+        prop_assert_eq!(official.base.owner.to_bytes(), v.owner);
+        prop_assert_eq!(official.base.amount, v.amount);
+        prop_assert_eq!(
+            Option::<Address>::from(official.base.delegate).map(|a| a.to_bytes()),
+            v.delegate
+        );
+        prop_assert_eq!(
+            Option::<Address>::from(official.base.close_authority).map(|a| a.to_bytes()),
+            v.close_authority
+        );
+        prop_assert_eq!(official.base.state as u8, v.state);
+        let official_ct = official
+            .get_extension::<ConfidentialTransferAccount>()
+            .expect("extension");
+        prop_assert_eq!(
+            u64::from(official_ct.maximum_pending_balance_credit_counter),
+            ct.maximum_pending_balance_credit_counter
+        );
+        prop_assert_eq!(
+            bool::from(official_ct.allow_non_confidential_credits),
+            ct.allow_non_confidential_credits
+        );
+        prop_assert_eq!(
+            u64::from(official_ct.pending_balance_credit_counter),
+            ct.pending_balance_credit_counter
+        );
     }
 }
