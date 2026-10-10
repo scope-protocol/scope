@@ -14,13 +14,16 @@ use solana_rpc_client::{
             UiAccountEncoding,
         },
         filter::{Memcmp, RpcFilterType},
-        request::RpcError,
+        request::{RpcError, RpcRequest},
     },
     rpc_client::{GetConfirmedSignaturesForAddress2Config, RpcClient},
 };
 use solana_signature::Signature;
 use solana_transaction::versioned::VersionedTransaction;
-use solana_transaction_status_client_types::{TransactionDetails, UiTransactionEncoding};
+use solana_transaction_status_client_types::{
+    EncodedConfirmedTransactionWithStatusMeta, TransactionDetails, TransactionStatus,
+    UiTransactionEncoding,
+};
 use std::{
     future::Future,
     time::{Duration, Instant},
@@ -49,6 +52,20 @@ pub struct AccountData {
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct ChainError(pub String);
+
+/// Starts the message of the error for a signature the node does not have.
+const NOT_FOUND: &str = "transaction not found";
+
+impl ChainError {
+    /// The node has no such transaction: not yet finalized, or pruned from its history.
+    pub fn not_found(signature: &Signature) -> Self {
+        Self(format!("{NOT_FOUND}: {signature}"))
+    }
+
+    pub fn is_not_found(&self) -> bool {
+        self.0.starts_with(NOT_FOUND)
+    }
+}
 
 pub trait Chain {
     fn account(
@@ -167,8 +184,8 @@ impl Failure {
                     r.is_timeout()
                         || r.is_connect()
                         || r.is_request()
-                        || r.status()
-                            .is_some_and(|s| s.as_u16() == 429 || s.is_server_error())
+                        // 429 is not retried here: the RPC client's HttpSender already retries it with Retry-After.
+                        || r.status().is_some_and(|s| s.is_server_error())
                 }
                 _ => false,
             };
@@ -333,10 +350,10 @@ impl Chain for RpcChain {
         let mut found = Vec::with_capacity(addresses.len());
         for chunk in addresses.chunks(100) {
             let rows = self
-                .call(
+                .read(|| {
                     self.rpc()
-                        .get_multiple_accounts_with_commitment(chunk, config(commitment)),
-                )?
+                        .get_multiple_accounts_with_commitment(chunk, config(commitment))
+                })?
                 .value;
             if rows.len() != chunk.len() {
                 return Err(ChainError(
@@ -478,16 +495,21 @@ impl Chain for RpcChain {
 
     fn landed_error(&self, signature: &Signature) -> Result<Option<String>, ChainError> {
         let signatures = [*signature];
-        let statuses = self.read(|| self.rpc().get_signature_statuses_with_history(&signatures))?;
-        Ok(statuses
-            .value
-            .into_iter()
-            .next()
-            .flatten()
-            .filter(|status| status.satisfies_commitment(CommitmentConfig::confirmed()))
-            .and_then(|status| status.err)
-            .map(|err| format!("{err:?}")))
+        let statuses = self.read(|| self.rpc().get_signature_statuses(&signatures))?;
+        Ok(finalized_error(
+            statuses.value.first().and_then(Option::as_ref),
+        ))
     }
+}
+
+/// The error of a transaction that landed and failed, only once that is finalized: a
+/// confirmed-level error can still roll back, and an expired blockhash is the engine's
+/// other way to a rebuild.
+fn finalized_error(status: Option<&TransactionStatus>) -> Option<String> {
+    status
+        .filter(|s| s.satisfies_commitment(CommitmentConfig::finalized()))
+        .and_then(|s| s.err.as_ref())
+        .map(|err| format!("{err:?}"))
 }
 
 impl RecipientChain for RpcChain {
@@ -606,14 +628,30 @@ impl crate::receipt::TransactionArchive for RpcChain {
         &self,
         signature: &Signature,
     ) -> Result<crate::receipt::ArchivedTransaction, ChainError> {
-        let found = self.call(self.rpc().get_transaction_with_config(
-            signature,
+        let params = serde_json::json!([
+            signature.to_string(),
             RpcTransactionConfig {
                 encoding: Some(UiTransactionEncoding::Base64),
                 commitment: Some(CommitmentConfig::finalized()),
                 max_supported_transaction_version: Some(1),
+            }
+        ]);
+        // A null result is a missing transaction; a block gap is a pruned one.
+        let found = match self.read_with(
+            || {
+                self.rpc()
+                    .send::<Option<EncodedConfirmedTransactionWithStatusMeta>>(
+                        RpcRequest::GetTransaction,
+                        params.clone(),
+                    )
             },
-        ))?;
+            false,
+        ) {
+            Ok(Some(found)) => found,
+            Ok(None) => return Err(ChainError::not_found(signature)),
+            Err(f) if f.block_gap => return Err(ChainError::not_found(signature)),
+            Err(f) => return Err(f.error),
+        };
         let transaction = found
             .transaction
             .transaction
@@ -639,15 +677,17 @@ impl crate::history::SignatureHistory for RpcChain {
         address: &Address,
         query: &crate::history::SignatureQuery<'_>,
     ) -> Result<Vec<crate::history::SignatureEntry>, ChainError> {
-        let rows = self.call(self.rpc().get_signatures_for_address_with_config(
-            address,
-            GetConfirmedSignaturesForAddress2Config {
-                before: query.before.copied(),
-                until: query.until.copied(),
-                limit: Some(query.limit),
-                commitment: Some(config(query.commitment)),
-            },
-        ))?;
+        let rows = self.read(|| {
+            self.rpc().get_signatures_for_address_with_config(
+                address,
+                GetConfirmedSignaturesForAddress2Config {
+                    before: query.before.copied(),
+                    until: query.until.copied(),
+                    limit: Some(query.limit),
+                    commitment: Some(config(query.commitment)),
+                },
+            )
+        })?;
         rows.into_iter()
             .map(|row| {
                 Ok(crate::history::SignatureEntry {
@@ -673,6 +713,33 @@ mod tests {
         net::TcpListener,
         time::Duration,
     };
+
+    fn status(
+        err: Option<solana_transaction_error::TransactionError>,
+        finalized: bool,
+    ) -> TransactionStatus {
+        use solana_transaction_status_client_types::TransactionConfirmationStatus as Level;
+        TransactionStatus {
+            slot: 1,
+            confirmations: (!finalized).then_some(3),
+            status: err.clone().map_or(Ok(()), Err),
+            err,
+            confirmation_status: Some(if finalized {
+                Level::Finalized
+            } else {
+                Level::Confirmed
+            }),
+        }
+    }
+
+    #[test]
+    fn only_a_finalized_error_counts_as_landed_failed() {
+        use solana_transaction_error::TransactionError::AccountInUse;
+        assert!(finalized_error(None).is_none());
+        assert!(finalized_error(Some(&status(Some(AccountInUse), false))).is_none());
+        assert!(finalized_error(Some(&status(None, true))).is_none());
+        assert!(finalized_error(Some(&status(Some(AccountInUse), true))).is_some());
+    }
 
     #[test]
     fn rpc_deadline_cancels_slow_responses_and_rate_limit_retries() {

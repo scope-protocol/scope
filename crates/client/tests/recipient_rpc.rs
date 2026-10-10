@@ -132,10 +132,19 @@ struct Calls {
     multi_calls: usize,
     largest_multi: usize,
     signature_query: Option<Value>,
+    signature_calls: usize,
+    transaction_calls: usize,
 }
 
-/// A JSON-RPC node over `accounts`; the `fail_multi`th getMultipleAccounts call (from 1)
-/// answers with an error.
+/// Calls the node answers with a transient error, counted from 1 per method.
+#[derive(Default, Clone)]
+struct Faults {
+    multi: std::ops::Range<usize>,
+    signatures: std::ops::Range<usize>,
+}
+
+/// A JSON-RPC node over `accounts`; the getMultipleAccounts calls in `fail_multi` (from 1)
+/// answer with an error.
 struct Node {
     url: String,
     stop: Arc<AtomicBool>,
@@ -149,7 +158,20 @@ impl Node {
     }
 }
 
-fn serve(accounts: HashMap<Address, AccountData>, fail_multi: Option<usize>) -> Node {
+fn serve(
+    accounts: HashMap<Address, AccountData>,
+    fail_multi: Option<std::ops::Range<usize>>,
+) -> Node {
+    serve_with(
+        accounts,
+        Faults {
+            multi: fail_multi.unwrap_or(0..0),
+            ..Faults::default()
+        },
+    )
+}
+
+fn serve_with(accounts: HashMap<Address, AccountData>, faults: Faults) -> Node {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listen");
     listener.set_nonblocking(true).expect("nonblocking");
     let url = format!("http://{}", listener.local_addr().expect("address"));
@@ -235,7 +257,7 @@ fn serve(accounts: HashMap<Address, AccountData>, fail_multi: Option<usize>) -> 
                     calls.multi_calls += 1;
                     let keys = request["params"][0].as_array().expect("keys");
                     calls.largest_multi = calls.largest_multi.max(keys.len());
-                    if fail_multi == Some(calls.multi_calls) {
+                    if faults.multi.contains(&calls.multi_calls) {
                         let body = serde_json::to_vec(&json!({"jsonrpc":"2.0", "id":request["id"],
                             "error":{"code":-32005, "message":"node is unhealthy"}}))
                         .expect("error");
@@ -254,6 +276,15 @@ fn serve(accounts: HashMap<Address, AccountData>, fail_multi: Option<usize>) -> 
                     json!({"context":{"slot":1}, "value":rows})
                 }
                 "getSignaturesForAddress" => {
+                    calls.signature_calls += 1;
+                    if faults.signatures.contains(&calls.signature_calls) {
+                        let body = serde_json::to_vec(&json!({"jsonrpc":"2.0", "id":request["id"],
+                            "error":{"code":-32005, "message":"node is unhealthy"}}))
+                        .expect("error");
+                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).expect("headers");
+                        stream.write_all(&body).expect("error body");
+                        continue;
+                    }
                     calls.signature_query = Some(request["params"].clone());
                     json!([
                         {"signature": signature().to_string(), "slot": 7, "err": null,
@@ -262,6 +293,10 @@ fn serve(accounts: HashMap<Address, AccountData>, fail_multi: Option<usize>) -> 
                          "err": {"InstructionError": [0, {"Custom": 1}]}, "memo": null,
                          "blockTime": null, "confirmationStatus": "finalized"}
                     ])
+                }
+                "getTransaction" => {
+                    calls.transaction_calls += 1;
+                    Value::Null
                 }
                 other => panic!("unexpected RPC: {other}"),
             };
@@ -315,7 +350,7 @@ fn scan_reads_candidate_accounts_in_batches_of_one_hundred() {
 fn a_failed_batch_stops_the_scan_with_the_progress_made() {
     let h = Harness::new();
     let alice = recipient(1, 2);
-    let node = serve(seed(&h, &alice, 250, |_| true), Some(2));
+    let node = serve(seed(&h, &alice, 250, |_| true), Some(2..100));
     let chain = RpcChain::from(RpcClient::new(node.url.clone()));
     let mut reported = 0;
     let error = scan::scan_with_results(&chain, &alice, None, |_| {
@@ -382,4 +417,87 @@ fn signatures_for_address_passes_the_query_and_reads_the_listing() {
     assert_eq!(query[1]["before"], before.to_string());
     assert_eq!(query[1]["limit"], 25);
     assert_eq!(query[1]["commitment"], "finalized");
+}
+
+#[test]
+fn a_transient_batch_error_is_retried_and_the_scan_completes() {
+    let h = Harness::new();
+    let alice = recipient(1, 2);
+    let node = serve(seed(&h, &alice, 250, |_| true), Some(2..3));
+    let chain = RpcChain::from(RpcClient::new(node.url.clone()));
+    let report = scan::scan(&chain, &alice, None).expect("RPC scan");
+    let calls = node.finish();
+    assert_eq!(report.payments.len(), 250);
+    assert_eq!(calls.multi_calls, 4, "three batches plus one retry");
+}
+
+#[test]
+fn a_batch_with_a_missing_account_in_the_middle_skips_only_that_payment() {
+    let h = Harness::new();
+    let alice = recipient(1, 2);
+    let mut accounts = seed(&h, &alice, 100, |_| true);
+    // Close the 50th payment's token account; its announcement stays.
+    let gone = accounts
+        .iter()
+        .filter(|(_, a)| a.owner != program_id())
+        .map(|(k, _)| *k)
+        .nth(50)
+        .expect("token account");
+    accounts.remove(&gone);
+    let node = serve(accounts, None);
+    let chain = RpcChain::from(RpcClient::new(node.url.clone()));
+    let report = scan::scan(&chain, &alice, None).expect("RPC scan");
+    let calls = node.finish();
+    assert_eq!(calls.multi_calls, 1);
+    assert_eq!(report.payments.len(), 99);
+    assert!(report.payments.iter().all(|p| p.token_account != gone));
+    assert!(
+        report.skipped.is_empty(),
+        "a closed account is not an error"
+    );
+}
+
+#[test]
+fn a_transient_listing_error_is_retried() {
+    use scope_client::{
+        chain::Commitment,
+        history::{SignatureHistory, SignatureQuery},
+    };
+    let h = Harness::new();
+    let node = serve_with(
+        seed(&h, &recipient(1, 2), 0, |_| true),
+        Faults {
+            signatures: 1..3,
+            ..Faults::default()
+        },
+    );
+    let chain = RpcChain::from(RpcClient::new(node.url.clone()));
+    let rows = chain
+        .signatures_for_address(
+            &Address::new_from_array([6; 32]),
+            &SignatureQuery {
+                before: None,
+                until: None,
+                limit: 25,
+                commitment: Commitment::Finalized,
+            },
+        )
+        .expect("listing after two transient errors");
+    let calls = node.finish();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(calls.signature_calls, 3);
+}
+
+#[test]
+fn a_null_transaction_is_not_found_and_not_retried() {
+    use scope_client::receipt::TransactionArchive;
+    let h = Harness::new();
+    let node = serve(seed(&h, &recipient(1, 2), 0, |_| true), None);
+    let chain = RpcChain::from(RpcClient::new(node.url.clone()));
+    let Err(error) = chain.transaction(&signature()) else {
+        panic!("a null result is not a transaction");
+    };
+    let calls = node.finish();
+    assert!(error.is_not_found(), "{error}");
+    assert_eq!(calls.transaction_calls, 1);
 }

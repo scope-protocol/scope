@@ -112,12 +112,7 @@ pub fn scan_with_results<C: RecipientChain>(
         if batch.is_empty() {
             break;
         }
-        let mut keys: Vec<Address> = Vec::with_capacity(batch.len());
-        for c in &batch {
-            if !keys.contains(&c.token_account) {
-                keys.push(c.token_account);
-            }
-        }
+        let keys: Vec<Address> = batch.iter().map(|c| c.token_account).collect();
         let sources = chain
             .accounts(&keys, Commitment::Confirmed)
             .map_err(|source| ScanError::Incomplete {
@@ -126,14 +121,8 @@ pub fn scan_with_results<C: RecipientChain>(
                 source,
             })?;
         read += batch.len();
-        for c in batch {
-            let Some(source) = keys
-                .iter()
-                .position(|k| *k == c.token_account)
-                .and_then(|i| sources.get(i))
-                .cloned()
-                .flatten()
-            else {
+        for (c, source) in batch.into_iter().zip(sources) {
+            let Some(source) = source else {
                 continue;
             };
             match decode_source(c.info(), c.payment, genesis, source, mint) {

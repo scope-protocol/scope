@@ -80,11 +80,11 @@ Every command that loads keys takes `--recipient-key` (default `~/.config/scope/
 | `scan` | `--mint <address>` | all mints | show payments in this mint only |
 | `scan` | `--min-amount <base units>` | `0` | hide smaller payments |
 | `scan` | `--ignore-payer <address>` | none | hide a payer's payments; repeatable |
-| `scan` | `--with-signature` | off | add each payment's signature, one history query per row |
-| `recover` | `--limit <n>` | `1000` | program transactions to examine, newest first |
+| `scan` | `--with-signature` | off | add each payment's signature: one listing plus one `getTransaction` per candidate; `unknown` until the payment finalizes, about 13 seconds |
+| `recover` | `--limit <n>` | `1000` | program signatures to list, newest first; failed ones count |
 | `recover` | `--since <signature>` | none | stop at this signature |
 | `sweep` | `--announcement <address>` | one of the two | from `scan` |
-| `sweep` | `--all` | off | sweep every payment `scan` finds, one transaction each; stops at the first failure and says how many were done |
+| `sweep` | `--all` | off | sweep every payment `scan` finds, one transaction each; a payment that fails alone is listed and skipped, and the run ends with an error naming them; a chain error or a sweep whose completion was not observed stops it |
 | `sweep --all` | `--mint`, `--ignore-payer` | none | as for `scan` |
 | `sweep --all` | `--min-amount <base units>` | `1` | skip smaller payments; a zero payment cannot be swept |
 | `sweep --all` | `--jitter-secs <max>` | `0` | wait a random 0 to `max` seconds between sweeps; 30 to 300 is a sensible range (not used with `--dry-run`) |
@@ -100,7 +100,7 @@ Every command that loads keys takes `--recipient-key` (default `~/.config/scope/
 
 ## Backups
 
-`register` writes the 64-byte recipient secret to a new file with mode 0600, creating missing directories with mode 0700, and syncs file and directory before it reports success. It never overwrites an existing file. Every load refuses a file that is not a regular, non-symlinked, owner-only file of exactly 64 bytes (verification: V66).
+`register` writes the 64-byte recipient secret to a new file with mode 0600 (directories 0700) and syncs file and directory before it reports success. It never overwrites an existing file. Every load refuses a file that is not a regular, non-symlinked, owner-only file of exactly 64 bytes (verification: V66).
 
 With `--encrypt-to`, the secret streams through [age](https://github.com/FiloSottile/age) and never touches disk in plaintext; load it with `--identity`, an owner-only age identity file. The round trip is tested with age installed (verification: V66).
 
@@ -109,7 +109,7 @@ scope register --recipient-key ./recipient.age --encrypt-to <age-public-recipien
 scope scan --recipient-key ./recipient.age --identity ./identity.txt --url <rpc-url>
 ```
 
-`register` warns on stderr about a plaintext backup, and about an encrypted one it did not read back (check it with `scope meta-address --identity <file>`). With `--verify-identity` it decrypts the file it wrote and fails unless the meta-address matches.
+`register` warns on stderr about a plaintext backup, and about an encrypted one it did not read back (check it with `scope meta-address --identity <file>`). With `--verify-identity` it decrypts the file first and prints the meta-address only if it matches; on a mismatch stdout stays empty and the file is left in place, unverified.
 
 
 ## Publishing
@@ -118,15 +118,15 @@ scope scan --recipient-key ./recipient.age --identity ./identity.txt --url <rpc-
 
 ## What does scan check?
 
-`scan` fetches program-owned accounts of the announcement's size and version, then checks each view tag locally, since tags depend on each R. The token accounts of tag matches are read with `getMultipleAccounts`, 100 per call, not one call each. For a match it checks the canonical announcement address, that the token account's owner is P, its close authority and delegate, that it is not frozen, the account policy (approved, no public credits, one pending credit), the ElGamal key derived for this account, and the balance hint against the ciphertext. Valid rows go to stdout as they are found; a failed check prints `skipped payment <account>: <reason>` to stderr and scanning continues. A chain error stops the scan with "scan stopped after reading N of M candidate accounts"; rows already printed are valid and the rest were not read (verification: V64).
+`scan` fetches program-owned accounts of the announcement's size and version, then checks each view tag locally, since tags depend on each R. Tag matches' token accounts are read with `getMultipleAccounts`, 100 per call. For a match it checks the canonical announcement address, that the token account's owner is P, its close authority and delegate, that it is not frozen, the account policy (approved, no public credits, one pending credit), the ElGamal key derived for this account, and the balance hint against the ciphertext. Valid rows go to stdout as they are found; a failed check prints `skipped payment <account>: <reason>` to stderr and scanning continues. A chain error stops the scan with "scan stopped after reading N of M candidate accounts"; rows already printed are valid and the rest were not read (verification: V64).
 
-A local RPC fixture scans 1,000 seeded announcements in about 350 ms on one machine; provider-scale timing is not measured (verification: V67).
+A local RPC fixture scans 1,000 seeded announcements in about 350 ms; provider-scale timing is not measured (verification: V67).
 
 An announcement proves setup and handover, not a positive amount: an unpaid or already swept account can show a zero amount, and sweep refuses it (verification: V64, V65).
 
 ## What does the sweep transaction do?
 
-One v1 transaction, fee paid by P and signed by P and D_owner. It creates your fresh account D, owned by D_owner, a standard Ed25519 key derived from your spend key and the exact R (verification: V61); moves the whole confidential amount from the one-time account into D and applies it, so D's available balance holds the amount when the sweep lands; burns any public dust and calls `reclaim`, which returns the one-time account's rent to the payer (verification: V77); and sends P's spare SOL to D_owner when that is enough for D_owner to stay rent-exempt, while P keeps its rent reserve (verification: V65). SOL someone sent to D's address cannot block it, and an existing token account at D is refused (verification: V65). Instruction by instruction, with bytes and compute: [protocol.md](protocol.md).
+One v1 transaction, fee paid by P and signed by P and D_owner. It creates your fresh account D, owned by D_owner, a standard Ed25519 key derived from your spend key and the exact R (verification: V61); moves the whole confidential amount from the one-time account into D and applies it, so D's available balance holds the amount when the sweep lands; burns any public dust and calls `reclaim`, which returns the one-time account's rent to the payer (verification: V77); and sends P's spare SOL to D_owner when that is enough for D_owner to stay rent-exempt, while P keeps its rent reserve (verification: V65). SOL someone sent to D's address cannot block it, and an existing token account at D is refused (verification: V65). Details: [protocol.md](protocol.md).
 
 ## Fallback, retries and dust
 
@@ -136,15 +136,15 @@ The sweep resends one signed transaction while its outcome is unknown. Only a fi
 
 `--timeout` starts after preparation and the first recovery record; no new send starts after it, but a sent transaction can still finalize. On timeout the sweep exits with "sweep completion has not been observed; check chain state before retrying" and the last recovery record (verification: V65).
 
-Success is a finalized successful signature for this attempt, even if follow-up reads fail (they print `unknown`). Without it, the sweep counts as complete only when the one-time account is empty or closed and D is your authenticated account (verification: V69).
+Success is a finalized successful signature for this attempt, even if follow-up reads fail (`unknown`). Otherwise it is complete only when the one-time account is empty or closed and D is yours (verification: V69).
 
 ## Recovery
 
-The recovery journal (default `<recipient-key>.sweeps.jsonl`) is a locked, owner-only JSONL file with header `{"format":"scope-recipient-recovery","version":1}`. Before every new attempt the sweep appends `genesis_hash`, `ephemeral`, `destination`, `owner`, `payment_authority` and `attempt_signature`, syncs it, then prints the same record to stdout; if either fails, that attempt is not sent. It holds no private key and no amount, but it is plaintext and links P, D, D_owner and R, so keep it as private as the key backup. A torn last record is cut before the next append; a foreign file or a symlink is refused (verification: V70). An entry records a prepared attempt, not a landed one.
+The recovery journal (default `<recipient-key>.sweeps.jsonl`) is a locked, owner-only JSONL file with header `{"format":"scope-recipient-recovery","version":1}`. Before every new attempt the sweep appends `genesis_hash`, `ephemeral`, `token_account`, `destination`, `owner`, `payment_authority` and `attempt_signature`, syncs it, then prints the same record to stdout; if either fails, that attempt is not sent. It holds no private key and no amount, but it is plaintext and links P, D, D_owner and R, so keep it as private as the key backup. A torn last record is cut before the next append; a foreign file or a symlink is refused (verification: V70). An entry records a prepared attempt, not a landed one.
 
-Once an announcement is reclaimed (a full sweep does this itself), scan no longer lists that payment. Exact R plus the key backup rebuilds D_owner and D's keys, so keep the journal or the saved output.
+Once an announcement is reclaimed (a full sweep does this), scan no longer lists that payment. R and T plus the key backup rebuild D's keys, so keep the journal or the saved output.
 
-Without them, `scope recover` rebuilds the list from history. It walks the program's transactions newest first, finds each `announce`, applies the one-byte tag check, and keeps a payment only when the transaction's own confidential transfer pays the key derived for you. It needs an RPC that keeps transaction history for the program and examines `--limit` transactions (1,000 by default); raise the limit for older payments. Tests use a fake history; no public RPC provider has been tried [unverified].
+Without them, `scope recover` rebuilds the list from history. It walks the program's transactions newest first, finds each `announce`, applies the one-byte tag check, and keeps a payment only when the transaction's own confidential transfer pays the key derived for you. It needs an RPC that keeps transaction history for the program and lists `--limit` signatures (1,000 by default, failed ones included). Rows print as found. A transport error is retried, then stops the run with the counts so far; printed rows stay valid. If the limit cut the walk short, stderr says so and prints the last signature examined for `--since`. No public RPC provider has been tried [unverified].
 
 ```sh
 scope recover --recipient-key ~/.config/scope/recipient.key --url <archival-rpc-url> --limit 5000

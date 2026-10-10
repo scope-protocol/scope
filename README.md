@@ -34,7 +34,7 @@ The recipient finds its payments and moves each into a fresh account of its own:
 
 ```sh
 scope scan --url <RPC>
-# announcement  token_account  mint  amount_base_units  public_amount_base_units  ephemeral
+# announcement  token_account  payer  mint  amount_base_units  public_amount_base_units  ephemeral
 scope sweep --announcement <ANNOUNCEMENT> --url <RPC>
 # swept: <amount> base units to <destination>
 ```

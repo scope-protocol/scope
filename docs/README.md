@@ -21,7 +21,7 @@ Start with the root README for building and testing, then the reading path for y
 | [audit.md](audit.md) | How do I prove an amount: `disclose`, `verify`, receipt formats, what a receipt reveals |
 | [plan.md](plan.md) | What is built, what is next, gates, spikes, risks, open questions with owners |
 | [decisions.md](decisions.md) | Why things are the way they are, newest first |
-| [decisions-archive.md](decisions-archive.md) | Decisions from before 2026-10-01 |
+| [decisions-archive.md](decisions-archive.md) | Decisions from 2026-09-28 to 2026-10-06 |
 | [verification.md](verification.md) | The evidence: every load-bearing claim with its primary source or test |
 
 ## Reading paths

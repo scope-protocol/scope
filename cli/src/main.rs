@@ -200,6 +200,9 @@ fn recipient_chain(url: String) -> RpcChain {
     ))
 }
 
+/// Appended where a missing payment signature may only be a payment that has not finalized.
+const FINALIZE_HINT: &str = "a payment finalizes about 13 seconds after it lands; retry shortly";
+
 fn run_scan(args: ScanArgs) -> anyhow::Result<()> {
     let recipient = args.keys.load()?;
     let chain = recipient_chain(rpc_url(args.url));
@@ -242,7 +245,14 @@ fn run_scan(args: ScanArgs) -> anyhow::Result<()> {
                 if args.with_signature {
                     match history::payment_signature(&chain, &p.token_account) {
                         Ok(Some(signature)) => write!(output, "\t{signature}")?,
-                        Ok(None) => write!(output, "\tunknown")?,
+                        Ok(None) => {
+                            writeln!(
+                                io::stderr().lock(),
+                                "signature for {}: not found yet; {FINALIZE_HINT}",
+                                p.token_account
+                            )?;
+                            write!(output, "\tunknown")?
+                        }
                         Err(error) => {
                             writeln!(
                                 io::stderr().lock(),
@@ -273,7 +283,12 @@ fn run_meta_address(args: MetaAddressArgs) -> anyhow::Result<()> {
 fn run_recover(args: RecoverArgs) -> anyhow::Result<()> {
     let recipient = args.keys.load()?;
     let chain = recipient_chain(rpc_url(args.url));
-    let report = history::recover(
+    let mut output = io::stdout().lock();
+    writeln!(
+        output,
+        "payer\tmint\ttoken_account\tephemeral\tsignature\tdestination\tdestination_exists\tdestination_lamports\tdestination_base_units"
+    )?;
+    let report = history::recover_with(
         &chain,
         &chain,
         &recipient,
@@ -281,42 +296,48 @@ fn run_recover(args: RecoverArgs) -> anyhow::Result<()> {
             limit: args.limit,
             since: args.since,
         },
+        |p| {
+            let (exists, lamports, amount) = match &p.destination_state {
+                Some(d) => (
+                    "yes",
+                    d.lamports.to_string(),
+                    d.amount.map_or("unknown".into(), |a| a.to_string()),
+                ),
+                None => ("no", "-".into(), "-".into()),
+            };
+            writeln!(
+                output,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{exists}\t{lamports}\t{amount}",
+                p.payer,
+                p.mint,
+                p.token_account,
+                Address::new_from_array(p.ephemeral),
+                p.signature,
+                p.destination
+            )?;
+            output.flush()
+        },
     )?;
-    let mut output = io::stdout().lock();
-    writeln!(
-        output,
-        "payer\tmint\ttoken_account\tephemeral\tsignature\tdestination\tdestination_exists\tdestination_lamports\tdestination_base_units"
-    )?;
-    for p in &report.found {
-        let (exists, lamports, amount) = match &p.destination_state {
-            Some(d) => (
-                "yes",
-                d.lamports.to_string(),
-                d.amount.map_or("unknown".into(), |a| a.to_string()),
-            ),
-            None => ("no", "-".into(), "-".into()),
-        };
-        writeln!(
-            output,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{exists}\t{lamports}\t{amount}",
-            p.payer,
-            p.mint,
-            p.token_account,
-            Address::new_from_array(p.ephemeral),
-            p.signature,
-            p.destination
-        )?;
-    }
     eprintln!(
-        "examined {} transactions, found {} payments",
+        "listed {} transactions, examined {}, found {} payments",
+        report.listed,
         report.examined,
         report.found.len()
     );
     if report.unavailable > 0 {
         eprintln!(
-            "warning: the node would not return {} listed transactions; use an RPC that keeps history for the program",
+            "warning: the node does not have {} listed transactions; use an RPC that keeps history for the program",
             report.unavailable
         );
+    }
+    if report.truncated {
+        eprintln!(
+            "warning: examined {} transactions; older ones were not examined (raise --limit or pass --since <last signature>)",
+            report.listed
+        );
+        if let Some(last) = report.last_signature {
+            eprintln!("last signature examined: {last}");
+        }
     }
     Ok(())
 }
@@ -324,12 +345,17 @@ fn run_recover(args: RecoverArgs) -> anyhow::Result<()> {
 fn run_register(args: RegisterArgs) -> anyhow::Result<()> {
     let path = expand_home(&args.recipient_key)?;
     let address = recipient_keys::create(&path, args.encrypt_to.as_deref())?;
-    println!("{address}");
     eprintln!("recipient backup: {}", path.display());
     match &args.verify_identity {
         Some(identity) => {
-            recipient_keys::verify_readback(&path, &expand_home(identity)?, &address)
-                .context("the new backup does not decrypt with that identity; do not rely on it")?;
+            recipient_keys::verify_readback(&path, &expand_home(identity)?, &address).with_context(
+                || {
+                    format!(
+                        "the new backup does not decrypt with that identity; do not rely on it (the file is left in place at {} and unverified)",
+                        path.display()
+                    )
+                },
+            )?;
             eprintln!("backup decrypted and matches the meta-address");
         }
         None if args.encrypt_to.is_some() => eprintln!(
@@ -339,6 +365,7 @@ fn run_register(args: RegisterArgs) -> anyhow::Result<()> {
             "warning: the backup is a plaintext file; anyone who can read it can spend your payments (use --encrypt-to)"
         ),
     }
+    println!("{address}");
     Ok(())
 }
 
@@ -418,8 +445,28 @@ fn random_up_to(max: u64) -> u64 {
     getrandom::u64().map_or(max, |value| value % (max + 1))
 }
 
-/// Sweeps each announcement in order, waiting a random 0 to `jitter_secs` between them, and
-/// stops at the first failure after saying how far it got.
+/// Whether `error` is about this one payment alone, so the rest of a batch can still be
+/// swept. Anything unclassified, and anything about the chain, the journal or a completion
+/// that was not observed, stops the batch.
+fn affects_only_this_payment(error: &anyhow::Error) -> bool {
+    use scope_client::{scan::ScanError, sweep::SweepError};
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<SweepError>(),
+            Some(
+                SweepError::Invalid(_)
+                    | SweepError::Underfunded { .. }
+                    | SweepError::Simulation(_)
+                    | SweepError::Scan(ScanError::Invalid { .. })
+            )
+        )
+    })
+}
+
+/// Sweeps each announcement in order, waiting a random 0 to `jitter_secs` after each one that
+/// went through. A payment that fails on its own terms is reported and skipped, so one hostile
+/// announcement cannot block the rest; the batch then ends with an error naming the failures.
+/// Errors that would hit every payment stop it at once.
 fn sweep_all(
     announcements: &[Address],
     jitter_secs: u64,
@@ -433,23 +480,45 @@ fn sweep_all(
         writeln!(output, "no payments to sweep")?;
         return Ok(());
     }
-    for (done, announcement) in announcements.iter().enumerate() {
-        if done > 0 && jitter_secs > 0 {
+    let mut swept = 0;
+    let mut failed: Vec<(Address, String)> = Vec::new();
+    let mut wait_next = false;
+    for announcement in announcements {
+        if wait_next && jitter_secs > 0 {
             let wait = random(jitter_secs);
             writeln!(output, "waiting {wait}s before the next sweep")?;
             output.flush()?;
             sleep(Duration::from_secs(wait));
         }
-        if let Err(error) = sweep(announcement) {
-            writeln!(
-                output,
-                "stopped: {done} of {total} swept, {announcement} failed"
-            )?;
-            return Err(error.context(format!("sweeping {announcement}")));
+        match sweep(announcement) {
+            Ok(()) => {
+                swept += 1;
+                wait_next = true;
+            }
+            Err(error) if affects_only_this_payment(&error) => {
+                writeln!(output, "failed: {announcement}: {error:#}")?;
+                failed.push((*announcement, format!("{error:#}")));
+                wait_next = false;
+            }
+            Err(error) => {
+                writeln!(
+                    output,
+                    "stopped: {swept} of {total} swept, {} failed before it, {announcement} failed",
+                    failed.len()
+                )?;
+                return Err(error.context(format!("sweeping {announcement}")));
+            }
         }
     }
-    writeln!(output, "swept {total} of {total}")?;
-    Ok(())
+    if failed.is_empty() {
+        writeln!(output, "swept {total} of {total}")?;
+        return Ok(());
+    }
+    writeln!(output, "swept {swept} of {total}; not swept:")?;
+    for (announcement, why) in &failed {
+        writeln!(output, "  {announcement}\t{why}")?;
+    }
+    bail!("{} of {total} payments were not swept", failed.len())
 }
 
 fn sweep_one(
@@ -646,8 +715,7 @@ struct DiscloseArgs {
 struct VerifyArgs {
     /// Receipt file from `scope disclose`.
     receipt: PathBuf,
-    /// An RPC node that keeps transaction history.
-    /// RPC node; defaults to $SCOPE_URL, else http://127.0.0.1:8899.
+    /// RPC node that keeps transaction history; defaults to $SCOPE_URL, else http://127.0.0.1:8899.
     #[arg(long)]
     url: Option<String>,
 }
@@ -678,7 +746,7 @@ fn run_disclose(args: DiscloseArgs) -> anyhow::Result<()> {
                 .token_account
                 .context("--run, --signature or --token-account")?;
             let signature = history::payment_signature(&chain, &token_account)?.with_context(|| {
-                format!("no payment transaction for {token_account} in this node's history; pass --signature")
+                format!("no payment transaction for {token_account} in this node's history; pass --signature, or {FINALIZE_HINT}")
             })?;
             eprintln!("payment signature: {signature}");
             receipt::disclose_as_recipient(&chain, &args.keys.load()?, &signature)?
@@ -740,7 +808,7 @@ struct PayArgs {
     reclaim: bool,
     /// Return the rent of every swept one-time account this payer ever made, found on chain
     /// and without a run journal.
-    #[arg(long, conflicts_with_all = ["dry_run", "yes"])]
+    #[arg(long, conflicts_with_all = ["dry_run"])]
     reclaim_all: bool,
     /// Run every preflight and print the plan and its cost; send nothing, write no journal.
     #[arg(long, conflicts_with_all = ["resume", "status", "reclaim_all"])]
@@ -783,7 +851,8 @@ fn rpc_url(flag: Option<String>) -> String {
 }
 
 fn pick_url(flag: Option<String>, env: Option<String>) -> String {
-    flag.or(env.filter(|url| !url.is_empty()))
+    flag.filter(|url| !url.is_empty())
+        .or(env.filter(|url| !url.is_empty()))
         .unwrap_or_else(|| DEFAULT_URL.into())
 }
 
@@ -793,7 +862,27 @@ fn runs_dir(path: &str) -> anyhow::Result<PathBuf> {
     std::path::absolute(&path).with_context(|| format!("resolving {}", path.display()))
 }
 
+/// True when `dir` holds at least one run, a subdirectory with a journal.
+fn has_runs(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.path().join("journal.jsonl").is_file())
+    })
+}
+
+/// Runs created before the default moved sit in `./runs`; the duplicate guard cannot see them.
+fn warn_about_old_runs(runs_flag: &str) {
+    if runs_flag == DEFAULT_RUNS && has_runs(std::path::Path::new("runs")) {
+        eprintln!(
+            "warning: ./runs holds earlier runs, but the default is now {DEFAULT_RUNS}, so \
+             the duplicate-input guard and --resume will not see them; pass --runs ./runs to use them"
+        );
+    }
+}
+
 fn run_pay(args: PayArgs) -> anyhow::Result<()> {
+    warn_about_old_runs(&args.runs);
     let keypair_path = expand_home(&args.keypair)?;
     let payer = read_keypair_file(&keypair_path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", keypair_path.display()))?;
@@ -807,10 +896,24 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
     };
     if let Some(run_id) = args.status {
         let mut chain = chain;
+        if args.reclaim {
+            pay::mainnet_gate(
+                &chain.genesis_hash()?,
+                args.yes,
+                pay::GateFor::ResumeOrReclaim,
+            )
+            .map_err(anyhow::Error::msg)?;
+        }
         return print_status(&mut chain, &payer, &run_id, args.reclaim, &opts);
     }
     if args.reclaim_all {
         let mut chain = chain;
+        pay::mainnet_gate(
+            &chain.genesis_hash()?,
+            args.yes,
+            pay::GateFor::ResumeOrReclaim,
+        )
+        .map_err(anyhow::Error::msg)?;
         println!("announcement\ttoken_account\toutcome");
         for r in pay::reclaim_all(&mut chain, &payer, &opts)? {
             let outcome = match r.outcome {
@@ -842,7 +945,12 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
         }
         return Ok(());
     }
-    pay::mainnet_gate(&chain.genesis_hash()?, args.yes).map_err(anyhow::Error::msg)?;
+    let gate = if args.resume.is_some() {
+        pay::GateFor::ResumeOrReclaim
+    } else {
+        pay::GateFor::NewRun
+    };
+    pay::mainnet_gate(&chain.genesis_hash()?, args.yes, gate).map_err(anyhow::Error::msg)?;
     let report = match args.resume {
         Some(run_id) => {
             let keys = SourceKeys::from_signer(&payer)?;
@@ -964,14 +1072,47 @@ fn print_status(
 /// Exit codes: 0 done, 1 refused or failed before anything was sent, 2 bad arguments (clap),
 /// 3 transient, retry or resume later, 4 stopped after sending, inspect then resume.
 fn exit_code(error: &anyhow::Error) -> u8 {
-    use scope_client::{chain::ChainError, pay::PayError};
+    use scope_client::{
+        chain::ChainError, history::HistoryError, journal::JournalError, pay::PayError,
+        receipt::ReceiptError, scan::ScanError, sweep::SweepError,
+    };
+    fn scan(e: &ScanError) -> u8 {
+        match e {
+            ScanError::Chain(_) | ScanError::Incomplete { .. } => 3,
+            _ => 1,
+        }
+    }
+    fn sweep(e: &SweepError) -> u8 {
+        match e {
+            SweepError::Chain(_) => 3,
+            SweepError::Scan(e) => scan(e),
+            SweepError::Pending { .. } | SweepError::Interrupted { .. } => 4,
+            _ => 1,
+        }
+    }
     for cause in error.chain() {
-        if let Some(pay) = cause.downcast_ref::<PayError>() {
-            return match pay {
+        if let Some(e) = cause.downcast_ref::<PayError>() {
+            return match e {
                 PayError::FeeAboveCap { .. } | PayError::Chain(_) => 3,
-                PayError::Halted(_) | PayError::Simulation { .. } => 4,
+                PayError::Journal(JournalError::Locked(_)) => 3,
+                PayError::Halted(_) => 4,
                 _ => 1,
             };
+        }
+        if let Some(e) = cause.downcast_ref::<SweepError>() {
+            return sweep(e);
+        }
+        if let Some(e) = cause.downcast_ref::<ScanError>() {
+            return scan(e);
+        }
+        if matches!(
+            cause.downcast_ref::<HistoryError>(),
+            Some(HistoryError::Chain(_))
+        ) || matches!(
+            cause.downcast_ref::<ReceiptError>(),
+            Some(ReceiptError::Chain(_))
+        ) {
+            return 3;
         }
         if cause.downcast_ref::<ChainError>().is_some() {
             return 3;
@@ -1104,6 +1245,37 @@ mod tests {
         assert_eq!(exit_code(&anyhow::anyhow!("plain")), 1);
         let wrapped = anyhow::Error::new(PayError::Halted("x".into())).context("pay");
         assert_eq!(exit_code(&wrapped), 4);
+        assert_eq!(
+            code(PayError::Simulation {
+                row: 0,
+                logs: "nothing sent".into()
+            }),
+            1
+        );
+    }
+
+    #[test]
+    fn transparent_chain_errors_and_stops_after_sending_are_classified() {
+        use scope_client::{
+            chain::ChainError, history::HistoryError, receipt::ReceiptError, scan::ScanError,
+            sweep::SweepError,
+        };
+        let rpc = || ChainError("rpc".into());
+        let of = |e: anyhow::Error| exit_code(&e);
+        assert_eq!(of(SweepError::Chain(rpc()).into()), 3);
+        assert_eq!(of(SweepError::Scan(ScanError::Chain(rpc())).into()), 3);
+        assert_eq!(of(ScanError::Chain(rpc()).into()), 3);
+        assert_eq!(of(HistoryError::Chain(rpc()).into()), 3);
+        assert_eq!(of(ReceiptError::Chain(rpc()).into()), 3);
+        assert_eq!(
+            of(anyhow::Error::new(SweepError::Chain(rpc())).context("sweep")),
+            3
+        );
+        assert_eq!(of(SweepError::Invalid("bad".into()).into()), 1);
+        let pending = SweepError::Pending {
+            report: Box::new(report()),
+        };
+        assert_eq!(of(pending.into()), 4);
     }
 
     #[test]
@@ -1363,7 +1535,7 @@ mod tests {
     }
 
     #[test]
-    fn sweep_all_stops_at_the_first_failure_and_says_how_far_it_got() {
+    fn sweep_all_stops_on_an_unclassified_error_and_says_how_far_it_got() {
         let found = addresses(4);
         let mut attempted = Vec::new();
         let mut output = Vec::new();
@@ -1385,8 +1557,86 @@ mod tests {
         assert_eq!(attempted, found[..3]);
         assert!(format!("{error:#}").contains("payment authority is not funded"));
         let text = String::from_utf8(output).expect("text");
-        assert!(text.contains(&format!("stopped: 2 of 4 swept, {} failed", found[2])));
+        assert!(text.contains(&format!(
+            "stopped: 2 of 4 swept, 0 failed before it, {} failed",
+            found[2]
+        )));
         assert!(!text.contains("swept 4 of 4"));
+    }
+
+    #[test]
+    fn sweep_all_skips_payments_that_fail_alone_and_reports_them_at_the_end() {
+        use scope_client::sweep::SweepError;
+        let found = addresses(4);
+        let mut attempted = Vec::new();
+        let mut waits = 0;
+        let mut output = Vec::new();
+        let error = sweep_all(
+            &found,
+            10,
+            &mut |_| 1,
+            &mut |_| waits += 1,
+            &mut |a| {
+                attempted.push(*a);
+                match attempted.len() {
+                    1 => Err(anyhow::Error::new(SweepError::Underfunded {
+                        have: 1,
+                        need: 5,
+                        short: 4,
+                    })
+                    .context("preparing")),
+                    _ => Ok(()),
+                }
+            },
+            &mut output,
+        )
+        .expect_err("one payment failed");
+        assert_eq!(attempted, found);
+        assert!(error.to_string().contains("1 of 4 payments were not swept"));
+        // No pause after a payment that sent nothing; two pauses between the three that did.
+        assert_eq!(waits, 2);
+        let text = String::from_utf8(output).expect("text");
+        assert!(text.contains("swept 3 of 4; not swept:"));
+        assert!(text.contains(&format!(
+            "  {}\tpreparing: payment authority holds 1",
+            found[0]
+        )));
+    }
+
+    #[test]
+    fn sweep_all_stops_when_a_completion_was_not_observed_or_the_chain_fails() {
+        use scope_client::{chain::ChainError, sweep::SweepError};
+        for hard in [
+            anyhow::Error::new(SweepError::Chain(ChainError("rpc down".into()))),
+            anyhow::Error::new(SweepError::Pending {
+                report: Box::new(report()),
+            }),
+        ] {
+            let found = addresses(3);
+            let mut attempted = 0;
+            let mut hard = Some(hard);
+            let mut output = Vec::new();
+            let error = sweep_all(
+                &found,
+                0,
+                &mut |_| 0,
+                &mut |_| {},
+                &mut |_| {
+                    attempted += 1;
+                    match hard.take() {
+                        Some(e) if attempted == 2 => Err(e),
+                        other => {
+                            hard = other;
+                            Ok(())
+                        }
+                    }
+                },
+                &mut output,
+            )
+            .expect_err("hard stop");
+            assert_eq!(attempted, 2);
+            assert!(!error.to_string().is_empty());
+        }
     }
 
     #[test]
@@ -1419,12 +1669,33 @@ mod tests {
     }
 
     #[test]
+    fn earlier_runs_are_found_by_their_journals() {
+        let dir = std::env::temp_dir().join(format!("scope-has-runs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!has_runs(&dir), "a missing directory holds none");
+        std::fs::create_dir_all(dir.join("abc")).expect("run dir");
+        assert!(
+            !has_runs(&dir),
+            "a directory without a journal is not a run"
+        );
+        std::fs::write(dir.join("abc/journal.jsonl"), b"").expect("journal");
+        assert!(has_runs(&dir));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn reclaim_all_takes_yes_for_mainnet() {
+        assert!(parse_pay(&["--reclaim-all", "--yes"]).expect("yes").yes);
+    }
+
+    #[test]
     fn the_rpc_url_comes_from_the_flag_then_the_environment_then_localhost() {
         let own = Some("https://flag".to_string());
         let env = Some("https://env".to_string());
         assert_eq!(pick_url(own.clone(), env.clone()), "https://flag");
         assert_eq!(pick_url(None, env), "https://env");
         assert_eq!(pick_url(None, Some(String::new())), DEFAULT_URL);
+        assert_eq!(pick_url(Some(String::new()), None), DEFAULT_URL);
         assert_eq!(pick_url(None, None), DEFAULT_URL);
         assert_eq!(pick_url(own, None), "https://flag",);
     }
