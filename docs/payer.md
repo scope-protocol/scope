@@ -1,12 +1,12 @@
 ---
 status: decided
-last_verified: 2026-10-07
+last_verified: 2026-10-10
 ---
 
 # Paying with `scope pay`
 
-TL;DR: for whoever runs payouts. After reading you can write an input file, pay a batch of plain and stealth rows, recover from a crash, price the run, and get stealth-row rent back.
-Each row is paid at most once; the run journal plus the payer key are all you need to resume, check status or prove an amount later ([audit.md](audit.md)).
+TL;DR: for whoever runs payouts: write an input file, preview a batch, pay plain and stealth rows, recover from a crash, price the run, get stealth-row rent back.
+Each row is paid at most once; the journal and payer key suffice to resume, check status or prove an amount ([audit.md](audit.md)).
 
 ## Before you start
 
@@ -15,7 +15,7 @@ Each row is paid at most once; the run journal plus the payer key are all you ne
 | A cluster with Token-2022 confidential transfers enabled | every row is a confidential transfer |
 | `scope-program` deployed on that cluster, for stealth rows only | stealth rows call `announce`; plain rows use Token-2022 alone. Where it is deployed: [plan.md](plan.md) |
 | A source: your confidential Token-2022 account on the mint, owned by `--keypair`, with its pending balance applied | the engine derives the source's ElGamal and AE keys from `--keypair` the same way spl-token-cli 5.6.1 does (verification: V50) |
-| SOL in the payer wallet | per stealth row 8,630,800 lamports (about 0.0086 SOL) plus fees: 4,008,120 of rent that comes back and 4,622,680 that funds the recipient's sweep. Twenty stealth rows need about 0.173 SOL. Breakdown: [How much does a stealth row cost the payer?](#how-much-does-a-stealth-row-cost-the-payer) |
+| SOL in the payer wallet | per stealth row 8,630,800 lamports (about 0.0086 SOL) plus fees: 4,008,120 of rent that comes back and 4,622,680 that funds the recipient's sweep. Twenty stealth rows need about 0.173 SOL. The run checks this first and stops with "the payer needs X SOL, has Y", split into rent, funding and fees. Breakdown: [How much does a stealth row cost the payer?](#how-much-does-a-stealth-row-cost-the-payer) |
 
 Setting up the source with spl-token-cli [unverified: not run in this repo]:
 
@@ -37,6 +37,25 @@ recipient,amount
 scope:<meta-address from the recipient's `scope register`>,980   # contractor, one-time account
 ```
 
+Preview first: `--dry-run` checks the input, mint, duplicates, source, plain recipients and the payer's SOL, and samples fees. It sends nothing, derives no stealth rows and simulates nothing.
+
+```sh
+scope pay --dry-run --input payroll.csv --mint <mint> --source <your-confidential-token-account> \
+  --keypair ~/.config/solana/id.json --url <rpc-url>
+```
+
+```text
+cluster	devnet
+rows	2 (1 plain, 1 stealth)
+total	2230.500000 (2230500000 base units)
+payer SOL	needs 0.009545362, has 4.500000000
+fee cap per row	280000 lamports plain, 300000 stealth, at 1000000 micro-lamports/CU
+fee price now	8001 micro-lamports/CU
+nothing sent, no journal written
+```
+
+Then run it. On mainnet-beta every command that sends also needs `--yes`: a new run, `--resume`, `--status --reclaim` and `--reclaim-all`.
+
 ```sh
 scope pay --input payroll.csv --mint <mint> --source <your-confidential-token-account> \
   --keypair ~/.config/solana/id.json --url <rpc-url>
@@ -46,6 +65,7 @@ Progress goes to stderr, the result to stdout; rows go out in random order:
 
 ```text
 run 3f9c0a1b2d4e5f60: 2 rows                          (stderr)
+journal: ~/.local/share/scope/runs/3f9c0a1b2d4e5f60/journal.jsonl   (stderr)
 row 1: <one-time token account> paid, <signature>     (stderr)
 row 0: <recipient-token-account> paid, <signature>    (stderr)
 run 3f9c0a1b2d4e5f60 done                             (stderr)
@@ -54,7 +74,7 @@ run 3f9c0a1b2d4e5f60: 2 rows paid
 0	<recipient-token-account>	<signature>
 ```
 
-Each stdout line is the row, the account paid and the payment signature. Keep the run id; a stealth recipient needs its signature for a receipt ([audit.md](audit.md)).
+Each stdout line is the row, the account paid and the signature. Keep the run id; a stealth recipient needs the signature for a receipt ([audit.md](audit.md)).
 
 ## Flags
 
@@ -64,25 +84,28 @@ Each stdout line is the row, the account paid and the payment signature. Keep th
 | `--mint <address>` | required for a new run | Token-2022 mint with confidential transfers |
 | `--source <address>` | required for a new run | your confidential token account, owned by `--keypair` |
 | `--keypair <file>` | `~/.config/solana/id.json` | owns the source, signs and pays every fee |
-| `--url <rpc>` | `http://127.0.0.1:8899` | RPC node |
-| `--runs <dir>` | `runs` | one journal directory per run |
+| `--url <rpc>` | `$SCOPE_URL`, else `http://127.0.0.1:8899` | RPC node |
+| `--runs <dir>` | `~/.local/share/scope/runs` | one journal directory per run; relative paths are made absolute |
 | `--max-price <n>` | `1000000` | priority price cap, micro-lamports per CU |
 | `--again` | off | pay an input file an earlier run already paid |
 | `--resume <run_id>` | | continue an interrupted run |
-| `--status <run_id>` | | show each stealth row's state |
+| `--status <run_id>` | | rows landed, run state, plain rows, stealth rows |
 | `--reclaim` | off | with `--status`: reclaim rent of swept rows |
+| `--reclaim-all` | off | reclaim every swept row this payer ever made, no journal needed |
+| `--dry-run` | off | check and price a new run; send nothing, write nothing |
+| `--yes` | off | confirm anything that sends on mainnet-beta |
 
-`--input`, `--mint` and `--source` conflict with `--resume` and `--status`, and `--resume` conflicts with `--status`.
+`--input`, `--mint` and `--source` conflict with `--resume`, `--status` and `--reclaim-all`; those three and `--dry-run` conflict with each other.
 
 ## What can a row be?
 
-One `recipient,amount` per line. The first line that is not blank or a comment is a header if it starts with `recipient`; blank lines are skipped and `#` starts a comment anywhere on a line.
+One `recipient,amount` per line. A first line starting with `recipient` is a header; blank lines are skipped; `#` starts a comment.
 
-- **Recipient.** A plain row names the recipient's own configured confidential token account. A stealth row names a `scope:` meta-address; the parser checks its checksum, version and keys before anything is derived (verification: V62). A payer can look up meta-addresses that wallets published with `scope lookup <wallet>... --url <rpc>`, which prints `<wallet>\t<meta-address>` or `<wallet>\tnot published` (verification: V81). What a lookup reveals: [privacy.md](privacy.md).
-- **Amount.** Token units, a plain decimal with at most the mint's decimals: no sign, no exponent, not zero. The most one row can move is 2^48 - 1 base units, the limit of one confidential transfer; 281474976.710655 is the largest amount on a 6-decimal mint (verification: V84).
-- **Row number.** Rows are numbered from 0 in file order, counting only rows, not the header, comments or blank lines. `--status`, the output and `disclose --row` use this number.
+- **Recipient.** A plain row names the recipient's own configured confidential token account. A stealth row names a `scope:` meta-address, whose checksum, version and keys are checked before anything is derived (verification: V62). `scope lookup <wallet>...` finds published ones ([privacy.md](privacy.md)).
+- **Amount.** Token units, a plain decimal with at most the mint's decimals: no sign, no exponent, not zero, at most 2^48 - 1 base units, the limit of one confidential transfer (281474976.710655 on 6 decimals; verification: V84).
+- **Row number.** Rows count from 0 in file order, skipping header, comments and blank lines.
 
-The rows together must fit the source's available balance (verification: V48).
+The rows together must fit the source's available balance (V48).
 
 ## Which mints work?
 
@@ -92,47 +115,48 @@ The rows together must fit the source's available balance (verification: V48).
 | Auditor key | works, proofs include it (V48) | works, proofs include it |
 | New confidential accounts need the issuer's approval | works if the recipient's account is already approved | refused before anything is sent (V72, V76) |
 | New accounts frozen by default | works if the recipient's account is not frozen | refused [unverified: no test] |
-| Non-transferable, transfer-fee or transfer-hook extension | refused [unverified: no test] | refused [unverified: no test] |
+| Transfer fee (even 0 bps), transfer hook (even a null program), non-transferable, paused | refused, naming the extension | refused, naming the extension |
+| Permanent delegate, mint close authority | works; a trust limit ([privacy.md](privacy.md)) | works; a trust limit |
 
-Stealth rows need a mint that approves new confidential accounts itself, because `announce` does not check approval (verification: V72). PYUSD and USDG require approval of every new confidential account, so they take plain rows only; USDC is legacy SPL Token and takes neither (verification: V14). Mint policy binds rows still to pay: a later policy change does not stop `--resume` from settling rows already paid, nor `disclose` (verification: V84).
+SCOPE has no transfer-with-fee path and passes no hook accounts, so fee and hook mints are refused. PYUSD and USDG carry both and require approval of every new account; neither works today (V90, V14). Stealth rows need a mint that approves new accounts itself, because `announce` does not check approval (V72). Mint policy binds rows still to pay: a later change stops neither `--resume` settling paid rows nor `disclose` (V84).
 
 ## What happens to each row?
 
-**Before anything is sent**, the run checks the mint, every row, the source (owner, mint, ElGamal key derived from `--keypair`, balance hint against the ciphertext) and every plain recipient (Token-2022, same mint, not frozen, approved, confidential credits on, pending credit counter below its maximum). Any failure stops it with no journal created (verification: V48, V50).
+**Before anything is sent**, the run checks the mint, every row, the source (owner, mint, ElGamal key from `--keypair`, balance hint against the ciphertext), the payer's SOL, and every plain recipient (Token-2022, same mint, not frozen, approved, credits on). A recipient named by several rows needs pending-credit room for all of them. Any failure stops it with no journal created (V48, V50).
 
 **Per row**, in the random send order:
 
-1. Build the transfer on the source's current ciphertext. A stealth row adds the one-time account's setup, handover, `announce` and P's funding in the same transaction ([protocol.md](protocol.md)).
-2. Simulate it. A failed simulation stops the run, nothing sent.
-3. Append the attempt, with the signed transaction, to the journal and fsync it.
-4. Send, and resend the same signed transaction, until the source shows it landed or the attempt is provably dead.
+1. Build the transfer on the source's current ciphertext. A stealth row adds the one-time account's setup, handover, `announce` and P's funding ([protocol.md](protocol.md)).
+2. Simulate it; a failure stops the run, nothing sent.
+3. Journal the attempt with its signed transaction and fsync.
+4. Send, and resend the same signed transaction until the source shows it landed or the attempt is dead (expired, or landed with an error).
 5. Record `landed` at confirmed, then move on.
 
-Then the run waits for the finalized source to show the last row's ciphertext and writes `done`.
+Then the run waits for the finalized source to show the last ciphertext and writes `done`.
 
-**At most once.** Token-2022 applies a transfer only on the exact source ciphertext its equality proof was built on, and every attempt for a row is built on the same ciphertext, so at most one lands (verification: V8). The source's available ciphertext is the oracle: equal to the attempt's post-transfer value (verification: V51) means it landed, equal to the pre-transfer value means nothing did, anything else halts. A row is rebuilt only once the finalized block height passes the attempt's last valid block height and the finalized source still shows the pre-transfer value. Do not spend from the source with other software during a run: the run halts with "source changed outside this run" (verification: V48).
+**At most once.** Token-2022 applies a transfer only on the exact source ciphertext its equality proof was built on, and every attempt for a row uses that ciphertext, so at most one lands (V8). The source's available ciphertext is the oracle: the attempt's post-transfer value (V51) means it landed, the pre-transfer value means nothing did, anything else halts. A row is rebuilt once the finalized block height passes the attempt's last valid height with the finalized source still at the pre-transfer value, or once the attempt landed with an error. The run halts with the last error after three attempts that landed with an error, or ten that expired; `--resume` tries again. Spending from the source meanwhile halts the run.
 
-If a stealth row's attempt expires and someone then sends lamports to its now-public one-time address, the rebuild creates the account with a top-up transfer, AllocateWithSeed and AssignWithSeed; that fallback is tested (verification: V76); an address that already holds an account halts the run [unverified].
+If a stealth row's attempt expires and someone funds its now-public one-time address, the rebuild creates the account with a top-up transfer, AllocateWithSeed and AssignWithSeed (V76); an address that already holds an account halts the run [unverified].
 
 ## What if the run crashes?
 
-Rerun with the same run id:
+Rerun with the run id:
 
 ```sh
-scope pay --resume 3f9c0a1b2d4e5f60 --keypair ~/.config/solana/id.json --url <rpc-url>
+scope pay --resume 3f9c0a1b2d4e5f60 --yes --keypair ~/.config/solana/id.json --url <rpc-url>
 ```
 
-Resume reads the journal, then the chain: an open attempt that landed is recorded, one still alive is driven on, one that died is rebuilt. A 20-row mixed run killed at each of sixty points converged every time, each row paid once (verification: V75, V83). It halts if the chain is not where the last landed row left it.
+`--yes` is needed on mainnet-beta only, and `--dry-run` does not combine with `--resume`. Resume reads the journal, then the chain: an open attempt that landed is recorded, one still alive is driven on, one that died is rebuilt. That settling comes before the mint and wallet checks, so a paused mint or a short wallet never blocks a paid row. RPC reads retry three times; sends never. Errors never print the RPC URL.
 
-The journal is `runs/<run_id>/journal.jsonl`, mode 0600, beside `input.csv`, the input copy, also 0600. It holds a header (input hash, mint, source, payer, send order, `derived_openings`), then per row an attempt (signature, last valid block height, both ciphertexts, the signed transaction), a `landed` record, and finally `done`. No secret and no plaintext amount; amounts live in the input copy (verification: V48). One writer holds its lock. A line a crash cut short held an attempt never sent; it is dropped before the next append (verification: V84).
+The journal is `<runs>/<run_id>/journal.jsonl`, mode 0600 in a 0700 directory, beside `input.csv`, the input copy. It holds a header (cluster genesis hash, input hashes, mint, source, payer, send order), then attempts (with the signed transaction), `landed` records, `halted` on an error, and `done`. No secret and no plaintext amount (V48). Resume, status, reclaim and `disclose` refuse another cluster and a newer journal. One writer holds its lock. A last line that fails to parse and does not end in `}` is a torn write whose attempt was never sent, and is cut off before the next append (V84). An unparseable line that ends in `}`, or any bad line before the last, is refused as corrupt, not repaired.
 
-**Duplicate input.** `pay` refuses an input whose hash matches an earlier run under `--runs`, naming that run, and also refuses when an earlier journal cannot be read, since it may be the same input. Pass `--again` to pay the file twice on purpose (verification: V48, V84).
+**Duplicate input.** `pay` refuses an input that matches an earlier run under `--runs`, naming it, and when an earlier journal is unreadable. Matching hashes the sorted recipients and base-unit amounts with the mint and the payer, so row order, comments and whitespace do not matter and another mint is a new payout. The source account is not in the key: the same payout from another source needs `--again`. Runs in an old `./runs` are invisible to the default `--runs`; `scope pay` warns, and `--runs ./runs` brings them back. `--again` pays twice on purpose (verification: V48, V84).
 
-Back up the `runs/` directory: resume, status and `disclose` need it.
+Back up the runs directory; resume, status and `disclose` need it.
 
 ## Run secret
 
-Nothing secret is stored for a run. Each stealth row's ephemeral key and every row's amount openings come from a run secret that the payer keypair alone rebuilds, because it is derived from a deterministic Ed25519 signature (verification: V75; formula in [crypto.md](crypto.md)). For the operator this means: back up only the payer key and the `runs/` directory. Do not let that key sign messages for other software, such as a browser wallet: anything that obtains its signature over `scope-run-secret/v1` and a run id learns which one-time accounts that run paid and how much.
+Nothing secret is stored for a run. Each stealth row's ephemeral key and every row's amount openings come from a run secret that only the payer keypair rebuilds, from a deterministic Ed25519 signature (V75; [crypto.md](crypto.md)). Never let that key sign for other software: its signature over `scope-run-secret/v1` and a run id reveals what that run paid.
 
 ## How much does a stealth row cost the payer?
 
@@ -143,15 +167,17 @@ Nothing secret is stored for a run. Each stealth row's ephemeral key and every r
 | P's funding, `fees::sweep_funding` | rent(D) + rent(0) + 3 x (10,000 + 310,000) | no, it pays the recipient's sweep |
 | The payment's own fee | 5,000 + priority price x 295,000 / 10^6 | no |
 
-Rents are read from the node at run time; the numbers are today's (verification: V23, V11). A full sweep reclaims both rents to the payer (verification: V77).
+Rents are read from the node at run time; these are today's (V23, V11). A full sweep reclaims both rents to the payer (V77).
 
-P's funding is what the sweep needs for one attempt at the 1,000,000 micro-lamport cap: D's rent (D is the same size as the one-time account), two signatures at 5,000 lamports, the priority fee at the sweep's 310,000-CU limit, and the rent reserve P keeps; plus one more attempt's fee for each of the sweep's two rebuilds, because an attempt that lands and fails is still charged. The cap, not today's price, because the recipient may sweep weeks later. P holding the requirement sweeps at the cap and one lamport less is refused (verification: V74). For a mint with no account extensions that is 3,012,440 + 650,240 + 960,000 = 4,622,680 lamports. What P does not spend goes to the recipient. Byte and CU figures per transaction are in [protocol.md](protocol.md).
+The wallet check budgets the payer's own fees at three times the sampled price (at least 1), capped by `--max-price`; rent is exact and P's funding stays at the cap.
+
+P's funding covers one sweep attempt at the 1,000,000 micro-lamport cap (D's rent, two signatures, the priority fee at 310,000 CU, P's reserve) plus two rebuilds. The cap, not today's price, because the recipient may sweep weeks later; one lamport less is refused (V74). With no account extensions: 3,012,440 + 650,240 + 960,000 = 4,622,680 lamports. What P does not spend goes to the recipient.
 
 ## How are fees priced?
 
-Each new attempt samples the latest confirmed block: the per-CU price every landed non-vote transaction paid (the ComputeBudget price for legacy and v0, header `priority_fee` over its compute-unit limit for v1), and takes the nearest-rank p75; an empty block prices at 0 (tests `percentile_is_nearest_rank`, `priority_price_sorts_samples_and_enforces_the_cap` in `crates/client/src/fees.rs`). `getRecentPrioritizationFees` is not used: unfiltered it returns each slot's minimum and reads near zero (verification: V39). Mainnet samples put p75 at 8,001 and 14,000 micro-lamports (verification: V40, V52).
+Each new attempt samples the latest confirmed block, or an earlier one if that slot was skipped: the per-CU price every landed non-vote transaction paid (ComputeBudget price, or for v1 the header `priority_fee` over its compute-unit limit), at the nearest-rank p75, 0 for an empty block (tests in `crates/client/src/fees.rs`). `getRecentPrioritizationFees` is not used: unfiltered it returns each slot's minimum (V39).
 
-Above `--max-price` the run stops with "priority fee ... is above the cap ...; resume later". Resends keep their signed fee. The fee goes in the v1 header as total lamports, price times the shape's compute-unit limit (verification: V20), so each shape has its own limit about 15% above its measurement (verification: V73):
+Above `--max-price` the run stops with "priority fee ... is above the cap ...; resume later". Resends keep their signed fee. The v1 header carries total lamports, price times the compute-unit limit (V20), so each shape has a limit about 15% above its measurement (V73):
 
 | Shape | CU limit |
 |---|---|
@@ -167,11 +193,15 @@ scope pay --status 3f9c0a1b2d4e5f60 --keypair ~/.config/solana/id.json --url <rp
 ```
 
 ```text
+run 3f9c0a1b2d4e5f60: 2/2 rows landed, done
+journal: ~/.local/share/scope/runs/3f9c0a1b2d4e5f60/journal.jsonl
+row	recipient	state	signature
+0	<recipient-token-account>	landed	<signature>
 row	token_account	announcement	state
 1	<one-time token account>	<announcement>	open
 ```
 
-It lists stealth rows only and works while the run is live.
+The first line is `done`, `halted: <reason>` or `unfinished; scope pay --resume <id>`. Plain rows show `unpaid`, `unresolved, resume the run` or `landed`. It works on a live run.
 
 | State | Meaning | What to do |
 |---|---|---|
@@ -187,6 +217,8 @@ It lists stealth rows only and works while the run is live.
 scope pay --status 3f9c0a1b2d4e5f60 --reclaim --keypair ~/.config/solana/id.json --url <rpc-url>
 ```
 
-`--reclaim` calls `reclaim` for every `swept` row at the sampled price under `--max-price` and a 3,800-CU limit, then prints the new status. A full sweep already reclaims, so this is for a sweep that took its transfer-only fallback. Token-2022 refuses to close an account with any balance, so reclaim cannot touch funds (verification: V4). After three expired attempts on one row it stops with "reclaim did not land in 3 attempts; try again later"; rerunning is safe and repeats nothing already reclaimed (verification: V78).
+`--reclaim` calls `reclaim` for every `swept` row at the sampled price under `--max-price` and a 3,800-CU limit, then prints the new status. A full sweep already reclaims; this is for a transfer-only fallback. Token-2022 refuses to close an account with a balance, so reclaim cannot touch funds (V4). After three expired attempts on a row it stops with "reclaim did not land in 3 attempts; try again later"; rerunning is safe (V78).
 
-A transfer-only sweep that left public dust in the account keeps the row `open`, not `swept`: Token-2022 will not close an account holding a public balance (verification: V4), so `--reclaim` skips it and its rent stays locked until that balance is gone. No `scope` command removes it.
+Without a journal, `--reclaim-all` finds every announcement this payer made, reclaims those whose account is empty, and prints `reclaimed`, `still holds a balance` or `failed: <why>` for each.
+
+A transfer-only sweep that left public dust keeps the row `open`: Token-2022 will not close an account with a public balance (V4), so its rent stays locked until that balance is gone, and no `scope` command removes it.

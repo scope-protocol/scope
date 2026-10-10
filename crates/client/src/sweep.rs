@@ -17,6 +17,7 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_zk_sdk::{
     encryption::{
+        auth_encryption::AeKey,
         derivation::derive_confidential_keys,
         elgamal::{ElGamalCiphertext, ElGamalKeypair, ElGamalPubkey},
     },
@@ -179,6 +180,7 @@ struct Destination {
     owner: Keypair,
     address: Address,
     keys: ElGamalKeypair,
+    ae: AeKey,
     space: usize,
     setup: Vec<Instruction>,
     auditor: Option<ElGamalPubkey>,
@@ -213,17 +215,12 @@ fn destination_from_mint(
         return Err(invalid("mint is not owned by Token-2022"));
     }
     let mint = StateWithExtensions::<Mint>::unpack(&mint_account.data).map_err(invalid)?;
-    let types = mint.get_extension_types().map_err(invalid)?;
-    for refused in [
-        ExtensionType::NonTransferable,
-        ExtensionType::TransferFeeConfig,
-        ExtensionType::TransferHook,
-    ] {
-        if types.contains(&refused) {
-            return Err(invalid(format!(
-                "mint extension {refused:?} is not supported"
-            )));
-        }
+    let refused = crate::mint_policy::refusals(&mint_account.data).map_err(invalid)?;
+    if !refused.is_empty() {
+        return Err(invalid(format!(
+            "mint is not supported: {}",
+            refused.join("; ")
+        )));
     }
     let confidential = mint
         .get_extension::<ConfidentialTransferMint>()
@@ -276,6 +273,7 @@ fn destination_from_mint(
         owner,
         address,
         keys,
+        ae,
         space,
         setup,
         auditor,
@@ -402,6 +400,18 @@ fn instructions(
             authority,
             &[],
             ProofLocation::InstructionOffset(offset(1), &zero),
+        )
+        .map_err(invalid)?,
+    );
+    // The transfer is D's first credit; applying it here leaves the funds spendable at once.
+    ixs.push(
+        ct::apply_pending_balance(
+            &t22,
+            &destination.address,
+            1,
+            &destination.ae.encrypt(payment.info.amount).into(),
+            &destination.owner.pubkey(),
+            &[],
         )
         .map_err(invalid)?,
     );

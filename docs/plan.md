@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-07
+last_verified: 2026-10-10
 ---
 
 # Plan
@@ -21,21 +21,21 @@ The areas meet at two contracts: `crates/interface` (announcement and registry l
 
 | Area | Built, with evidence | Open |
 |---|---|---|
-| Program | `announce`, `reclaim`, `register`, `deregister`; an attack test for every check (V33, V34, V54, V81); S7 torsion check (V82); CU ceilings in CI (V55, V73) | not deployed; no verifiable build; devnet upgrade key, then a Squads multisig, then revocation before mainnet |
+| Program | `announce`, `reclaim`, `register`, `deregister`; an attack test for every reachable check (V33, V34, V54, V81); `announce` refuses a locked CpiGuard (V86); S7 torsion check (V82); CU ceilings in CI (V55, V73) | not deployed; no verifiable build; devnet upgrade key, then a Squads multisig, then revocation before mainnet |
 | Transactions | both stealth transactions fit v1 in LiteSVM (V56) and the payer one lands on Surfpool (V38) | S1 devnet leg, the only check of the header limits; S5 devnet numbers |
-| Payer engine | plain and stealth rows, journal, resume, duplicate-run guard (V48, V49, V75, V76, V84); status and reclaim (V78); per-shape CU limits (V73); exact P funding (V74); chaos harness, all sixty kill points (V83) | P2 plain devnet run; stealth payments on devnet; S4 three-day window |
-| Recipient | `register` backups, `scan`, `sweep`, `export-sweep-key`, recovery journal (V64 to V71); payer to sweep end to end with rent back to the payer (V77) | scan against Surfpool; S6 at provider scale; counterparty destinations and destination-reuse overrides; Q17 |
+| Payer engine | plain and stealth rows, journal, resume, canonical duplicate-run guard, cluster pinned in the journal (V48, V49, V75, V76, V84, V91); status and reclaim (V78); per-shape CU limits (V73); exact P funding (V74); retries on reads, a rebuild cap, a SOL preflight, `--dry-run` and the mainnet `--yes` gate, `--reclaim-all` (V91, V92); one mint policy (V90); chaos harness, all sixty kill points, run nightly (V83) | P2 plain devnet run; stealth payments on devnet; S4 three-day window |
+| Recipient | `register` backups, `scan` in batches, `sweep` and `sweep --all` with jitter and an applied balance, `export-sweep-key`, recovery journal (V64 to V71, V87, V89); `recover` from transaction history (V88); payer to sweep end to end with rent back to the payer (V77) | scan against Surfpool; S6 at provider scale; counterparty destinations and destination-reuse overrides; `recover` against a real node with transaction history (Q17) |
 | Registry | `publish`, `lookup` and paying a looked-up meta-address (V81) | |
-| Audit | payer and recipient receipts, `disclose` and `verify` (V79, V80) | recipient receipt from the backup alone (Q17) |
+| Audit | payer and recipient receipts, `disclose` and `verify` (V79, V80); the recipient receipt finds its payment signature itself (V88) | `recover` against a real node (Q17); `disclose --run` needing the mint account to still exist is untested |
 | Crypto | the crypto.md tree in `crates/stealth-keygen` (V58 to V62); run secret and derived openings (V75, V79) | external review (Q1) |
-| CLI | every command but `bench` | `bench` is a stub |
-| Ship | | P5: devnet run, measurements, demo, write-up, status page; Q5, Q6 |
+| CLI | every command but `bench`; typed exit codes (V92) | `bench` is a stub |
+| Ship | | P5: devnet run, measurements, demo, write-up, status page; Q6 first, because no major stablecoin works today (V90); Q5 |
 
 ## Next
 
 In dependency order. Each step needs the one before it unless marked parallel.
 
-1. Program keypair, devnet deploy, devnet wallets funded (Valentyn).
+1. Confirm the program keypair kept outside the repo matches the program id, then devnet deploy and fund devnet wallets (Valentyn). A mismatch strands every `ct_ikm` derived against the id.
 2. S1 on devnet, and S5's numbers measured there (Valentyn).
 3. P2 plain run: 10 plain recipients on devnet (Valentyn).
 4. P3: one stealth payment end to end on devnet, payer to sweep, rent back to the payer (both owners).
@@ -84,6 +84,8 @@ Spikes are tests or example binaries in the crate they exercise and stay as regr
 | Priority fees under congestion | P underfunded, sweeps stall | S4; P funded at a fixed price cap (V74); floor check before each signed attempt |
 | Devnet faucet caps | demo blocked | fund early; LiteSVM and Surfpool as the recorded fallback |
 | Confidential transfers disabled on a cluster again, as in 2025 | demo blocked | same fallback |
+| zk-sdk 7.0.1 differs from the cluster's proof verifier (the program was re-enabled in 2026 after the 2025 transcript fix) | proofs rejected late, in simulation | S1 on devnet before any payer run; record the SDK commit that carries the fix |
+| No major stablecoin passes the mint policy (V90) | no real-money use | Q6 gates P5; the first mint is one that approves accounts and carries no fee or hook extension |
 | Regulatory reading of single-use addresses | positioning | visible payer as a hard constraint; disclosure paths documented; counsel before any "compliant" claim (Q5) |
 | No wallet support | adoption | CLI first; a wallet SDK is the follow-up |
 
@@ -103,10 +105,10 @@ Ids are stable; gaps are questions already closed (decisions.md and its archive)
 |---|---|---|---|---|
 | Q1 | External review of the derivations from S, and of `d` from `b_spend` | Valentyn | now; findings addressed in P4 | send the request: post the tree to the sRFC-42 discussion and ask one Anza zk contributor |
 | Q5 | FinCEN mixing definition and single-use addresses | Valentyn | before public claims | assume it applies; keep the payer visible; ask counsel |
-| Q6 | A named Solana payout platform that wants this | Valentyn | P5 | ask Zebec, Streamflow, Superteam Earn |
+| Q6 | A named Solana payout platform that wants this | Valentyn | before P5 starts | ask Zebec, Streamflow, Superteam Earn |
 | Q8 | MPC-based consolidation after v1 | Valentyn | after the demo | talk to Arcium |
 | Q9 | Issuer path for PYUSD and USDG | Valentyn | P5 | one-page spec in the write-up: a policy program whose PDA is the mint's confidential-transfer authority, plus a deferred handover after approval; do not build |
 | Q10 | Rent refund depends on the recipient | Valentyn | after v1 | two cases: P never empties the account, or P enables CpiGuard, which blocks reclaim's CPI close. State both as limitations; a timeout reclaim needs a different custody model and is not planned |
 | Q11 | One ephemeral key per run (scan cost against grouping) | Valentyn | after Q1 | defer until the review has seen the tree |
 | Q14 | `crates/stealth-keygen` on the crypto.md tree: `d`, supplied ephemeral keys, meta-address parsing, `program_id` pinned in `C` | Abhineet, reviewed by Valentyn | with Q1 | code complete (V58 to V62); awaiting Q1 only; close with a decisions.md entry once Q1 finds nothing to change |
-| Q17 | Recover swept destinations and recipient receipts from the backup alone, without a local journal | Abhineet | after P3 on devnet | scan historical `announce` instructions with an archival RPC, keeping exact R bytes and cluster context; until then keep the recovery journal beside the key backup |
+| Q17 | Recover swept destinations and recipient receipts from the backup alone, without a local journal | Abhineet | after P3 on devnet | built as `scope recover` over a node that keeps program transaction history (V88); open until it runs against a real node and its RPC cost per transaction is measured; keep the recovery journal beside the key backup meanwhile |

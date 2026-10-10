@@ -66,6 +66,29 @@ fn payment_instructions(
     Address,
     AeKey,
 ) {
+    payment_instructions_to(h, recipient, r, amount, None)
+}
+
+/// Where a crafted payment's transfer goes instead of the one-time account and its key.
+type Redirect<'a> = (
+    Option<Address>,
+    Option<&'a solana_zk_sdk::encryption::elgamal::ElGamalPubkey>,
+);
+
+/// `payment_instructions`, with the confidential transfer optionally sent to another token
+/// account or encrypted to another key than the announcement implies.
+fn payment_instructions_to(
+    h: &Harness,
+    recipient: &RecipientSecretKeys,
+    r: u8,
+    amount: u64,
+    redirect: Option<Redirect<'_>>,
+) -> (
+    Vec<solana_instruction::Instruction>,
+    Address,
+    Address,
+    AeKey,
+) {
     let sent = derive_payment_with_ephemeral(
         &recipient.derive_public_keys(),
         &EphemeralSecret::from_bytes([r; 32]),
@@ -96,7 +119,13 @@ fn payment_instructions(
         lamports_for_owner: 8_000_000,
     })
     .expect("setup");
-    ixs.extend(transfer(h, account, keys.pubkey(), amount));
+    let (to, key) = redirect.unwrap_or((None, None));
+    ixs.extend(transfer(
+        h,
+        to.unwrap_or(account),
+        key.unwrap_or(keys.pubkey()),
+        amount,
+    ));
     (ixs, announcement, account, ae)
 }
 
@@ -182,6 +211,34 @@ fn enable_cpi_guard(h: &mut Harness, address: Address) {
         .expect("guard")
         .lock_cpi = true.into();
     h.svm.set_account(address, source).expect("set");
+}
+
+/// Asserts that `destination` holds `amount` as an applied, available balance and no pending credit.
+fn assert_available(
+    svm: &litesvm::LiteSVM,
+    destination: &Address,
+    owner: &solana_keypair::Keypair,
+    amount: u64,
+) {
+    let (keys, ae) = solana_zk_sdk::encryption::derivation::derive_confidential_keys(owner, b"")
+        .expect("destination keys");
+    let account = svm.get_account(destination).expect("destination");
+    let state = StateWithExtensions::<Account>::unpack(&account.data).expect("account");
+    let ext = state
+        .get_extension::<ConfidentialTransferAccount>()
+        .expect("extension");
+    let available: ElGamalCiphertext = ext.available_balance.try_into().expect("available");
+    assert_eq!(
+        keys.secret().decrypt(&available).target,
+        solana_zk_sdk::encryption::pedersen::G * curve25519_dalek::scalar::Scalar::from(amount)
+    );
+    assert_eq!(
+        ae.decrypt(&ext.decryptable_available_balance.try_into().expect("hint")),
+        Some(amount)
+    );
+    assert_eq!(ext.pending_balance_lo.0, [0; 64]);
+    assert_eq!(ext.pending_balance_hi.0, [0; 64]);
+    assert_eq!(u64::from(ext.pending_balance_credit_counter), 0);
 }
 
 #[test]
@@ -388,22 +445,10 @@ fn sweep_moves_the_whole_balance_closes_accounts_and_refunds_rent() {
         .derive_sweep_destination(&report.ephemeral, &report.token_account.to_bytes())
         .expect("seed");
     let owner = solana_keypair::Keypair::new_from_array(*seed.as_bytes());
-    let (keys, _) = solana_zk_sdk::encryption::derivation::derive_confidential_keys(&owner, b"")
-        .expect("destination keys");
     let destination = h.svm.get_account(&report.destination).expect("destination");
     let state = StateWithExtensions::<Account>::unpack(&destination.data).expect("account");
     assert_eq!(state.base.owner, report.destination_owner);
-    let ext = state
-        .get_extension::<ConfidentialTransferAccount>()
-        .expect("extension");
-    let lo: ElGamalCiphertext = ext.pending_balance_lo.try_into().expect("lo");
-    let hi: ElGamalCiphertext = ext.pending_balance_hi.try_into().expect("hi");
-    assert_eq!(
-        keys.secret().decrypt_u32(&lo).expect("lo")
-            + (keys.secret().decrypt_u32(&hi).expect("hi") << 16),
-        AMOUNT
-    );
-    assert_eq!(u64::from(ext.pending_balance_credit_counter), 1);
+    assert_available(&h.svm, &report.destination, &owner, AMOUNT);
     assert!(
         h.svm
             .get_account(&report.destination_owner)
@@ -823,21 +868,7 @@ fn sweep_moves_confidential_funds_when_permissioned_burning_blocks_cleanup() {
         .derive_sweep_destination(&report.ephemeral, &report.token_account.to_bytes())
         .expect("seed");
     let owner = solana_keypair::Keypair::new_from_array(*seed.as_bytes());
-    let (keys, _) =
-        solana_zk_sdk::encryption::derivation::derive_confidential_keys(&owner, b"").expect("keys");
-    let destination = h.svm.get_account(&report.destination).expect("destination");
-    let state =
-        StateWithExtensions::<Account>::unpack(&destination.data).expect("destination state");
-    let ext = state
-        .get_extension::<ConfidentialTransferAccount>()
-        .expect("extension");
-    let lo: ElGamalCiphertext = ext.pending_balance_lo.try_into().expect("low");
-    let hi: ElGamalCiphertext = ext.pending_balance_hi.try_into().expect("high");
-    assert_eq!(
-        keys.secret().decrypt_u32(&lo).expect("low")
-            + (keys.secret().decrypt_u32(&hi).expect("high") << 16),
-        AMOUNT
-    );
+    assert_available(&h.svm, &report.destination, &owner, AMOUNT);
 }
 
 #[test]
@@ -1344,29 +1375,12 @@ fn scan_and_sweep_support_large_pending_balances() {
             .derive_sweep_destination(&report.ephemeral, &report.token_account.to_bytes())
             .expect("seed");
         let owner = solana_keypair::Keypair::new_from_array(*seed.as_bytes());
-        let (keys, _) =
-            solana_zk_sdk::encryption::derivation::derive_confidential_keys(&owner, b"")
-                .expect("keys");
-        let account = chain
-            .svm
-            .get_account(&report.destination)
-            .expect("destination");
-        let state = StateWithExtensions::<Account>::unpack(&account.data).expect("state");
-        let ext = state
-            .get_extension::<ConfidentialTransferAccount>()
-            .expect("ct");
-        let lo: ElGamalCiphertext = ext.pending_balance_lo.try_into().expect("low");
-        let hi: ElGamalCiphertext = ext.pending_balance_hi.try_into().expect("high");
-        assert_eq!(
-            keys.secret().decrypt_u32(&lo).expect("low")
-                + (keys.secret().decrypt_u32(&hi).expect("high") << 16),
-            amount
-        );
+        assert_available(chain.svm, &report.destination, &owner, amount);
     }
 }
 
 #[test]
-fn scan_streams_valid_payments_and_skipped_candidates_before_the_next_read() {
+fn scan_reports_each_batch_before_the_next_read() {
     let mut h = Harness::new();
     let alice = recipient(1);
     let (first, source, ae) = fund(&mut h, &alice, 3);
@@ -1378,7 +1392,7 @@ fn scan_streams_valid_payments_and_skipped_candidates_before_the_next_read() {
     let mut valid = Vec::new();
     let mut skipped = Vec::new();
     let report = scan::scan_with_results(&chain, &alice, None, |result| {
-        assert_eq!(chain.account_reads.get(), valid.len() + skipped.len() + 1);
+        assert_eq!(chain.account_batches.get(), 1);
         match result {
             Ok(payment) => valid.push(payment.announcement),
             Err(ScanError::Invalid { account, .. }) => skipped.push(*account),
@@ -1392,13 +1406,13 @@ fn scan_streams_valid_payments_and_skipped_candidates_before_the_next_read() {
     assert_eq!(report.payments.len(), 1);
     assert_eq!(report.skipped.len(), 1);
     assert_ne!(first, second);
-    chain.account_reads.set(0);
+    chain.account_batches.set(0);
     let error = scan::scan_with_results(&chain, &alice, None, |_| {
         Err(std::io::Error::other("output closed"))
     })
     .expect_err("stop on output error");
     assert!(matches!(error, ScanError::Output(_)));
-    assert_eq!(chain.account_reads.get(), 1);
+    assert_eq!(chain.account_batches.get(), 1);
 }
 
 #[test]
@@ -2003,17 +2017,7 @@ fn restored_standard_owner_can_apply_and_spend_the_swept_balance() {
     h.source_elgamal = keys;
     h.source_ae = ae;
     h.source_balance = AMOUNT;
-    let apply = ct::apply_pending_balance(
-        &token_2022(),
-        &h.source,
-        1,
-        &h.source_ae.encrypt(AMOUNT).into(),
-        &h.payer.pubkey(),
-        &[],
-    )
-    .expect("apply");
-    h.send(&[apply], &[])
-        .expect("apply with restored standard owner");
+    assert_available(&h.svm, &report.destination, &h.payer, AMOUNT);
     h.send(
         &transfer(&h, destination, receiver_keys.pubkey(), AMOUNT),
         &[],
@@ -2044,4 +2048,500 @@ fn restored_standard_owner_can_apply_and_spend_the_swept_balance() {
             .decrypt(&ext.decryptable_available_balance.try_into().expect("hint")),
         Some(0)
     );
+}
+
+mod history {
+    use super::*;
+    use scope_client::{
+        address::program_id,
+        chain::ChainError,
+        history::{
+            self, DEFAULT_LIMIT, PAGE, RecoverOptions, SignatureEntry, SignatureHistory,
+            SignatureQuery,
+        },
+        receipt::{ArchivedTransaction, TransactionArchive},
+        sweep::{self, SweepOptions},
+        tx::v1_transaction,
+    };
+    use solana_signature::Signature;
+    use solana_transaction::versioned::VersionedTransaction;
+    use std::cell::Cell;
+
+    /// Transactions in the order they landed, answering like an archival node.
+    #[derive(Default)]
+    struct Archive {
+        txs: Vec<(Signature, VersionedTransaction)>,
+        listings: Cell<usize>,
+        /// Signatures the node lists as failed.
+        failed: Vec<Signature>,
+        /// Signatures whose fetch answers with this message instead of the transaction.
+        fetch_errors: Vec<(Signature, String)>,
+    }
+
+    impl Archive {
+        fn push(&mut self, tx: VersionedTransaction) -> Signature {
+            let signature = tx.signatures[0];
+            self.txs.push((signature, tx));
+            signature
+        }
+    }
+
+    impl SignatureHistory for Archive {
+        fn signatures_for_address(
+            &self,
+            address: &Address,
+            query: &SignatureQuery<'_>,
+        ) -> Result<Vec<SignatureEntry>, ChainError> {
+            self.listings.set(self.listings.get() + 1);
+            let newest_first = self
+                .txs
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, (_, tx))| tx.message.static_account_keys().contains(address))
+                .map(|(slot, (signature, _))| (slot, *signature));
+            let mut after_before =
+                newest_first.skip_while(|(_, s)| query.before.is_some_and(|b| b != s));
+            if query.before.is_some() {
+                after_before.next();
+            }
+            Ok(after_before
+                .take_while(|(_, s)| query.until != Some(s))
+                .take(query.limit)
+                .map(|(slot, signature)| SignatureEntry {
+                    signature,
+                    slot: slot as u64,
+                    succeeded: !self.failed.contains(&signature),
+                })
+                .collect())
+        }
+    }
+
+    impl TransactionArchive for Archive {
+        fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
+            Ok([42; 32])
+        }
+
+        fn transaction(&self, signature: &Signature) -> Result<ArchivedTransaction, ChainError> {
+            if let Some((_, message)) = self.fetch_errors.iter().find(|(s, _)| s == signature) {
+                return Err(ChainError(message.clone()));
+            }
+            self.txs
+                .iter()
+                .find(|(s, _)| s == signature)
+                .map(|(_, tx)| ArchivedTransaction {
+                    transaction: tx.clone(),
+                    succeeded: !self.failed.contains(signature),
+                })
+                .ok_or_else(|| ChainError::not_found(signature))
+        }
+    }
+
+    fn pay(
+        h: &mut Harness,
+        archive: &mut Archive,
+        recipient: &RecipientSecretKeys,
+        r: u8,
+    ) -> (Signature, Address) {
+        let (ixs, _, account, _) = payment_instructions(h, recipient, r, AMOUNT);
+        let tx = v1_transaction(&h.payer, &[], &ixs, h.svm.latest_blockhash());
+        h.svm.send_transaction(tx.clone()).expect("payment");
+        h.svm.expire_blockhash();
+        h.source_balance -= AMOUNT;
+        (archive.push(tx), account)
+    }
+
+    /// A transaction that touches `address` and nothing else of interest.
+    fn noise(h: &Harness, address: Address, lamports: u64) -> VersionedTransaction {
+        v1_transaction(
+            &h.payer,
+            &[],
+            &[solana_system_interface::instruction::transfer(
+                &h.payer.pubkey(),
+                &address,
+                lamports,
+            )],
+            h.svm.latest_blockhash(),
+        )
+    }
+
+    #[test]
+    fn recover_finds_swept_and_unswept_payments_and_ignores_others() {
+        let mut h = Harness::new();
+        let (alice, bob) = (recipient(1), recipient(2));
+        let mut archive = Archive::default();
+        let (first, first_account) = pay(&mut h, &mut archive, &alice, 3);
+        pay(&mut h, &mut archive, &bob, 4);
+        let (third, third_account) = pay(&mut h, &mut archive, &alice, 5);
+        let announcement = announcement_address(&first_account).0;
+        let mut chain = SvmChain::new(&mut h.svm);
+        let swept = sweep::sweep(
+            &mut chain,
+            &alice,
+            &announcement,
+            &SweepOptions {
+                poll: std::time::Duration::ZERO,
+                ..Default::default()
+            },
+        )
+        .expect("sweep");
+        assert!(
+            scan::scan(&chain, &alice, None)
+                .expect("scan")
+                .payments
+                .iter()
+                .all(|p| p.token_account != first_account)
+        );
+
+        let report = history::recover(
+            &chain,
+            &archive,
+            &alice,
+            &RecoverOptions {
+                limit: DEFAULT_LIMIT,
+                ..Default::default()
+            },
+        )
+        .expect("recover");
+        assert_eq!(report.examined, 3);
+        assert_eq!(report.unavailable, 0);
+        let signatures: Vec<_> = report.found.iter().map(|f| f.signature).collect();
+        assert_eq!(
+            signatures,
+            [third, first],
+            "newest first, Bob's payment absent"
+        );
+        let (open, closed) = (&report.found[0], &report.found[1]);
+        assert_eq!(open.token_account, third_account);
+        assert_eq!(open.payer, h.payer.pubkey());
+        assert_eq!(open.mint, h.mint);
+        assert!(open.destination_state.is_none());
+        assert_eq!(closed.token_account, first_account);
+        assert_eq!(closed.destination, swept.destination);
+        assert_eq!(closed.destination_owner, swept.destination_owner);
+        let state = closed.destination_state.as_ref().expect("D exists");
+        assert_eq!(state.amount, Some(AMOUNT));
+        assert!(state.lamports > 0);
+        assert_eq!(
+            history::payment_signature(&archive, &first_account).expect("lookup"),
+            Some(first),
+            "the signature is found after reclaim closed the one-time account"
+        );
+    }
+
+    #[test]
+    fn recover_honors_the_limit_and_since() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let (first, _) = pay(&mut h, &mut archive, &alice, 3);
+        let (second, _) = pay(&mut h, &mut archive, &alice, 4);
+        let chain = SvmChain::new(&mut h.svm);
+        let run = |limit, since| {
+            history::recover(
+                &chain,
+                &archive,
+                &alice,
+                &RecoverOptions {
+                    limit,
+                    since,
+                    before: None,
+                },
+            )
+            .expect("recover")
+            .found
+            .iter()
+            .map(|f| f.signature)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(run(1, None), [second]);
+        assert_eq!(run(2, None), [second, first]);
+        assert_eq!(run(10, Some(first)), [second]);
+        assert!(run(0, None).is_empty());
+    }
+
+    /// Continuing an older walk needs `before`: `since` stops at a signature, so passing
+    /// the last one examined re-reads the newer transactions and never reaches older ones.
+    #[test]
+    fn recover_continues_into_older_history_with_before_not_since() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let (s1, _) = pay(&mut h, &mut archive, &alice, 3);
+        let (s2, _) = pay(&mut h, &mut archive, &alice, 4);
+        let (s3, _) = pay(&mut h, &mut archive, &alice, 5);
+        let chain = SvmChain::new(&mut h.svm);
+        let run = |limit, since, before| {
+            history::recover(
+                &chain,
+                &archive,
+                &alice,
+                &RecoverOptions {
+                    limit,
+                    since,
+                    before,
+                },
+            )
+            .expect("recover")
+        };
+        let first = run(2, None, None);
+        assert_eq!(
+            first.found.iter().map(|f| f.signature).collect::<Vec<_>>(),
+            [s3, s2]
+        );
+        assert!(first.truncated);
+        let last = first.last_signature.expect("last signature");
+        assert_eq!(last, s2);
+
+        let older = run(10, None, Some(last));
+        assert_eq!(
+            older.found.iter().map(|f| f.signature).collect::<Vec<_>>(),
+            [s1],
+            "before continues into older history"
+        );
+        assert!(!older.truncated);
+
+        let wrong = run(10, Some(last), None);
+        assert_eq!(
+            wrong.found.iter().map(|f| f.signature).collect::<Vec<_>>(),
+            [s3],
+            "since only ever returns newer transactions"
+        );
+    }
+
+    #[test]
+    fn recover_pages_through_long_histories() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        pay(&mut h, &mut archive, &alice, 3);
+        for lamports in 1..=PAGE as u64 + 100 {
+            archive.push(noise(&h, program_id(), lamports));
+        }
+        let chain = SvmChain::new(&mut h.svm);
+        let find = |limit| {
+            archive.listings.set(0);
+            let report = history::recover(
+                &chain,
+                &archive,
+                &alice,
+                &RecoverOptions {
+                    limit,
+                    since: None,
+                    before: None,
+                },
+            )
+            .expect("recover");
+            (report.found.len(), report.examined, archive.listings.get())
+        };
+        assert_eq!(find(PAGE), (0, PAGE, 1), "the limit ends the walk");
+        assert_eq!(find(2 * PAGE), (1, PAGE + 101, 2));
+    }
+
+    /// A payment transaction that announces to `recipient` but sends the transfer elsewhere.
+    fn crafted(
+        h: &mut Harness,
+        archive: &mut Archive,
+        recipient: &RecipientSecretKeys,
+        r: u8,
+        redirect: Redirect<'_>,
+    ) -> Signature {
+        let (ixs, ..) = payment_instructions_to(h, recipient, r, AMOUNT, Some(redirect));
+        let tx = v1_transaction(&h.payer, &[], &ixs, h.svm.latest_blockhash());
+        h.svm.expire_blockhash();
+        archive.push(tx)
+    }
+
+    fn all(
+        chain: &SvmChain<'_>,
+        archive: &Archive,
+        who: &RecipientSecretKeys,
+        limit: usize,
+    ) -> history::RecoverReport {
+        history::recover(
+            chain,
+            archive,
+            who,
+            &RecoverOptions {
+                limit,
+                ..Default::default()
+            },
+        )
+        .expect("recover")
+    }
+
+    #[test]
+    fn recover_skips_failed_transactions_but_counts_them_against_the_limit() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let (failed, _) = pay(&mut h, &mut archive, &alice, 3);
+        let (landed, _) = pay(&mut h, &mut archive, &alice, 4);
+        archive.failed.push(failed);
+        let chain = SvmChain::new(&mut h.svm);
+        let report = all(&chain, &archive, &alice, DEFAULT_LIMIT);
+        assert_eq!(
+            report.found.iter().map(|f| f.signature).collect::<Vec<_>>(),
+            [landed]
+        );
+        assert_eq!((report.listed, report.examined), (2, 1));
+        assert!(!report.truncated);
+        assert_eq!(
+            history::payment_signature(&archive, &Address::new_unique()).expect("lookup"),
+            None
+        );
+    }
+
+    #[test]
+    fn payment_signature_ignores_a_failed_announcement() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let (failed, account) = pay(&mut h, &mut archive, &alice, 3);
+        archive.failed.push(failed);
+        assert_eq!(
+            history::payment_signature(&archive, &account).expect("lookup"),
+            None
+        );
+    }
+
+    #[test]
+    fn recover_rejects_a_tag_match_whose_transfer_pays_another_key() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let stranger_key = ElGamalKeypair::new_rand();
+        let mut archive = Archive::default();
+        crafted(
+            &mut h,
+            &mut archive,
+            &alice,
+            3,
+            (None, Some(stranger_key.pubkey())),
+        );
+        let (genuine, _) = pay(&mut h, &mut archive, &alice, 4);
+        let chain = SvmChain::new(&mut h.svm);
+        let report = all(&chain, &archive, &alice, DEFAULT_LIMIT);
+        assert_eq!(report.examined, 2);
+        assert_eq!(
+            report.found.iter().map(|f| f.signature).collect::<Vec<_>>(),
+            [genuine]
+        );
+    }
+
+    #[test]
+    fn recover_rejects_a_transfer_to_another_token_account() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        crafted(
+            &mut h,
+            &mut archive,
+            &alice,
+            3,
+            (Some(Address::new_unique()), None),
+        );
+        let chain = SvmChain::new(&mut h.svm);
+        assert!(
+            all(&chain, &archive, &alice, DEFAULT_LIMIT)
+                .found
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn recover_says_when_the_limit_cut_the_walk_short() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let (first, _) = pay(&mut h, &mut archive, &alice, 3);
+        let (second, _) = pay(&mut h, &mut archive, &alice, 4);
+        let chain = SvmChain::new(&mut h.svm);
+        let cut = all(&chain, &archive, &alice, 1);
+        assert!(cut.truncated);
+        assert_eq!((cut.listed, cut.last_signature), (1, Some(second)));
+        let whole = all(&chain, &archive, &alice, 5);
+        assert!(!whole.truncated);
+        assert_eq!((whole.listed, whole.last_signature), (2, Some(first)));
+    }
+
+    #[test]
+    fn recover_counts_missing_transactions_and_stops_on_a_transport_error_with_rows_kept() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let (oldest, _) = pay(&mut h, &mut archive, &alice, 3);
+        let (pruned, _) = pay(&mut h, &mut archive, &alice, 4);
+        let (middle, _) = pay(&mut h, &mut archive, &alice, 5);
+        let (newest, _) = pay(&mut h, &mut archive, &alice, 6);
+        archive
+            .fetch_errors
+            .push((pruned, ChainError::not_found(&pruned).0));
+        // Listed newest first: newest, middle, pruned, oldest.
+        archive
+            .fetch_errors
+            .push((oldest, "connection reset".into()));
+        let chain = SvmChain::new(&mut h.svm);
+        let mut streamed = Vec::new();
+        let error = history::recover_with(
+            &chain,
+            &archive,
+            &alice,
+            &RecoverOptions {
+                limit: DEFAULT_LIMIT,
+                ..Default::default()
+            },
+            |f| {
+                streamed.push(f.signature);
+                Ok(())
+            },
+        )
+        .expect_err("transport error");
+        assert_eq!(streamed, [newest, middle]);
+        assert!(
+            matches!(
+                &error,
+                history::HistoryError::Stopped {
+                    listed: 4,
+                    examined: 4,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        // The same walk without the transport error counts the pruned one as unavailable.
+        archive.fetch_errors.retain(|(s, _)| *s == pruned);
+        let report = all(&chain, &archive, &alice, DEFAULT_LIMIT);
+        assert_eq!(report.unavailable, 1);
+        assert_eq!(report.found.len(), 3);
+    }
+
+    #[test]
+    fn payment_signature_skips_earlier_transfers_to_the_address_and_reads_every_page() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let sent = derive_payment_with_ephemeral(
+            &alice.derive_public_keys(),
+            &EphemeralSecret::from_bytes([3; 32]),
+        )
+        .expect("payment");
+        let account =
+            token_account_address(&h.payer.pubkey(), &sent.announcement.ephemeral_public_key);
+        archive.push(noise(&h, account, 1));
+        let (signature, paid) = pay(&mut h, &mut archive, &alice, 3);
+        assert_eq!(paid, account);
+        for lamports in 2..=PAGE as u64 + 50 {
+            archive.push(noise(&h, account, lamports));
+        }
+        assert_eq!(
+            history::payment_signature(&archive, &account).expect("lookup"),
+            Some(signature)
+        );
+        assert_eq!(archive.listings.get(), 2);
+        let unrelated = Address::new_from_array([9; 32]);
+        assert_eq!(
+            history::payment_signature(&archive, &unrelated).expect("lookup"),
+            None
+        );
+    }
 }

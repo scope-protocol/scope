@@ -7,13 +7,13 @@ use solana_message::{
 use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
-/// Compute-unit limit per transaction shape, each about 15% above its LiteSVM measurement
+/// Compute-unit limit per transaction shape, each 10 to 15% above its LiteSVM measurement
 /// with a mint auditor (`programs/scope/tests/it/budget.rs` and the sweep test in
 /// `crates/client/tests/recipient.rs`). The priority fee is price times the limit, so
 /// headroom is paid for.
 pub const PLAIN_TRANSFER_CU_LIMIT: u32 = 275_000; // measured 237,792
 pub const STEALTH_PAYMENT_CU_LIMIT: u32 = 295_000; // measured 254,576 at bump 255
-pub const SWEEP_CU_LIMIT: u32 = 310_000; // measured 268,049 with dust burn and reclaim
+pub const SWEEP_CU_LIMIT: u32 = 310_000; // measured 276,007 with dust burn and reclaim
 pub const RECLAIM_CU_LIMIT: u32 = 3_800; // measured 3,260
 /// For transactions outside those shapes, which pay no priority fee: setup, tests, spikes.
 pub const DEFAULT_CU_LIMIT: u32 = 600_000;
@@ -21,6 +21,20 @@ pub const DEFAULT_CU_LIMIT: u32 = 600_000;
 /// Loaded account data limit. Mainnet Token-2022 programdata alone is 1,382,061
 /// bytes; v1 defaults this to 0, which fails the transaction.
 pub const LOADED_ACCOUNTS_DATA_SIZE_LIMIT: u32 = 4 * 1024 * 1024;
+
+/// A legacy transaction for the small registry instructions, which need no v1 header.
+pub fn legacy_transaction(
+    fee_payer: &Keypair,
+    ixs: &[Instruction],
+    blockhash: solana_message::Hash,
+) -> solana_transaction::Transaction {
+    solana_transaction::Transaction::new_signed_with_payer(
+        ixs,
+        Some(&fee_payer.pubkey()),
+        &[fee_payer],
+        blockhash,
+    )
+}
 
 pub fn v1_transaction(
     fee_payer: &Keypair,

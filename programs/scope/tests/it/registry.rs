@@ -349,3 +349,27 @@ fn rejects_an_entry_address_owned_by_another_program() {
         ScopeError::MetaAddressInUse,
     );
 }
+
+#[test]
+fn a_legacy_transaction_registers_and_deregisters() {
+    let mut h = Harness::new();
+    let registrant = h.payer.pubkey();
+    let (entry, _) = meta_entry_address(&registrant);
+    let register_ix = register_ix(&registrant, &entry, &data(valid_spend()).to_bytes());
+    let tx =
+        scope_client::tx::legacy_transaction(&h.payer, &[register_ix], h.svm.latest_blockhash());
+    h.svm.send_transaction(tx).expect("legacy register lands");
+    assert!(lamports(&h, &entry) > 0);
+    h.svm.expire_blockhash();
+    let tx = scope_client::tx::legacy_transaction(
+        &h.payer,
+        &[deregister_ix(
+            &registrant,
+            &entry,
+            &deregister_data(META_SCHEME_V1),
+        )],
+        h.svm.latest_blockhash(),
+    );
+    h.svm.send_transaction(tx).expect("legacy deregister lands");
+    assert_eq!(lamports(&h, &entry), 0);
+}

@@ -1,6 +1,6 @@
 ---
 status: verified
-last_verified: 2026-10-09
+last_verified: 2026-10-10
 ---
 
 # Protocol
@@ -62,7 +62,7 @@ A plain row is only instructions 10 to 13 into the recipient's existing account:
 
 ### Transaction 2: the recipient sweeps
 
-One v1 transaction, fee payer P, signed by P and D_owner. Full form with an auditor and public dust: 3,350 bytes, 268,049 CU (V68, V73).
+One v1 transaction, fee payer P, signed by P and D_owner. Full form with an auditor and public dust: 3,402 bytes, 276,007 CU (V68, V73).
 
 | # | Instruction | Signer | Notes |
 |---|---|---|---|
@@ -75,11 +75,12 @@ One v1 transaction, fee payer P, signed by P and D_owner. Full form with an audi
 | 9 | T22 ApplyPendingBalance on T | P | |
 | 10-13 | T22 confidential Transfer T to D, three proofs | P | full balance |
 | 14-15 | T22 EmptyAccount on T, ZK VerifyZeroCiphertext | P | over the post-transfer ciphertext (V8, V51) |
-| 16 | T22 Burn | P | only if T holds a public amount (V6) |
-| 17 | SCOPE `reclaim` | none | rent of T and the announcement to the payer |
-| 18 | System Transfer P to D_owner | P | surplus, only when D_owner can receive it; P keeps its rent reserve (V24, V65) |
+| 16 | T22 ApplyPendingBalance on D | D_owner | the transfer is D's first credit, so the funds are spendable at once (V87) |
+| 17 | T22 Burn | P | only if T holds a public amount (V6) |
+| 18 | SCOPE `reclaim` | none | rent of T and the announcement to the payer |
+| 19 | System Transfer P to D_owner | P | surplus, only when D_owner can receive it; P keeps its rent reserve (V24, V65) |
 
-Without 16 and 17 this is the transfer-only form the client falls back to; the retry and fallback rules are in [recipient.md](recipient.md).
+Without 17 and 18 this is the transfer-only form the client falls back to; the retry and fallback rules are in [recipient.md](recipient.md).
 
 ## How are addresses derived?
 
@@ -244,7 +245,7 @@ So a stealth row locks 4,008,120 lamports of payer rent until the sweep's `recla
 |---|---|---|---|---|
 | Plain payment | 1 | 2,395 | 237,792 | V49, V73 |
 | Stealth payment | 1 | 2,998 | 254,576 | V56, V73 |
-| Full sweep (auditor, dust burn, reclaim) | 2 | 3,350 | 268,049 | V68, V73 |
+| Full sweep (auditor, dust burn, reclaim) | 2 | 3,402 | 276,007 | V68, V73 |
 | `reclaim` alone (payer's backstop) | 1 | not measured | 3,260 | V73 |
 
 The range proof alone is 200,000 CU and 1,001 bytes (V27); it dominates every payment. Measurements are LiteSVM with a mint auditor; the compute-unit limit the client sets for each shape is in [payer.md](payer.md). Whether a public cluster enforces the same header limits is spike S1 ([plan.md](plan.md)).

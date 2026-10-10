@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-10-07
+last_verified: 2026-10-10
 ---
 
 # Proving an amount
@@ -13,7 +13,7 @@ A receipt names one finalized payment transaction and proves its amount against 
 | You are | Row | Command | Receipt kind | You need |
 |---|---|---|---|---|
 | Payer | plain or stealth | `scope disclose --run <id> --row <i>` | `opening` | payer keypair, the run's `runs/` directory |
-| Recipient | stealth | `scope disclose --signature <payment>` | `account_key` | recipient backup, the payment signature |
+| Recipient | stealth | `scope disclose --signature <payment>` or `--token-account <T>` | `account_key` | recipient backup, the payment signature or its token account |
 | Recipient | plain | none | | the mint's auditor, if the issuer set one (below) |
 
 Anyone can run `scope verify` on either kind with an archival RPC node.
@@ -24,7 +24,7 @@ As the payer, name the run and the row number from its `scope pay` output ([paye
 
 ```sh
 scope disclose --run 3f9c0a1b2d4e5f60 --row 1 \
-  --keypair ~/.config/solana/id.json --runs runs --url <archival-rpc-url> --out row1.receipt.json
+  --keypair ~/.config/solana/id.json --runs ~/.local/share/scope/runs --url <archival-rpc-url> --out row1.receipt.json
 ```
 
 It reads the run's journal and input copy, takes the row's landed signature and amount, and re-derives the row's two Pedersen amount openings from the run secret, so nothing was stored for this ([crypto.md](crypto.md)). It refuses a row that has not landed, and a run whose header has `derived_openings` false (verification: V79).
@@ -38,16 +38,27 @@ scope disclose --signature <payment-signature> \
 
 It fetches the transaction, finds R and the view tag in its `announce` data, derives the one-time account's `ct_ikm`, and refuses unless the derived ElGamal key is the transfer's destination key, so a stranger whose view tag happens to match gets no receipt (verification: V80). An age-encrypted backup takes `--identity` as in [recipient.md](recipient.md).
 
+If you do not have the signature, name the payment's one-time token account instead (`scope scan` and `scope recover` print it, and so does the recovery journal):
+
+```sh
+scope disclose --token-account <T> \
+  --recipient-key ~/.config/scope/recipient.key --url <archival-rpc-url> --out payment.receipt.json
+# payment signature: <signature>                          (stderr)
+```
+
+`disclose` then looks the signature up itself: it lists the transactions that touch `T`, and takes the oldest successful one that holds an `announce` for `T`, since anyone can send lamports to that address first. This works after `reclaim` closed `T`, because the node still lists the transaction. History is read at finalized commitment, so a payment younger than about 13 seconds is not found yet. A node that keeps no history for `T` gives "no payment transaction"; pass `--signature` then.
+
 | Flag | Default | Meaning |
 |---|---|---|
 | `--run <RUN_ID>` | | payer receipt; needs `--row`; conflicts with `--signature` |
 | `--row <i>` | | row number, from 0, counting rows only |
 | `--keypair <file>` | `~/.config/solana/id.json` | payer keypair, with `--run` |
-| `--runs <dir>` | `runs` | run journals, with `--run` |
+| `--runs <dir>` | `~/.local/share/scope/runs` | run journals, with `--run` |
 | `--signature <sig>` | | recipient receipt for this payment |
-| `--recipient-key`, `--identity` | `~/.config/scope/recipient.key`, none | recipient backup, with `--signature` |
+| `--token-account <T>` | | recipient receipt, signature found in history; conflicts with `--signature` and `--run` |
+| `--recipient-key`, `--identity` | `~/.config/scope/recipient.key`, none | recipient backup, with `--signature` or `--token-account` |
 | `--out <file>` | stdout | write to a new file, mode 0600; never overwrites |
-| `--url <rpc>` | `http://127.0.0.1:8899` | archival RPC node |
+| `--url <rpc>` | as in [recipient.md](recipient.md) | RPC node that keeps transaction history |
 
 `disclose` verifies the receipt against the chain before it writes anything; if that fails it prints "the receipt does not verify against the chain; nothing written". Without `--out` it prints the JSON to stdout; for an `account_key` receipt it also warns on stderr that the receipt grants read access to the one-time account. Prefer `--out` for those.
 
@@ -131,7 +142,7 @@ A mint auditor key, where the issuer set one, is a second path: the auditor decr
 
 ## Limits
 
-- A recipient needs the payment signature. `scope pay` prints it per row, so the payer can hand it over. Finding it from the key backup alone is not built (Q17 in [plan.md](plan.md)).
+- A recipient needs the payment signature or the token account. `scope pay` prints the signature per row, so the payer can hand it over; `scope recover` lists both from history. Recovery from the key backup alone needs an RPC that keeps transaction history for the program, within `--limit` listed signatures (failed ones count; the command says when the limit cut the walk short), and fails without one.
 - The payer needs the run's journal and input copy as well as the key: the run secret rebuilds the openings, but the row's signature and amount come from the run directory.
 - A receipt covers one transfer. Proving a total means one receipt per row.
 - `disclose --run` reads the mint's decimals from the chain to parse the input copy, so the mint account must still exist [unverified: no test].
