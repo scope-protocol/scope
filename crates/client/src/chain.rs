@@ -333,10 +333,10 @@ impl Chain for RpcChain {
         let mut found = Vec::with_capacity(addresses.len());
         for chunk in addresses.chunks(100) {
             let rows = self
-                .call(
+                .read(|| {
                     self.rpc()
-                        .get_multiple_accounts_with_commitment(chunk, config(commitment)),
-                )?
+                        .get_multiple_accounts_with_commitment(chunk, config(commitment))
+                })?
                 .value;
             if rows.len() != chunk.len() {
                 return Err(ChainError(
