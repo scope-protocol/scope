@@ -14,6 +14,7 @@ env:
 
 jobs:
   chaos:
+    if: github.repository == 'scope-protocol/scope'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -25,9 +26,10 @@ jobs:
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - run: cargo build-sbf --manifest-path programs/scope/Cargo.toml -- --locked
       - name: Payer chaos harness
-        run: cargo test --locked -p scope-client --test pay chaos -- --ignored
+        run: cargo test --locked --release -p scope-client --test pay chaos -- --ignored
 
   advisories:
+    if: github.repository == 'scope-protocol/scope'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -69,25 +69,6 @@ proptest! {
     }
 
     #[test]
-    fn a_stranger_does_not_recover_the_payment_beyond_the_tag_collision_rate(
-        identity in proptest::collection::vec(any::<u8>(), 256),
-        stranger in proptest::collection::vec(any::<u8>(), 256),
-        payment in proptest::collection::vec(any::<u8>(), 128),
-    ) {
-        let (recipient, stranger) = (recipient(&identity), recipient(&stranger));
-        prop_assume!(recipient.is_some() && stranger.is_some());
-        let (recipient, stranger) = (recipient.unwrap(), stranger.unwrap());
-        let sent = derive_payment(&recipient.derive_public_keys(), &mut ScriptedRng::new(payment));
-        prop_assume!(sent.is_ok());
-        let sent = sent.unwrap();
-        // A one-byte tag collides for about 1 in 256 strangers; whoever matches still
-        // derives a different one-time key.
-        if let Some(found) = recover_payment(&stranger, &sent.announcement).unwrap() {
-            prop_assert_ne!(found.payment_public_key, sent.payment_public_key);
-        }
-    }
-
-    #[test]
     fn meta_addresses_round_trip_and_reject_any_flipped_character(
         identity in proptest::collection::vec(any::<u8>(), 256),
         position in any::<proptest::sample::Index>(),
@@ -104,4 +85,31 @@ proptest! {
         let altered = format!("scope:{}", chars.into_iter().collect::<String>());
         prop_assert!(RecipientPublicKeys::from_meta_address(&altered).is_err());
     }
+}
+
+/// A one-byte tag collides for about 1 in 256 strangers. Grind one that does, then check
+/// that it still derives a different one-time key.
+#[test]
+fn a_stranger_whose_tag_collides_still_gets_a_different_key() {
+    let owner = recipient(&[7u8; 256]).expect("recipient");
+    let sent = derive_payment(
+        &owner.derive_public_keys(),
+        &mut ScriptedRng::new([9u8; 128]),
+    )
+    .expect("payment");
+    let mut collisions = 0;
+    for seed in 0..4096u32 {
+        let mut entropy = [0u8; 256];
+        for (i, chunk) in entropy.chunks_mut(4).enumerate() {
+            chunk.copy_from_slice(&(seed ^ ((i as u32) << 16)).to_le_bytes());
+        }
+        let Some(stranger) = recipient(&entropy) else {
+            continue;
+        };
+        if let Some(found) = recover_payment(&stranger, &sent.announcement).unwrap() {
+            collisions += 1;
+            assert_ne!(found.payment_public_key, sent.payment_public_key);
+        }
+    }
+    assert!(collisions > 0, "no stranger collided in 4096 tries");
 }

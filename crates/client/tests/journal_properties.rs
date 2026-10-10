@@ -15,6 +15,15 @@ fn dir(tag: &str) -> PathBuf {
     d
 }
 
+/// Removes the directory even when an assertion fails.
+struct Cleanup(PathBuf);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn rand_suffix() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -37,6 +46,7 @@ proptest! {
         cut in any::<proptest::sample::Index>(),
     ) {
         let d = dir("cut");
+        let _cleanup = Cleanup(d.clone());
         let written: Vec<Record> = sigs.iter().enumerate().map(|(i, s)| landed(i, s)).collect();
         {
             let mut j = Journal::create(&d).unwrap();
@@ -56,7 +66,6 @@ proptest! {
         drop(j);
         let (_, again) = Journal::open(&d).unwrap();
         prop_assert_eq!(again, [read, vec![extra]].concat());
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -65,6 +74,7 @@ proptest! {
         newline in any::<bool>(),
     ) {
         let d = dir("garbage");
+        let _cleanup = Cleanup(d.clone());
         {
             let mut j = Journal::create(&d).unwrap();
             j.append(&landed(0, "first")).unwrap();
@@ -77,11 +87,15 @@ proptest! {
         }
         std::fs::write(&path, bytes).unwrap();
 
-        if let Ok((mut j, _)) = Journal::open(&d) {
-            j.append(&landed(1, "next")).unwrap();
-            drop(j);
-            prop_assert!(Journal::open(&d).is_ok(), "an accepted journal stays openable");
+        // A torn tail has no newline, so it is always cut instead of refused.
+        let torn = !newline && !garbage.contains(&b'\n');
+        match Journal::open(&d) {
+            Ok((mut j, _)) => {
+                j.append(&landed(1, "next")).unwrap();
+                drop(j);
+                prop_assert!(Journal::open(&d).is_ok(), "an accepted journal stays openable");
+            }
+            Err(error) => prop_assert!(!torn, "a torn tail must reopen: {error:?}"),
         }
-        let _ = std::fs::remove_dir_all(&d);
     }
 }
