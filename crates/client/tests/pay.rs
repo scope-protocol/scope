@@ -339,6 +339,12 @@ impl<C: Chain> Chain for Killer<C> {
         self.alive()?;
         self.inner.rent(space)
     }
+    fn landed_error(
+        &self,
+        signature: &solana_signature::Signature,
+    ) -> Result<Option<String>, ChainError> {
+        self.inner.landed_error(signature)
+    }
 }
 
 /// Kills a 4-row run at `at`, resumes it, and checks every row was paid exactly once.
@@ -755,6 +761,12 @@ impl Chain for Prefunder<'_> {
     fn rent(&self, space: usize) -> Result<u64, ChainError> {
         self.inner.rent(space)
     }
+    fn landed_error(
+        &self,
+        signature: &solana_signature::Signature,
+    ) -> Result<Option<String>, ChainError> {
+        self.inner.landed_error(signature)
+    }
 }
 
 #[test]
@@ -852,25 +864,22 @@ fn a_paid_stealth_row_sweeps_to_the_recipient_and_returns_both_rents_to_the_paye
     );
 
     let seed = alice
-        .derive_sweep_destination(&payment.ephemeral)
+        .derive_sweep_destination(&payment.ephemeral, &report.token_account.to_bytes())
         .expect("destination seed");
     let owner = Keypair::new_from_array(*seed.as_bytes());
     assert_eq!(owner.pubkey(), report.destination_owner);
-    let (keys, _) = derive_confidential_keys(&owner, b"").expect("wallet keys");
+    let (_, ae) = derive_confidential_keys(&owner, b"").expect("wallet keys");
     let account = h.svm.get_account(&report.destination).expect("D");
     let state = StateWithExtensions::<Account>::unpack(&account.data).expect("unpack");
     let ext = state
         .get_extension::<ConfidentialTransferAccount>()
         .expect("ct");
-    let lo: ElGamalCiphertext = ext.pending_balance_lo.try_into().expect("lo");
-    let hi: ElGamalCiphertext = ext.pending_balance_hi.try_into().expect("hi");
-    let lo = keys.secret().decrypt_u32(&lo).expect("lo");
-    let hi = keys.secret().decrypt_u32(&hi).expect("hi");
     assert_eq!(
-        lo + (hi << 16),
-        2_500_000,
-        "D holds the amount, under the owner's wallet keys"
+        ae.decrypt(&ext.decryptable_available_balance.try_into().expect("hint")),
+        Some(2_500_000),
+        "D holds the amount as an applied balance, under the owner's wallet keys"
     );
+    assert_eq!(u64::from(ext.pending_balance_credit_counter), 0);
 }
 
 /// Fails simulation of anything that calls our program, so a sweep falls back to its
@@ -908,6 +917,12 @@ impl Chain for NoReclaim<'_> {
     }
     fn rent(&self, space: usize) -> Result<u64, ChainError> {
         self.0.rent(space)
+    }
+    fn landed_error(
+        &self,
+        signature: &solana_signature::Signature,
+    ) -> Result<Option<String>, ChainError> {
+        self.0.landed_error(signature)
     }
 }
 
@@ -1503,6 +1518,37 @@ fn a_landed_stealth_row_resumes_after_the_mint_stops_auto_approving() {
 }
 
 #[test]
+fn a_landed_row_settles_even_when_the_mint_is_refused_and_the_wallet_is_short() {
+    let (mut h, o, alice) = stealth_row_killed_after_send("settle-first", 1);
+    h.add_null_transfer_hook();
+    set_payer_lamports(&mut h, 1_000);
+    let report = resume_run(&mut h, &o).expect("the paid row settles");
+    assert_eq!(report.paid.len(), 1);
+    assert_eq!(found(&mut h, &alice).len(), 1);
+}
+
+#[test]
+fn rows_still_to_pay_are_refused_on_a_mint_that_is_now_refused() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 2);
+    let o = opts("refused-after-start");
+    let (mint, source) = (h.mint, h.source);
+    let killed = pay::start(
+        Killer::new(SvmChain::new(&mut h.svm), KillAt::AfterSend(1)),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        mint,
+        source,
+        input(&rs).as_bytes(),
+        &o,
+    );
+    assert!(matches!(killed, Err(PayError::Chain(_))), "got {killed:?}");
+    h.add_null_transfer_hook();
+    let stopped = resume_run(&mut h, &o);
+    assert!(matches!(stopped, Err(PayError::Mint { .. })), "{stopped:?}");
+}
+
+#[test]
 fn resuming_a_payment_that_nearly_drains_the_source_does_not_underflow() {
     let whole = SOURCE_FUNDS / 1_000_000 * 3 / 5;
     let (mut h, o, alice) = stealth_row_killed_after_send("near-empty", whole);
@@ -1522,5 +1568,435 @@ fn disclose_survives_a_later_auditor_key_that_does_not_parse() {
     assert_eq!(
         receipt::verify(&archive, &receipt).expect("verify").amount,
         1_250_000
+    );
+}
+
+#[test]
+fn a_run_records_its_cluster_and_refuses_another_one() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 1);
+    let o = opts("cluster");
+    let run_id = start(&mut h, &input(&rs), &o).expect("run").run_id;
+    let records = journal(&o, &run_id);
+    assert!(matches!(
+        &records[0],
+        Record::Run { format, genesis, .. }
+            if *format == scope_client::journal::FORMAT && *genesis == "2a".repeat(32)
+    ));
+    let wrong = |chain: &mut SvmChain| chain.genesis = [7; 32];
+    let is_wrong_cluster = |e: &PayError| matches!(e, PayError::WrongCluster { .. });
+    let mut chain = SvmChain::new(&mut h.svm);
+    wrong(&mut chain);
+    let e = pay::status(&chain, &h.payer, &run_id, &o).expect_err("status");
+    assert!(is_wrong_cluster(&e), "{e}");
+    let e = pay::disclose(&chain, &h.payer, &run_id, 0, &o).expect_err("disclose");
+    assert!(is_wrong_cluster(&e), "{e}");
+    let e = pay::reclaim(&mut chain, &h.payer, &run_id, &o).expect_err("reclaim");
+    assert!(is_wrong_cluster(&e), "{e}");
+    let k = keys(&h.source_elgamal, &h.source_ae);
+    let e = pay::resume(chain, &h.payer, k, &run_id, &o).expect_err("resume");
+    assert!(is_wrong_cluster(&e), "{e}");
+}
+
+#[test]
+fn the_duplicate_guard_sees_through_formatting_and_row_order() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 3);
+    let o = opts("canonical");
+    let (a, b, c) = (rs[0].account, rs[1].account, rs[2].account);
+    start(
+        &mut h,
+        &format!("recipient,amount\n{a},1\n{b},2\n{c},3\n"),
+        &o,
+    )
+    .expect("first run");
+    let variants = [
+        ("reordered", format!("{c},3\n{a},1\n{b},2\n")),
+        (
+            "crlf",
+            format!("recipient,amount\r\n{a},1\r\n{b},2\r\n{c},3\r\n"),
+        ),
+        ("no trailing newline", format!("{a},1\n{b},2\n{c},3")),
+        (
+            "comments and spaces",
+            format!("# March\n{a} , 1.0 # first\n\n  {b},2.000000\n{c},3\n\n"),
+        ),
+    ];
+    for (name, text) in variants {
+        let again = start(&mut h, &text, &o);
+        assert!(
+            matches!(again, Err(PayError::DuplicateInput { .. })),
+            "{name}: {again:?}"
+        );
+    }
+    // A different amount is a different input.
+    start(&mut h, &format!("{a},1\n{b},2\n{c},4\n"), &o).expect("different amounts");
+    // The same recipient listed twice is not the same input as listed once.
+    start(&mut h, &format!("{a},1\n{a},1\n{b},2\n{c},3\n"), &o).expect("a repeated row");
+}
+
+fn attempts(o: &PayOptions, run_id: &str) -> usize {
+    journal(o, run_id)
+        .iter()
+        .filter(|r| matches!(r, Record::Attempt { .. }))
+        .count()
+}
+
+#[test]
+fn a_row_that_keeps_expiring_halts_after_ten_attempts_and_resume_continues() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 1);
+    let o = opts("rebuild-cap");
+    let (mint, source, k) = (h.mint, h.source, keys(&h.source_elgamal, &h.source_ae));
+    let mut chain = SvmChain::new(&mut h.svm);
+    // Every attempt passes simulation and is never seen on chain.
+    chain.drop_sends = usize::MAX;
+    let stopped = pay::start(chain, &h.payer, k, mint, source, input(&rs).as_bytes(), &o);
+    assert!(
+        matches!(&stopped, Err(PayError::Halted(why)) if why.contains("10 attempts")),
+        "{stopped:?}"
+    );
+    let run_id = only_run(&o);
+    assert_eq!(attempts(&o, &run_id), 10);
+    let report = resume_run(&mut h, &o).expect("resume continues");
+    assert_eq!(report.paid.len(), 1);
+    assert_paid_once(&h, &rs);
+}
+
+#[test]
+fn attempts_that_land_with_an_error_halt_the_row_with_that_error_after_three() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 2);
+    let o = opts("lands-failed");
+    let (mint, source, k) = (h.mint, h.source, keys(&h.source_elgamal, &h.source_ae));
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.land_with_error = Some("InstructionError(3, Custom(7))".into());
+    let stopped = pay::start(chain, &h.payer, k, mint, source, input(&rs).as_bytes(), &o);
+    assert!(
+        matches!(&stopped, Err(PayError::Halted(why)) if why.contains("Custom(7)")),
+        "{stopped:?}"
+    );
+    assert_eq!(attempts(&o, &only_run(&o)), 3);
+}
+
+#[test]
+fn a_refused_mint_extension_stops_the_run_before_anything_is_sent() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 1);
+    h.add_null_transfer_hook();
+    let o = opts("refused-mint");
+    let stopped = start(&mut h, &input(&rs), &o);
+    assert!(
+        matches!(&stopped, Err(PayError::Mint { why, .. }) if why.contains("TransferHook")),
+        "{stopped:?}"
+    );
+    assert_no_run(&o);
+}
+
+/// A refused run leaves no run directory behind.
+fn assert_no_run(o: &PayOptions) {
+    let runs = std::fs::read_dir(&o.runs_dir)
+        .map(|d| d.flatten().filter(|e| e.path().is_dir()).count())
+        .unwrap_or(0);
+    assert_eq!(runs, 0, "no run was created");
+}
+
+fn set_payer_lamports(h: &mut Harness, lamports: u64) {
+    let mut account = h.svm.get_account(&h.payer.pubkey()).expect("payer");
+    account.lamports = lamports;
+    h.svm.set_account(h.payer.pubkey(), account).expect("set");
+}
+
+#[test]
+fn refuses_a_run_the_payers_sol_cannot_cover_before_sending() {
+    let mut h = Harness::new();
+    let o = opts("sol-need");
+    let alice = stealth_recipient(21);
+    let stealth_row = format!("{},1\n", alice.derive_public_keys().to_meta_address());
+    // A stealth row costs 8,630,800 lamports plus fees and the payer's reserve.
+    set_payer_lamports(&mut h, 8_000_000);
+    let stopped = start(&mut h, &stealth_row, &o);
+    assert!(
+        matches!(&stopped, Err(PayError::PayerFunds { have: 8_000_000, need, .. }) if *need > 8_630_800),
+        "{stopped:?}"
+    );
+    assert_no_run(&o);
+    // A plain row needs only its fee.
+    let rs = recipients(&mut h, 1);
+    set_payer_lamports(&mut h, 1_000);
+    let stopped = start(&mut h, &input(&rs), &o);
+    assert!(
+        matches!(stopped, Err(PayError::PayerFunds { .. })),
+        "{stopped:?}"
+    );
+    let message = stopped.expect_err("funds").to_string();
+    assert!(message.contains("SOL"), "{message}");
+}
+
+#[test]
+fn the_payers_fees_follow_the_sampled_price_not_the_cap() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 2);
+    let rent0 = h.svm.minimum_balance_for_rent_exemption(0);
+    let k = keys(&h.source_elgamal, &h.source_ae);
+    let o = opts("fee-budget");
+    let need = |samples: Vec<Vec<u64>>, h: &mut Harness| {
+        let mut chain = SvmChain::new(&mut h.svm);
+        chain.price_samples = samples;
+        pay::dry_run(
+            &chain,
+            &h.payer,
+            &k,
+            h.mint,
+            h.source,
+            input(&rs).as_bytes(),
+            &o,
+        )
+        .expect("dry run")
+        .payer_need
+    };
+    // A quiet network: price 1 budgeted at 3 micro-lamports/CU, 1 lamport on top of 5,000.
+    assert_eq!(need(vec![vec![1]], &mut h), rent0 + 2 * 5_001);
+    // A busy one: 3 x 400,000 is capped at the 1,000,000 default.
+    assert_eq!(
+        need(vec![vec![400_000]], &mut h),
+        rent0 + 2 * (5_000 + 275_000)
+    );
+    // An empty block still budgets a price of 1.
+    assert_eq!(need(vec![vec![]], &mut h), rent0 + 2 * 5_001);
+}
+
+#[test]
+fn a_funded_stealth_run_passes_the_sol_check() {
+    let mut h = Harness::new();
+    let o = opts("sol-ok");
+    let alice = stealth_recipient(22);
+    let row = format!("{},1\n", alice.derive_public_keys().to_meta_address());
+    // One stealth row at the default cap needs about 0.0087 SOL plus fees and the reserve.
+    set_payer_lamports(&mut h, 3_000_000_000);
+    start(&mut h, &row, &o).expect("run");
+}
+
+/// Sets the most credits `account` can hold pending.
+fn set_credit_limit(h: &mut Harness, account: Address, max: u64) {
+    use spl_token_2022_interface::extension::BaseStateWithExtensionsMut;
+    let mut stored = h.svm.get_account(&account).expect("account");
+    let mut state = spl_token_2022_interface::extension::StateWithExtensionsMut::<Account>::unpack(
+        &mut stored.data,
+    )
+    .expect("unpack");
+    state
+        .get_extension_mut::<ConfidentialTransferAccount>()
+        .expect("ct")
+        .maximum_pending_balance_credit_counter = max.into();
+    h.svm.set_account(account, stored).expect("set");
+}
+
+#[test]
+fn counts_every_row_to_one_recipient_against_its_credit_room() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 1);
+    set_credit_limit(&mut h, rs[0].account, 2);
+    let a = rs[0].account;
+    let o = opts("credits");
+    let three = format!("{a},1\n{a},2\n{a},3\n");
+    let stopped = start(&mut h, &three, &o);
+    assert!(
+        matches!(&stopped, Err(PayError::Recipient { why, .. }) if why.contains("3 rows") && why.contains("room for 2")),
+        "{stopped:?}"
+    );
+    assert_no_run(&o);
+    start(&mut h, &format!("{a},1\n{a},2\n"), &o).expect("two rows fit");
+    assert_eq!(pending(&h, &rs[0]), 3_000_000);
+}
+
+#[test]
+fn reclaim_all_closes_swept_announcements_without_a_journal() {
+    use pay::ReclaimOutcome::{Reclaimed, StillHolding};
+    use scope_client::sweep::{self, SweepOptions};
+    let mut h = Harness::new();
+    let (alice, bob) = (stealth_recipient(31), stealth_recipient(32));
+    let o = opts("reclaim-all");
+    let input = format!(
+        "{},1\n{},2\n",
+        alice.derive_public_keys().to_meta_address(),
+        bob.derive_public_keys().to_meta_address()
+    );
+    start(&mut h, &input, &o).expect("pay");
+    let alices = found_announcement(&mut h, &alice);
+    sweep::sweep(
+        &mut NoReclaim(SvmChain::new(&mut h.svm)),
+        &alice,
+        &alices,
+        &SweepOptions {
+            poll: Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .expect("transfer-only sweep");
+    // The journal is not needed.
+    std::fs::remove_dir_all(&o.runs_dir).expect("remove journals");
+
+    let stranger = Keypair::new();
+    let none =
+        pay::reclaim_all(&mut SvmChain::new(&mut h.svm), &stranger, &o).expect("other payer");
+    assert!(
+        none.is_empty(),
+        "only the payer's own announcements are listed"
+    );
+
+    let report = pay::reclaim_all(&mut SvmChain::new(&mut h.svm), &h.payer, &o).expect("reclaim");
+    assert_eq!(report.len(), 2);
+    let outcome = |a: &Address| {
+        report
+            .iter()
+            .find(|r| &r.announcement == a)
+            .expect("listed")
+            .outcome
+            .clone()
+    };
+    let bobs = found_announcement(&mut h, &bob);
+    assert_eq!(outcome(&alices), Reclaimed);
+    assert_eq!(outcome(&bobs), StillHolding);
+    assert!(h.svm.get_account(&alices).is_none_or(|a| a.lamports == 0));
+    let again = pay::reclaim_all(&mut SvmChain::new(&mut h.svm), &h.payer, &o).expect("again");
+    assert_eq!(again.len(), 1, "only bob's announcement is left");
+    assert_eq!(again[0].outcome, StillHolding);
+}
+
+#[test]
+fn a_dry_run_reports_the_run_and_changes_nothing() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 2);
+    let alice = stealth_recipient(41);
+    let text = format!(
+        "{}{},0.5\n",
+        input(&rs),
+        alice.derive_public_keys().to_meta_address()
+    );
+    let o = opts("dry-run");
+    let before = h.svm.get_account(&h.source).expect("source").data;
+    let payer_before = h
+        .svm
+        .get_account(&h.payer.pubkey())
+        .expect("payer")
+        .lamports;
+    let k = keys(&h.source_elgamal, &h.source_ae);
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.price_samples = vec![vec![10, 20, 30, 40]];
+    let dry =
+        pay::dry_run(&chain, &h.payer, &k, h.mint, h.source, text.as_bytes(), &o).expect("dry run");
+    assert_eq!((dry.rows, dry.plain_rows, dry.stealth_rows), (3, 2, 1));
+    assert_eq!(dry.total, 3_500_000);
+    assert_eq!(dry.decimals, 6);
+    assert_eq!(dry.price, 30);
+    assert!(
+        dry.cluster.starts_with("unknown cluster "),
+        "{}",
+        dry.cluster
+    );
+    assert_eq!(dry.payer_have, payer_before);
+    assert!(dry.payer_need > 8_630_800, "{}", dry.payer_need);
+    assert!(dry.fee_cap_stealth > dry.fee_cap_plain);
+    assert!(dry.payer_have >= dry.payer_need);
+    assert!(!o.runs_dir.exists(), "a dry run writes no journal");
+    assert_eq!(h.svm.get_account(&h.source).expect("source").data, before);
+    assert_eq!(
+        h.svm
+            .get_account(&h.payer.pubkey())
+            .expect("payer")
+            .lamports,
+        payer_before
+    );
+}
+
+#[test]
+fn a_dry_run_runs_the_same_preflights_as_a_real_run() {
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 1);
+    h.add_null_transfer_hook();
+    let o = opts("dry-run-refused");
+    let k = keys(&h.source_elgamal, &h.source_ae);
+    let chain = SvmChain::new(&mut h.svm);
+    let refused = pay::dry_run(
+        &chain,
+        &h.payer,
+        &k,
+        h.mint,
+        h.source,
+        input(&rs).as_bytes(),
+        &o,
+    );
+    assert!(matches!(refused, Err(PayError::Mint { .. })), "{refused:?}");
+
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 1);
+    let o = opts("dry-run-dup");
+    let text = input(&rs);
+    start(&mut h, &text, &o).expect("run");
+    let k = keys(&h.source_elgamal, &h.source_ae);
+    let chain = SvmChain::new(&mut h.svm);
+    let again = pay::dry_run(&chain, &h.payer, &k, h.mint, h.source, text.as_bytes(), &o);
+    assert!(
+        matches!(again, Err(PayError::DuplicateInput { .. })),
+        "{again:?}"
+    );
+}
+
+#[test]
+fn the_run_summary_counts_rows_and_tells_done_from_halted_from_unfinished() {
+    use pay::RunState;
+    let mut h = Harness::new();
+    let rs = recipients(&mut h, 2);
+    let alice = stealth_recipient(51);
+    let text = format!(
+        "{}{},1\n",
+        input(&rs),
+        alice.derive_public_keys().to_meta_address()
+    );
+    let summary = |h: &mut Harness, o: &PayOptions, run_id: &str| {
+        pay::summary(&SvmChain::new(&mut h.svm), &h.payer, run_id, o).expect("summary")
+    };
+
+    // Killed after the first row: unfinished.
+    let o = opts("summary-killed");
+    let (mint, source) = (h.mint, h.source);
+    let killed = pay::start(
+        Killer::new(SvmChain::new(&mut h.svm), KillAt::Simulate(2)),
+        &h.payer,
+        keys(&h.source_elgamal, &h.source_ae),
+        mint,
+        source,
+        text.as_bytes(),
+        &o,
+    );
+    assert!(killed.is_err());
+    let run_id = only_run(&o);
+    let s = summary(&mut h, &o, &run_id);
+    assert_eq!((s.rows, s.landed), (3, 1));
+    assert_eq!(s.state, RunState::Unfinished);
+
+    // Halted by the rebuild cap, then resumed to done.
+    let o = opts("summary-halted");
+    let mut chain = SvmChain::new(&mut h.svm);
+    chain.drop_sends = usize::MAX;
+    let k = keys(&h.source_elgamal, &h.source_ae);
+    pay::start(chain, &h.payer, k, mint, source, text.as_bytes(), &o).expect_err("halts");
+    let run_id = only_run(&o);
+    let s = summary(&mut h, &o, &run_id);
+    assert!(
+        matches!(&s.state, RunState::Halted(why) if why.contains("10 attempts")),
+        "{:?}",
+        s.state
+    );
+    assert_eq!(s.landed, 0);
+    resume_run(&mut h, &o).expect("resume");
+    let s = summary(&mut h, &o, &run_id);
+    assert_eq!((s.rows, s.landed, s.state), (3, 3, RunState::Done));
+    assert_eq!(s.plain.len(), 2, "plain rows are listed");
+    assert!(
+        s.plain
+            .iter()
+            .all(|p| p.state == pay::PlainState::Landed && p.signature.is_some())
     );
 }

@@ -1,17 +1,20 @@
-//! The payer's per-run secret (docs/client.md, Run secret). It is derived from the
+//! The payer's per-run secret (docs/crypto.md, Run secret and amount openings). It is derived from the
 //! payer's Ed25519 signature over a fixed message, and Ed25519 signing is
 //! deterministic, so the payer keypair alone rebuilds every stealth row's R and every
-//! row's amount openings. Nothing secret is stored.
+//! row's amount openings. Nothing secret is stored. Only a `Keypair` is accepted: a
+//! signer that randomizes its signatures would derive a different secret on resume.
 
 use curve25519_dalek::scalar::Scalar;
 use hkdf::Hkdf;
 use sha2::Sha256;
+use solana_keypair::Keypair;
 use solana_signer::{Signer, SignerError};
 use solana_zk_sdk::encryption::pedersen::PedersenOpening;
 use stealth_keygen::EphemeralSecret;
 use zeroize::Zeroizing;
 
-const SECRET_LABEL: &[u8] = b"scope-run-secret/v1";
+const SECRET_LABEL: &[u8] = b"scope-run-secret/v2";
+const SIGN_PREFIX: u8 = 0xff;
 const EPHEMERAL_LABEL: &[u8] = b"scope-ephemeral/v1";
 const OPENING_LABEL: &[u8] = b"scope-opening/v1";
 
@@ -24,9 +27,12 @@ pub struct AmountOpenings {
 }
 
 impl RunSecret {
-    /// `HKDF-SHA256(salt = label, ikm = payer's signature over label || run_id, info = run_id)`.
-    pub fn derive(payer: &dyn Signer, run_id: &str) -> Result<Self, SignerError> {
-        let message = [SECRET_LABEL, run_id.as_bytes()].concat();
+    /// `HKDF-SHA256(salt = label, ikm = payer's signature over 0xff || label || run_id, info = run_id)`.
+    /// A leading 0xff byte cannot start a transaction message (a legacy message's first byte
+    /// has the high bit clear and a versioned one's is 0x80 plus a version below 0x7f), so a
+    /// wallet asked to sign this cannot be tricked into signing a transaction.
+    pub fn derive(payer: &Keypair, run_id: &str) -> Result<Self, SignerError> {
+        let message = [&[SIGN_PREFIX][..], SECRET_LABEL, run_id.as_bytes()].concat();
         let signature = payer.try_sign_message(&message)?;
         let mut secret = Zeroizing::new([0u8; 32]);
         Hkdf::<Sha256>::new(Some(SECRET_LABEL), signature.as_ref())
@@ -74,7 +80,38 @@ mod tests {
     use solana_keypair::Keypair;
 
     fn r(secret: &RunSecret, row: usize) -> [u8; 32] {
-        *secret.expand::<32>(EPHEMERAL_LABEL, "run", row, b"")
+        r_of(secret, "run", row)
+    }
+
+    fn r_of(secret: &RunSecret, run_id: &str, row: usize) -> [u8; 32] {
+        *secret.expand::<32>(EPHEMERAL_LABEL, run_id, row, b"")
+    }
+
+    fn vector<const N: usize>(name: &str) -> [u8; N] {
+        let text = include_str!("../tests/fixtures/run_secret.txt");
+        let value = text
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
+            .unwrap_or_else(|| panic!("missing vector {name}"));
+        let bytes: Vec<u8> = (0..value.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&value[i..i + 2], 16).expect("hex"))
+            .collect();
+        bytes.try_into().expect("vector length")
+    }
+
+    #[test]
+    fn matches_independent_known_answers() {
+        let payer = Keypair::new_from_array(vector("keypair_seed"));
+        assert_eq!(payer.pubkey().to_bytes(), vector::<32>("keypair_public"));
+        let run_id = String::from_utf8(vector::<16>("run_id").to_vec()).expect("ascii");
+        let row = u64::from_le_bytes(vector("row")) as usize;
+        let secret = RunSecret::derive(&payer, &run_id).expect("derive");
+        assert_eq!(*secret.0, vector::<32>("run_secret"));
+        assert_eq!(r_of(&secret, &run_id, row), vector::<32>("ephemeral"));
+        let openings = secret.openings(&run_id, row);
+        assert_eq!(openings.lo.as_bytes(), &vector::<32>("opening_lo"));
+        assert_eq!(openings.hi.as_bytes(), &vector::<32>("opening_hi"));
     }
 
     #[test]

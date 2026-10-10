@@ -321,3 +321,55 @@ fn deregister_rejects_bad_data_a_missing_signature_a_stranger_and_a_wrong_scheme
         "every refused call left the entry in place"
     );
 }
+
+#[test]
+fn rejects_an_entry_address_that_holds_data() {
+    let mut h = Harness::new();
+    let (entry, _) = meta_entry_address(&h.payer.pubkey());
+    let mut occupied = h.svm.get_account(&h.payer.pubkey()).expect("payer");
+    occupied.lamports = h.svm.minimum_balance_for_rent_exemption(109);
+    occupied.data = vec![0; 109];
+    h.svm.set_account(entry, occupied).expect("set");
+    assert_scope_error(
+        register(&mut h, data(valid_spend())),
+        ScopeError::MetaAddressInUse,
+    );
+}
+
+#[test]
+fn rejects_an_entry_address_owned_by_another_program() {
+    let mut h = Harness::new();
+    let (entry, _) = meta_entry_address(&h.payer.pubkey());
+    let mut claimed = h.svm.get_account(&h.payer.pubkey()).expect("payer");
+    claimed.lamports = h.svm.minimum_balance_for_rent_exemption(0);
+    claimed.owner = scope_client::address::token_2022();
+    h.svm.set_account(entry, claimed).expect("set");
+    assert_scope_error(
+        register(&mut h, data(valid_spend())),
+        ScopeError::MetaAddressInUse,
+    );
+}
+
+#[test]
+fn a_legacy_transaction_registers_and_deregisters() {
+    let mut h = Harness::new();
+    let registrant = h.payer.pubkey();
+    let (entry, _) = meta_entry_address(&registrant);
+    let register_ix = register_ix(&registrant, &entry, &data(valid_spend()).to_bytes());
+    let tx =
+        scope_client::tx::legacy_transaction(&h.payer, &[register_ix], h.svm.latest_blockhash());
+    h.svm.send_transaction(tx).expect("legacy register lands");
+    assert!(lamports(&h, &entry) > 0);
+    h.svm.expire_blockhash();
+    let tx = scope_client::tx::legacy_transaction(
+        &h.payer,
+        &[deregister_ix(
+            &registrant,
+            &entry,
+            &deregister_data(META_SCHEME_V1),
+        )],
+        h.svm.latest_blockhash(),
+    );
+    h.svm.send_transaction(tx).expect("legacy deregister lands");
+    assert_eq!(lamports(&h, &entry), 0);
+}

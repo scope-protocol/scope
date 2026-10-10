@@ -1,4 +1,4 @@
-//! The on-chain registry (docs/design.md, Registry): sRFC-42 v1 entries in our program.
+//! The on-chain registry (docs/protocol.md): sRFC-42 v1 entries in our program.
 //! Lookups fetch every entry in one query and pick locally, so the query does not name
 //! the wallet looked up (docs/privacy.md, Registration).
 

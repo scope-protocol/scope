@@ -2,8 +2,8 @@ use scope_interface::token_account::{CLOSE_ACCOUNT_INSTRUCTION, read_token_accou
 use solana_address::Address;
 use spl_token_2022_interface::{
     extension::{
-        BaseStateWithExtensionsMut, ExtensionType, StateWithExtensionsMut,
-        confidential_transfer::ConfidentialTransferAccount,
+        BaseStateWithExtensions, BaseStateWithExtensionsMut, ExtensionType, StateWithExtensions,
+        StateWithExtensionsMut, confidential_transfer::ConfidentialTransferAccount,
     },
     instruction::close_account,
     state::{Account, AccountState},
@@ -65,6 +65,50 @@ fn reader_agrees_with_official_unpack() {
     let ct = v.confidential.expect("ct");
     assert!(ct.approved && !ct.allow_non_confidential_credits);
     assert_eq!(ct.maximum_pending_balance_credit_counter, 1);
+}
+
+#[test]
+fn reader_agrees_with_official_cpi_guard_in_either_tlv_order() {
+    use spl_token_2022_interface::extension::cpi_guard::CpiGuard;
+    for locked in [true, false] {
+        for guard_first in [true, false] {
+            let types = if guard_first {
+                [
+                    ExtensionType::CpiGuard,
+                    ExtensionType::ConfidentialTransferAccount,
+                ]
+            } else {
+                [
+                    ExtensionType::ConfidentialTransferAccount,
+                    ExtensionType::CpiGuard,
+                ]
+            };
+            let len = ExtensionType::try_calculate_account_len::<Account>(&types).expect("len");
+            let mut data = vec![0u8; len];
+            {
+                let mut state = StateWithExtensionsMut::<Account>::unpack_uninitialized(&mut data)
+                    .expect("unpack");
+                for ty in types {
+                    if ty == ExtensionType::CpiGuard {
+                        state
+                            .init_extension::<CpiGuard>(true)
+                            .expect("guard")
+                            .lock_cpi = locked.into();
+                    } else {
+                        state
+                            .init_extension::<ConfidentialTransferAccount>(true)
+                            .expect("ct");
+                    }
+                }
+                state.base.state = AccountState::Initialized;
+                state.pack_base();
+                state.init_account_type().expect("type");
+            }
+            let v = read_token_account(&data).expect("read");
+            assert_eq!(v.cpi_guard_locked, locked, "guard_first={guard_first}");
+            assert!(v.confidential.is_some());
+        }
+    }
 }
 
 /// Eight knobs, one per field the reader returns; a struct would only rename them.
@@ -136,5 +180,34 @@ proptest! {
         let ct = v.confidential.expect("ct");
         prop_assert_eq!(ct.maximum_pending_balance_credit_counter, cap);
         prop_assert_eq!(ct.allow_non_confidential_credits, allow_public);
+
+        // The same bytes through the official unpacker.
+        let official = StateWithExtensions::<Account>::unpack(&data).expect("unpack");
+        prop_assert_eq!(official.base.owner.to_bytes(), v.owner);
+        prop_assert_eq!(official.base.amount, v.amount);
+        prop_assert_eq!(
+            Option::<Address>::from(official.base.delegate).map(|a| a.to_bytes()),
+            v.delegate
+        );
+        prop_assert_eq!(
+            Option::<Address>::from(official.base.close_authority).map(|a| a.to_bytes()),
+            v.close_authority
+        );
+        prop_assert_eq!(official.base.state as u8, v.state);
+        let official_ct = official
+            .get_extension::<ConfidentialTransferAccount>()
+            .expect("extension");
+        prop_assert_eq!(
+            u64::from(official_ct.maximum_pending_balance_credit_counter),
+            ct.maximum_pending_balance_credit_counter
+        );
+        prop_assert_eq!(
+            bool::from(official_ct.allow_non_confidential_credits),
+            ct.allow_non_confidential_credits
+        );
+        prop_assert_eq!(
+            u64::from(official_ct.pending_balance_credit_counter),
+            ct.pending_balance_credit_counter
+        );
     }
 }

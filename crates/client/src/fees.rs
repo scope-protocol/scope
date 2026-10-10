@@ -1,4 +1,4 @@
-//! Priority fee sampling (docs/client.md, Fees): the per-CU price landed non-vote
+//! Priority fee sampling (docs/payer.md, How are fees priced?): the per-CU price landed non-vote
 //! transactions actually paid, never `getRecentPrioritizationFees`.
 
 use solana_address::Address;
@@ -29,6 +29,16 @@ pub fn priority_price(mut prices: Vec<u64>, cap: u64) -> Result<u64, FeeAboveCap
         return Err(FeeAboveCap { price, cap });
     }
     Ok(price)
+}
+
+/// How many times the sampled price the payer's own transaction fees are budgeted at.
+pub const BUDGET_FACTOR: u64 = 3;
+
+/// The per-CU price the payer budgets its own fees at: the sampled p75 (at least 1) times
+/// `BUDGET_FACTOR`, never above `cap`. Funding for P stays at the cap.
+pub fn budget_price(prices: Vec<u64>, cap: u64) -> u64 {
+    let sampled = priority_price(prices, u64::MAX).unwrap_or(u64::MAX);
+    sampled.max(1).saturating_mul(BUDGET_FACTOR).min(cap)
 }
 
 /// Nearest-rank percentile of a sorted, non-empty slice.

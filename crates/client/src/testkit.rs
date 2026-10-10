@@ -13,6 +13,7 @@ use solana_instruction::Instruction;
 use solana_instruction_error::InstructionError;
 use solana_keypair::Keypair;
 use solana_message::Hash;
+use solana_signature::Signature;
 use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction_error::TransactionError;
@@ -127,6 +128,17 @@ impl Harness {
         h.create_mint(auditor, permissioned_burn);
         h.create_funded_source();
         h
+    }
+
+    /// Adds a transfer hook that names no program to the mint, which the mint policy refuses.
+    /// Appended as a TLV entry so the existing token accounts stay valid.
+    pub fn add_null_transfer_hook(&mut self) {
+        const TRANSFER_HOOK: u16 = 14;
+        let mut mint = self.svm.get_account(&self.mint).expect("mint");
+        mint.data.extend(TRANSFER_HOOK.to_le_bytes());
+        mint.data.extend(64u16.to_le_bytes());
+        mint.data.extend([0u8; 64]);
+        self.svm.set_account(self.mint, mint).expect("set mint");
     }
 
     // Returns litesvm's own result type so tests can match on its metadata.
@@ -324,6 +336,8 @@ pub struct SvmChain<'a> {
     pub svm: &'a mut LiteSVM,
     height: Cell<u64>,
     pub account_reads: Cell<usize>,
+    /// Calls to `accounts`, each one round trip.
+    pub account_batches: Cell<usize>,
     /// Sends to swallow before executing any, to model lost transactions.
     pub drop_sends: usize,
     /// Model a source that has not appeared in finalized reads yet.
@@ -340,9 +354,13 @@ pub struct SvmChain<'a> {
     pub before_send: Option<VersionedTransaction>,
     pub before_send_hook: Option<SendHook>,
     pub after_send: Option<VersionedTransaction>,
-    pub sent_signatures: Vec<solana_signature::Signature>,
+    pub sent_signatures: Vec<Signature>,
     pub failed_status_lag: Cell<usize>,
     pub height_delay: std::time::Duration,
+    /// Every sent transaction lands and fails with this error instead of executing.
+    pub land_with_error: Option<String>,
+    /// The cluster's genesis hash.
+    pub genesis: [u8; 32],
     sent: bool,
 }
 
@@ -356,6 +374,7 @@ impl<'a> SvmChain<'a> {
             svm,
             height: Cell::new(0),
             account_reads: Cell::new(0),
+            account_batches: Cell::new(0),
             drop_sends: 0,
             finalized_missing_until_send: None,
             fail_finalized_after_send: false,
@@ -373,6 +392,8 @@ impl<'a> SvmChain<'a> {
             sent_signatures: Vec::new(),
             failed_status_lag: Cell::new(0),
             height_delay: std::time::Duration::ZERO,
+            land_with_error: None,
+            genesis: [42; 32],
             sent: false,
         }
     }
@@ -415,6 +436,18 @@ impl Chain for SvmChain<'_> {
             }))
     }
 
+    fn accounts(
+        &self,
+        addresses: &[Address],
+        commitment: Commitment,
+    ) -> Result<Vec<Option<AccountData>>, ChainError> {
+        self.account_batches.set(self.account_batches.get() + 1);
+        addresses
+            .iter()
+            .map(|address| self.account(address, commitment))
+            .collect()
+    }
+
     fn blockhash(&self) -> Result<(Hash, u64), ChainError> {
         Ok((
             self.svm.latest_blockhash(),
@@ -443,6 +476,9 @@ impl Chain for SvmChain<'_> {
         }
         if self.drop_sends > 0 {
             self.drop_sends -= 1;
+            return Ok(());
+        }
+        if self.land_with_error.is_some() {
             return Ok(());
         }
         if let Some(before) = self.before_send.take() {
@@ -480,20 +516,58 @@ impl Chain for SvmChain<'_> {
             .unwrap_or_default())
     }
     fn genesis_hash(&self) -> Result<[u8; 32], ChainError> {
-        Ok([42; 32])
+        Ok(self.genesis)
     }
     fn rent(&self, space: usize) -> Result<u64, ChainError> {
         Ok(self.svm.minimum_balance_for_rent_exemption(space))
+    }
+
+    fn announcements_by_payer(
+        &self,
+        payer: &Address,
+    ) -> Result<Vec<(Address, AccountData)>, ChainError> {
+        use scope_interface::state::ANNOUNCEMENT_LEN;
+        // The payer is the announcement's last field.
+        const PAYER_OFFSET: usize = ANNOUNCEMENT_LEN - 32;
+        Ok(self
+            .svm
+            .get_program_accounts(&program_id())
+            .into_iter()
+            .filter(|(_, a)| {
+                a.data.len() == ANNOUNCEMENT_LEN
+                    && a.data[0] == scope_interface::state::ANNOUNCEMENT_DISCRIMINATOR
+                    && a.data[PAYER_OFFSET..] == *payer.as_ref()
+            })
+            .map(|(address, a)| {
+                (
+                    address,
+                    AccountData {
+                        owner: a.owner,
+                        lamports: a.lamports,
+                        data: a.data,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    fn landed_error(&self, signature: &Signature) -> Result<Option<String>, ChainError> {
+        if self.sent_signatures.contains(signature)
+            && let Some(error) = &self.land_with_error
+        {
+            return Ok(Some(error.clone()));
+        }
+        Ok(match self.svm.get_transaction(signature) {
+            Some(Err(failed)) => Some(format!("{:?}", failed.err)),
+            _ => None,
+        })
     }
 }
 
 impl RecipientChain for SvmChain<'_> {
     fn set_deadline(&mut self, _deadline: Option<std::time::Instant>) {}
 
-    fn finalized_status(
-        &self,
-        signature: &solana_signature::Signature,
-    ) -> Result<FinalizedStatus, ChainError> {
+    fn finalized_status(&self, signature: &Signature) -> Result<FinalizedStatus, ChainError> {
         if self.fail_status_after_send && self.sent {
             return Err(ChainError("RPC disconnected after send".into()));
         }

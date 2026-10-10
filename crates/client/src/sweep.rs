@@ -17,6 +17,7 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_zk_sdk::{
     encryption::{
+        auth_encryption::AeKey,
         derivation::derive_confidential_keys,
         elgamal::{ElGamalCiphertext, ElGamalKeypair, ElGamalPubkey},
     },
@@ -72,6 +73,7 @@ pub struct SweepReport {
     pub payment_authority: Address,
     pub retained_lamports: Option<u64>,
     pub ephemeral: [u8; 32],
+    pub token_account: Address,
     pub amount: u64,
     pub burned_public_amount: Option<u64>,
     pub public_amount_remaining: Option<u64>,
@@ -86,12 +88,13 @@ impl fmt::Display for SweepReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "genesis_hash\t{}\ndestination\t{}\nowner\t{}\npayment_authority\t{}\nephemeral\t{}\nattempt_signature\t{}",
+            "genesis_hash\t{}\ndestination\t{}\nowner\t{}\npayment_authority\t{}\nephemeral\t{}\ntoken_account\t{}\nattempt_signature\t{}",
             Address::new_from_array(self.genesis_hash),
             self.destination,
             self.destination_owner,
             self.payment_authority,
             Address::new_from_array(self.ephemeral),
+            self.token_account,
             self.attempt_signature
         )?;
         if let Some(signature) = &self.finalized_signature {
@@ -177,6 +180,7 @@ struct Destination {
     owner: Keypair,
     address: Address,
     keys: ElGamalKeypair,
+    ae: AeKey,
     space: usize,
     setup: Vec<Instruction>,
     auditor: Option<ElGamalPubkey>,
@@ -188,7 +192,10 @@ fn destination<C: RecipientChain>(
     payment: &OwnedPayment,
 ) -> Result<Destination, SweepError> {
     let seed = recipient
-        .derive_sweep_destination(&payment.info.ephemeral)
+        .derive_sweep_destination(
+            &payment.info.ephemeral,
+            &payment.info.token_account.to_bytes(),
+        )
         .map_err(|e| invalid(format!("sweep key derivation: {e:?}")))?;
     let owner = Keypair::new_from_array(*seed.as_bytes());
     let mint_account = chain
@@ -208,17 +215,12 @@ fn destination_from_mint(
         return Err(invalid("mint is not owned by Token-2022"));
     }
     let mint = StateWithExtensions::<Mint>::unpack(&mint_account.data).map_err(invalid)?;
-    let types = mint.get_extension_types().map_err(invalid)?;
-    for refused in [
-        ExtensionType::NonTransferable,
-        ExtensionType::TransferFeeConfig,
-        ExtensionType::TransferHook,
-    ] {
-        if types.contains(&refused) {
-            return Err(invalid(format!(
-                "mint extension {refused:?} is not supported"
-            )));
-        }
+    let refused = crate::mint_policy::refusals(&mint_account.data).map_err(invalid)?;
+    if !refused.is_empty() {
+        return Err(invalid(format!(
+            "mint is not supported: {}",
+            refused.join("; ")
+        )));
     }
     let confidential = mint
         .get_extension::<ConfidentialTransferMint>()
@@ -271,6 +273,7 @@ fn destination_from_mint(
         owner,
         address,
         keys,
+        ae,
         space,
         setup,
         auditor,
@@ -397,6 +400,18 @@ fn instructions(
             authority,
             &[],
             ProofLocation::InstructionOffset(offset(1), &zero),
+        )
+        .map_err(invalid)?,
+    );
+    // The transfer is D's first credit; applying it here leaves the funds spendable at once.
+    ixs.push(
+        ct::apply_pending_balance(
+            &t22,
+            &destination.address,
+            1,
+            &destination.ae.encrypt(payment.info.amount).into(),
+            &destination.owner.pubkey(),
+            &[],
         )
         .map_err(invalid)?,
     );
@@ -603,6 +618,7 @@ pub fn prepare<C: RecipientChain>(
         payment_authority: Address::new_from_array(plan.payment.payment_public_key),
         retained_lamports: Some(retained_lamports),
         ephemeral: info.ephemeral,
+        token_account: info.token_account,
         amount: info.amount,
         burned_public_amount: Some(if reclaimed { info.public_amount } else { 0 }),
         public_amount_remaining: Some(if reclaimed { 0 } else { info.public_amount }),

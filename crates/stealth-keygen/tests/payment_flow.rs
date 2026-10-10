@@ -60,7 +60,7 @@ fn shared_meta_address_supports_payment_recovery_and_sweep_derivation() {
             .as_bytes()
     );
     let seed = restored
-        .derive_sweep_destination(&sent.announcement.ephemeral_public_key)
+        .derive_sweep_destination(&sent.announcement.ephemeral_public_key, &[4; 32])
         .unwrap();
     assert_eq!(seed.as_bytes(), &vector::<32>("sweep_seed"));
 }
@@ -103,7 +103,7 @@ fn restored_recipient_recovers_and_signs_existing_payments() {
 fn sweep_destination_matches_independent_seed_key_and_signature_vectors() {
     let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
     let seed = recipient
-        .derive_sweep_destination(&vector("ephemeral_public"))
+        .derive_sweep_destination(&vector("ephemeral_public"), &[4; 32])
         .unwrap();
     assert_eq!(seed.as_bytes(), &vector::<32>("sweep_seed"));
     let signer = SigningKey::from_bytes(seed.as_bytes());
@@ -124,31 +124,47 @@ fn sweep_destination_matches_independent_seed_key_and_signature_vectors() {
 fn sweep_destination_is_recoverable_and_binds_spend_secret_and_exact_r() {
     let original = recipient(1, 2);
     let r = vector::<32>("ephemeral_public");
-    let seed = original.derive_sweep_destination(&r).unwrap();
+    let seed = original.derive_sweep_destination(&r, &[4; 32]).unwrap();
     assert_eq!(
         seed.as_bytes(),
-        original.derive_sweep_destination(&r).unwrap().as_bytes()
+        original
+            .derive_sweep_destination(&r, &[4; 32])
+            .unwrap()
+            .as_bytes()
     );
     let backup = original.export();
     drop(original);
     let restored = RecipientSecretKeys::from_bytes(*backup.as_bytes()).unwrap();
     assert_eq!(
         seed.as_bytes(),
-        restored.derive_sweep_destination(&r).unwrap().as_bytes()
+        restored
+            .derive_sweep_destination(&r, &[4; 32])
+            .unwrap()
+            .as_bytes()
     );
     assert_eq!(
         seed.as_bytes(),
         recipient(1, 9)
-            .derive_sweep_destination(&r)
+            .derive_sweep_destination(&r, &[4; 32])
             .unwrap()
             .as_bytes()
     );
     assert_ne!(
         seed.as_bytes(),
         recipient(9, 2)
-            .derive_sweep_destination(&r)
+            .derive_sweep_destination(&r, &[4; 32])
             .unwrap()
             .as_bytes()
+    );
+    let mut other_account = [4; 32];
+    other_account[31] ^= 1;
+    assert_ne!(
+        seed.as_bytes(),
+        restored
+            .derive_sweep_destination(&r, &other_account)
+            .unwrap()
+            .as_bytes(),
+        "a second announcement that reuses R must not share the destination"
     );
     for byte in [0, 31] {
         let mut changed_r = r;
@@ -156,7 +172,7 @@ fn sweep_destination_is_recoverable_and_binds_spend_secret_and_exact_r() {
         assert_ne!(
             seed.as_bytes(),
             restored
-                .derive_sweep_destination(&changed_r)
+                .derive_sweep_destination(&changed_r, &[4; 32])
                 .unwrap()
                 .as_bytes()
         );

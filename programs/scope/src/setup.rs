@@ -1,4 +1,4 @@
-//! The Token-2022 settings every announced account must have (docs/design.md, announce).
+//! The Token-2022 settings every announced account must have (docs/protocol.md, What does each instruction check?).
 
 use crate::{address::TOKEN_2022, err};
 use pinocchio::{AccountView, Address, ProgramResult};
@@ -8,7 +8,8 @@ use scope_interface::{
 };
 
 /// Checks 5 to 8: Token-2022 account, initialized, close authority is the
-/// announcement, handed over with no delegate, credit cap 1, public credits off.
+/// announcement, handed over with no delegate, credit cap 1, public credits off,
+/// no CpiGuard lock (Token-2022 would then refuse `reclaim`'s CPI close to the payer).
 pub(crate) fn check(
     token_account: &AccountView,
     payer: &Address,
@@ -39,6 +40,9 @@ pub(crate) fn check(
     }
     if ct.allow_non_confidential_credits {
         return Err(err(ScopeError::PublicCreditsEnabled));
+    }
+    if view.cpi_guard_locked {
+        return Err(err(ScopeError::CpiGuardEnabled));
     }
     Ok(())
 }
