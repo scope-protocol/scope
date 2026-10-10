@@ -6,7 +6,7 @@ last_verified: 2026-10-10
 # Paying with `scope pay`
 
 TL;DR: for whoever runs payouts: write an input file, preview a batch, pay plain and stealth rows, recover from a crash, price the run, get stealth-row rent back.
-Each row is paid at most once; the run journal and the payer key suffice to resume, check status or prove an amount ([audit.md](audit.md)).
+Each row is paid at most once; the journal and payer key suffice to resume, check status or prove an amount ([audit.md](audit.md)).
 
 ## Before you start
 
