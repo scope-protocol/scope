@@ -7,7 +7,7 @@ use solana_message::{
 use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
-/// Compute-unit limit per transaction shape, each about 15% above its LiteSVM measurement
+/// Compute-unit limit per transaction shape, each 10 to 15% above its LiteSVM measurement
 /// with a mint auditor (`programs/scope/tests/it/budget.rs` and the sweep test in
 /// `crates/client/tests/recipient.rs`). The priority fee is price times the limit, so
 /// headroom is paid for.

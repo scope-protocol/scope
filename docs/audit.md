@@ -58,7 +58,7 @@ scope disclose --token-account <T> \
 | `--token-account <T>` | | recipient receipt, signature found in history; conflicts with `--signature` and `--run` |
 | `--recipient-key`, `--identity` | `~/.config/scope/recipient.key`, none | recipient backup, with `--signature` or `--token-account` |
 | `--out <file>` | stdout | write to a new file, mode 0600; never overwrites |
-| `--url <rpc>` | `http://127.0.0.1:8899` | archival RPC node |
+| `--url <rpc>` | as in [recipient.md](recipient.md) | RPC node that keeps transaction history |
 
 `disclose` verifies the receipt against the chain before it writes anything; if that fails it prints "the receipt does not verify against the chain; nothing written". Without `--out` it prints the JSON to stdout; for an `account_key` receipt it also warns on stderr that the receipt grants read access to the one-time account. Prefer `--out` for those.
 

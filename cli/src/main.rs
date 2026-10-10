@@ -646,8 +646,7 @@ struct DiscloseArgs {
 struct VerifyArgs {
     /// Receipt file from `scope disclose`.
     receipt: PathBuf,
-    /// An RPC node that keeps transaction history.
-    /// RPC node; defaults to $SCOPE_URL, else http://127.0.0.1:8899.
+    /// RPC node that keeps transaction history; defaults to $SCOPE_URL, else http://127.0.0.1:8899.
     #[arg(long)]
     url: Option<String>,
 }
@@ -783,7 +782,8 @@ fn rpc_url(flag: Option<String>) -> String {
 }
 
 fn pick_url(flag: Option<String>, env: Option<String>) -> String {
-    flag.or(env.filter(|url| !url.is_empty()))
+    flag.filter(|url| !url.is_empty())
+        .or(env.filter(|url| !url.is_empty()))
         .unwrap_or_else(|| DEFAULT_URL.into())
 }
 
@@ -964,14 +964,47 @@ fn print_status(
 /// Exit codes: 0 done, 1 refused or failed before anything was sent, 2 bad arguments (clap),
 /// 3 transient, retry or resume later, 4 stopped after sending, inspect then resume.
 fn exit_code(error: &anyhow::Error) -> u8 {
-    use scope_client::{chain::ChainError, pay::PayError};
+    use scope_client::{
+        chain::ChainError, history::HistoryError, journal::JournalError, pay::PayError,
+        receipt::ReceiptError, scan::ScanError, sweep::SweepError,
+    };
+    fn scan(e: &ScanError) -> u8 {
+        match e {
+            ScanError::Chain(_) | ScanError::Incomplete { .. } => 3,
+            _ => 1,
+        }
+    }
+    fn sweep(e: &SweepError) -> u8 {
+        match e {
+            SweepError::Chain(_) => 3,
+            SweepError::Scan(e) => scan(e),
+            SweepError::Pending { .. } | SweepError::Interrupted { .. } => 4,
+            _ => 1,
+        }
+    }
     for cause in error.chain() {
-        if let Some(pay) = cause.downcast_ref::<PayError>() {
-            return match pay {
+        if let Some(e) = cause.downcast_ref::<PayError>() {
+            return match e {
                 PayError::FeeAboveCap { .. } | PayError::Chain(_) => 3,
-                PayError::Halted(_) | PayError::Simulation { .. } => 4,
+                PayError::Journal(JournalError::Locked(_)) => 3,
+                PayError::Halted(_) => 4,
                 _ => 1,
             };
+        }
+        if let Some(e) = cause.downcast_ref::<SweepError>() {
+            return sweep(e);
+        }
+        if let Some(e) = cause.downcast_ref::<ScanError>() {
+            return scan(e);
+        }
+        if matches!(
+            cause.downcast_ref::<HistoryError>(),
+            Some(HistoryError::Chain(_))
+        ) || matches!(
+            cause.downcast_ref::<ReceiptError>(),
+            Some(ReceiptError::Chain(_))
+        ) {
+            return 3;
         }
         if cause.downcast_ref::<ChainError>().is_some() {
             return 3;
@@ -1104,6 +1137,37 @@ mod tests {
         assert_eq!(exit_code(&anyhow::anyhow!("plain")), 1);
         let wrapped = anyhow::Error::new(PayError::Halted("x".into())).context("pay");
         assert_eq!(exit_code(&wrapped), 4);
+        assert_eq!(
+            code(PayError::Simulation {
+                row: 0,
+                logs: "nothing sent".into()
+            }),
+            1
+        );
+    }
+
+    #[test]
+    fn transparent_chain_errors_and_stops_after_sending_are_classified() {
+        use scope_client::{
+            chain::ChainError, history::HistoryError, receipt::ReceiptError, scan::ScanError,
+            sweep::SweepError,
+        };
+        let rpc = || ChainError("rpc".into());
+        let of = |e: anyhow::Error| exit_code(&e);
+        assert_eq!(of(SweepError::Chain(rpc()).into()), 3);
+        assert_eq!(of(SweepError::Scan(ScanError::Chain(rpc())).into()), 3);
+        assert_eq!(of(ScanError::Chain(rpc()).into()), 3);
+        assert_eq!(of(HistoryError::Chain(rpc()).into()), 3);
+        assert_eq!(of(ReceiptError::Chain(rpc()).into()), 3);
+        assert_eq!(
+            of(anyhow::Error::new(SweepError::Chain(rpc())).context("sweep")),
+            3
+        );
+        assert_eq!(of(SweepError::Invalid("bad".into()).into()), 1);
+        let pending = SweepError::Pending {
+            report: Box::new(report()),
+        };
+        assert_eq!(of(pending.into()), 4);
     }
 
     #[test]
@@ -1425,6 +1489,7 @@ mod tests {
         assert_eq!(pick_url(own.clone(), env.clone()), "https://flag");
         assert_eq!(pick_url(None, env), "https://env");
         assert_eq!(pick_url(None, Some(String::new())), DEFAULT_URL);
+        assert_eq!(pick_url(Some(String::new()), None), DEFAULT_URL);
         assert_eq!(pick_url(None, None), DEFAULT_URL);
         assert_eq!(pick_url(own, None), "https://flag",);
     }

@@ -118,7 +118,7 @@ The rows together must fit the source's available balance (verification: V48).
 | Transfer fee (even 0 bps), transfer hook (even a null program), non-transferable, paused | refused, naming the extension | refused, naming the extension |
 | Permanent delegate, mint close authority | works; a trust limit ([privacy.md](privacy.md)) | works; a trust limit |
 
-SCOPE has no transfer-with-fee path and passes no hook accounts, so fee and hook mints are refused. PYUSD and USDG carry both (fee config at 0 bps, a hook with no program, a confidential-transfer fee config) plus a permanent delegate, and require approval of every new confidential account; neither works today (extensions: V90; approval: V14). Stealth rows need a mint that approves new accounts itself, because `announce` does not check approval (V72). Mint policy binds rows still to pay: a later change does not stop `--resume` from settling rows already paid, nor `disclose` (V84).
+SCOPE has no transfer-with-fee path and passes no hook accounts, so fee and hook mints are refused. PYUSD and USDG carry both (fee config at 0 bps, a hook with no program, a confidential-transfer fee config) plus a permanent delegate and a mint close authority, and require approval of every new confidential account; neither works today (extensions: V90; approval: V14). Stealth rows need a mint that approves new accounts itself, because `announce` does not check approval (V72). Mint policy binds rows still to pay: a later change does not stop `--resume` from settling rows already paid, nor `disclose` (V84).
 
 ## What happens to each row?
 

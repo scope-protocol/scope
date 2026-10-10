@@ -6,7 +6,7 @@ last_verified: 2026-10-10
 # Decisions
 
 TL;DR: why SCOPE is built the way it is: append-only, newest first; each entry says what was decided, why, and what was rejected. Docs describe the present; this file holds the why.
-Entries before 2026-10-06 are in [decisions-archive.md](decisions-archive.md). Design history from before this repository is not kept here.
+Entries before 2026-10-06 and the older ones of that day are in [decisions-archive.md](decisions-archive.md). Design history from before this repository is not kept here.
 
 ## 2026-10-10 Reliability, recovery and the mint reality
 
@@ -42,4 +42,4 @@ Entries before 2026-10-06 are in [decisions-archive.md](decisions-archive.md). D
 - **Status never calls a row unpaid that might be paid.** A row the run attempted but never recorded, with no open announcement, may have landed and been swept since; status calls it unresolved, and only resume, from the source ciphertext, settles it. Rejected: reporting it unpaid, which invites paying twice.
 - **Send order stays random, recorded in the run header.** Deriving it from the run secret adds nothing the header does not already give resume. Rejected: deriving the order from the run secret.
 - **Prefunded one-time addresses are created anyway.** An expired attempt publishes T's address; anyone can then send it lamports, which makes CreateAccountWithSeed fail. The rebuild tops up, allocates and assigns instead. Rejected: halting, which would let one transfer of dust stop a run.
-- **Compute limits per shape and one funding rule for P.** The fee is paid on the header's CU limit, so each shape gets its own limit about 15% above measurement (V73), and the payer funds P with exactly what the sweep needs at the 1,000,000 micro-lamport cap (V74). Rejected: one 600,000 limit for everything, and a funding estimate the sweep did not share.
+- **Compute limits per shape and one funding rule for P.** The fee is paid on the header's CU limit, so each shape gets its own limit 10 to 15% above measurement (V73), and the payer funds P with exactly what the sweep needs at the 1,000,000 micro-lamport cap (V74). Rejected: one 600,000 limit for everything, and a funding estimate the sweep did not share.

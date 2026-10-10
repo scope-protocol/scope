@@ -65,7 +65,7 @@ A stealth row locks 4,008,120 lamports of payer rent that comes back at the swee
 
 ## What is in scope?
 
-Build: one Pinocchio program (`announce`, `reclaim`, and `register` and `deregister` for an optional registry in sRFC-42's layout); one Rust CLI, `scope`, with `register` (the recipient's local key backup), `pay`, `publish`, `lookup`, `scan`, `sweep`, `export-sweep-key`, `disclose`, `verify` and `bench`; a privacy model; adversarial tests; a chaos harness for the payer engine; a devnet demo; a write-up posted to the sRFC-42 discussion.
+Build: one Pinocchio program (`announce`, `reclaim`, and `register` and `deregister` for an optional registry in sRFC-42's layout); one Rust CLI, `scope` (commands: [README.md](../README.md)); a privacy model; adversarial tests; a chaos harness for the payer engine; a devnet demo; a write-up posted to the sRFC-42 discussion.
 
 Do not build: wallet integration, a web app beyond a status page, our own proof system, unlinkable consolidation (Q8), an indexer beyond demo scale, an issuer approver (a one-page spec ships in the write-up, Q9), mobile.
 

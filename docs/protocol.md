@@ -80,7 +80,7 @@ One v1 transaction, fee payer P, signed by P and D_owner. Full form with an audi
 | 18 | SCOPE `reclaim` | none | rent of T and the announcement to the payer |
 | 19 | System Transfer P to D_owner | P | surplus, only when D_owner can receive it; P keeps its rent reserve (V24, V65) |
 
-Without 16 and 17 this is the transfer-only form the client falls back to; the retry and fallback rules are in [recipient.md](recipient.md).
+Without 17 and 18 this is the transfer-only form the client falls back to; the retry and fallback rules are in [recipient.md](recipient.md).
 
 ## How are addresses derived?
 
