@@ -1,6 +1,6 @@
 ---
 status: decided
-last_verified: 2026-10-07
+last_verified: 2026-10-09
 ---
 
 # Receiving with `scope`
@@ -78,6 +78,7 @@ Every command that loads keys takes `--recipient-key` (default `~/.config/scope/
 | `sweep` | `--dry-run` | off | build and simulate, send nothing, write no journal |
 | `sweep` | `--recovery-file <path>` | `<recipient-key>.sweeps.jsonl` | recovery journal |
 | `export-sweep-key` | `--ephemeral <R>` | required | public R from scan, sweep or the journal |
+| `export-sweep-key` | `--token-account <T>` | required | the payment's token account, from the same places |
 | `export-sweep-key` | `--output <file>` | required | new keypair file |
 
 ## Backups
@@ -121,9 +122,9 @@ Success is a finalized successful signature for this attempt, even if follow-up 
 
 ## Recovery
 
-The recovery journal (default `<recipient-key>.sweeps.jsonl`) is a locked, owner-only JSONL file with header `{"format":"scope-recipient-recovery","version":1}`. Before every new attempt the sweep appends `genesis_hash`, `ephemeral`, `destination`, `owner`, `payment_authority` and `attempt_signature`, syncs it, then prints the same record to stdout; if either fails, that attempt is not sent. It holds no private key and no amount. A torn last record is cut before the next append; a file that is not a SCOPE journal, or a symlink, is refused (verification: V70). A journal entry records a prepared attempt, not a landed one.
+The recovery journal (default `<recipient-key>.sweeps.jsonl`) is a locked, owner-only JSONL file with header `{"format":"scope-recipient-recovery","version":1}`. Before every new attempt the sweep appends `genesis_hash`, `ephemeral`, `token_account`, `destination`, `owner`, `payment_authority` and `attempt_signature`, syncs it, then prints the same record to stdout; if either fails, that attempt is not sent. It holds no private key and no amount. A torn last record is cut before the next append; a file that is not a SCOPE journal, or a symlink, is refused (verification: V70). A journal entry records a prepared attempt, not a landed one.
 
-Once an announcement is reclaimed (a full sweep does this itself), scan no longer lists that payment. Exact R plus the key backup rebuilds D_owner and D's keys, so keep the journal or the saved output: the key backup alone cannot list past destinations. Finding them from historical payer transactions is not built (Q17 in [plan.md](plan.md)) (verification: V61, V65).
+Once an announcement is reclaimed (a full sweep does this itself), scan no longer lists that payment. R and T plus the key backup rebuild D_owner and D's keys, so keep the journal or the saved output: the key backup alone cannot list past destinations. Finding them from historical payer transactions is not built (Q17 in [plan.md](plan.md)) (verification: V61, V65).
 
 ## Spending the swept funds
 
@@ -131,7 +132,7 @@ Export D_owner as a standard Solana keypair:
 
 ```sh
 scope export-sweep-key --recipient-key ./recipient.key \
-  --ephemeral <R> --output ./sweep-owner-keypair.json
+  --ephemeral <R> --token-account <T> --output ./sweep-owner-keypair.json
 # owner	<D_owner>
 # destination	<D>
 ```
@@ -155,6 +156,6 @@ D_owner needs SOL for fees and possibly for proof context accounts. D's keys mat
 - The cluster must support v1 transactions and Token-2022's confidential instructions; public-cluster checks are tracked in [plan.md](plan.md).
 - The sweep refuses mints that need approval of new accounts, freeze new accounts by default, or carry non-transferable, transfer-fee or transfer-hook extensions [unverified: no test for the extension refusals]. Issuer freezes, pauses or policy changes can still block a sweep.
 - One sweep moves at most 2^48 - 1 base units, Token-2022's single-transfer limit; a larger balance is refused (verification: V65).
-- Each payment needs a fresh R. A reused R gives the same D, which the sweep refuses once it exists (verification: V61, V65).
+- D depends on R and the token account T, so two announcements that reuse one R still sweep to different destinations. A payment swept twice gets the same D, which the sweep refuses once it exists (verification: V61, V65).
 - Any client holding your spend key can spend a one-time account; `scope` uses a raw-scalar signer, and D_owner is a standard key (verification: V61, V63).
 - Your receipt for a payment needs that payment's signature ([audit.md](audit.md)).

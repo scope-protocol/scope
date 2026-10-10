@@ -124,6 +124,11 @@ struct ExportSweepKeyArgs {
     ephemeral: Address,
     #[arg(
         long,
+        help = "The payment's token account T from scan, sweep, or the recovery journal."
+    )]
+    token_account: Address,
+    #[arg(
+        long,
         help = "New owner-only keypair file; existing files are never overwritten."
     )]
     output: String,
@@ -244,7 +249,12 @@ fn run_sweep(args: SweepArgs) -> anyhow::Result<()> {
 fn run_export_sweep_key(args: ExportSweepKeyArgs) -> anyhow::Result<()> {
     let recipient = args.keys.load()?;
     let path = expand_home(&args.output)?;
-    let owner = recipient_keys::export_owner(&path, &recipient, &args.ephemeral.to_bytes())?;
+    let owner = recipient_keys::export_owner(
+        &path,
+        &recipient,
+        &args.ephemeral.to_bytes(),
+        &args.token_account.to_bytes(),
+    )?;
     println!(
         "owner\t{}\ndestination\t{}",
         owner.pubkey(),
@@ -580,6 +590,7 @@ mod tests {
             payment_authority: Address::default(),
             retained_lamports: Some(0),
             ephemeral: [7; 32],
+            token_account: Address::new_from_array([8; 32]),
             amount: 1,
             burned_public_amount: Some(0),
             public_amount_remaining: Some(0),
@@ -644,6 +655,8 @@ mod tests {
                 "export-sweep-key",
                 "--ephemeral",
                 &ephemeral,
+                "--token-account",
+                &ephemeral,
                 "--output",
                 "owner.json"
             ])
@@ -652,10 +665,26 @@ mod tests {
             Command::ExportSweepKey(_)
         ));
         assert!(
-            Cli::try_parse_from(["scope", "export-sweep-key", "--ephemeral", &ephemeral]).is_err()
+            Cli::try_parse_from([
+                "scope",
+                "export-sweep-key",
+                "--ephemeral",
+                &ephemeral,
+                "--token-account",
+                &ephemeral
+            ])
+            .is_err()
         );
         assert!(
-            Cli::try_parse_from(["scope", "export-sweep-key", "--output", "owner.json"]).is_err()
+            Cli::try_parse_from([
+                "scope",
+                "export-sweep-key",
+                "--token-account",
+                &ephemeral,
+                "--output",
+                "owner.json"
+            ])
+            .is_err()
         );
     }
 

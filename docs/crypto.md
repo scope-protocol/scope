@@ -1,6 +1,6 @@
 ---
 status: draft
-last_verified: 2026-10-07
+last_verified: 2026-10-09
 ---
 
 # Cryptography
@@ -21,8 +21,8 @@ Recipient, long-term                                         (stealth-keygen key
   meta      = "scope:" || Base58Check(0x01 || B_spend || B_scan)
 
 Payer, per run                                               (client run_secret.rs)
-  sig        = Ed25519-Sign(payer key, "scope-run-secret/v1" || run_id)
-  run_secret = HKDF-SHA256(salt = "scope-run-secret/v1", ikm = sig, info = run_id, L = 32)
+  sig        = Ed25519-Sign(payer key, 0xff || "scope-run-secret/v2" || run_id)
+  run_secret = HKDF-SHA256(salt = "scope-run-secret/v2", ikm = sig, info = run_id, L = 32)
   row i (0-based position in the input file), u64le(i) little-endian:
   r_i        = HKDF-SHA256(salt = "scope-ephemeral/v1", ikm = run_secret,
                            info = "scope-ephemeral/v1" || run_id || u64le(i), L = 32)
@@ -49,7 +49,7 @@ Recipient only                                               (recipient.rs, sign
   r_sig   = SHA-512(prefix || M) mod ℓ,  R_sig = r_sig·G
   c       = SHA-512(R_sig || P || M) mod ℓ,  s = r_sig + c·p,  signature = R_sig || s
   d       = HKDF-SHA512(salt = "stealth-dest/v1", ikm = b_spend (32-byte canonical LE),
-                        info = "d-owner" || R, L = 32)
+                        info = "d-owner" || R || T, L = 32)
   D_owner = Ed25519 public key of seed d (RFC 8032 key expansion)
 ```
 
@@ -67,13 +67,13 @@ Recipient only                                               (recipient.rs, sign
 - **tag.** One public byte from S; the recipient skips 255 of 256 announcements without deriving P. A match is a candidate, not a payment: the client then checks the account's owner against P and its ElGamal key (V64).
 - **t and P.** P is a normal Ed25519 key; only the recipient knows p, since it needs b_spend, which never touches S.
 - **C and `ct_ikm`.** C ties the confidential keys to one account on one cluster and mint, so a repeated R elsewhere does not repeat the keys (test `ct_ikm_binds_every_context_field`). Feeding zk-sdk `ct_ikm` rather than S keeps the two KDF stages separate. Payer and recipient both derive the same keys (V53, V63).
-- **d and D_owner.** The sweep destination's owner. From b_spend and R, so the payer, who knows S and every PRK leaf, cannot derive it, and a restored backup rebuilds it; the scan key does not affect it (V61). [open: is the spend scalar acceptable as HKDF input, or should the recipient have a dedicated master secret?]
+- **d and D_owner.** The sweep destination's owner. From b_spend, so the payer, who knows S and every PRK leaf, cannot derive it, and a restored backup rebuilds it; the scan key does not affect it (V61). T is in the info because a payer that knows r can announce a second account under the same R, which would otherwise share D and stall behind the first sweep. The spend scalar is an acceptable HKDF input (extraction with a public salt gives a uniform key from a high-entropy secret); a dedicated master secret would add a backup artifact for no gain.
 - **Signing nonce.** The prefix comes from p alone (V41). Never from S: the payer knows S, and with `s = r_sig + c·p` and c public, knowing r_sig gives p from one signature, even a failed transaction's. Never caller-supplied: one R_sig over two messages leaks p, and a retried sweep is two messages. Signing is written out by hand because the ed25519-dalek hazmat interface is the one implicated in RUSTSEC-2022-0093; the runtime verifies it as plain RFC 8032 (V25).
 - **Balance hint.** Token-2022's AE-encrypted available balance is unauthenticated, and the payer holds the AE key. The client accepts the claimed value v only if the ElGamal ciphertext's discrete-log target equals v·G; a mismatch skips that payment (V64).
 
 ## Run secret and amount openings
 
-The formulas are in the tree above. Ed25519 signing is deterministic, so the payer keypair alone rebuilds `run_secret`, every r_i and every opening; nothing secret is stored. Runs, payers, rows and the lo/hi parts give different outputs (V75, `run_secret` unit tests).
+The formulas are in the tree above. Ed25519 signing is deterministic, so the payer keypair alone rebuilds `run_secret`, every r_i and every opening; nothing secret is stored. Only a `Keypair` is accepted: a randomizing signer would derive another secret on resume. No transaction message starts with 0xff, which the runtime reserves for off-chain messages. A Python generator fixes the signature, `run_secret`, one r_i and both openings (V75, V85).
 
 The openings replace the random ones in the transfer proofs: `crates/client/src/proofs.rs` uses the same builders, inputs and order as `transfer_split_proof_data` in spl-token-confidential-transfer-proof-generation 0.6.1, and the verifier cannot tell where an opening came from. The amount splits as `a_lo = a mod 2^16`, `a_hi = a >> 16`; 2^48 or more is refused. Every attempt for a row moves the same amount, so reusing its openings reveals nothing new [likely].
 
@@ -105,8 +105,8 @@ Both checks run only after the transaction is authenticated: its first signature
 | ElGamal key leaks p or b_spend | No: distinct Expand labels, and b_spend is independent of S [likely]. |
 | Key-validity proof binds an owner | No: it proves knowledge of the ElGamal secret only; Token-2022 separately requires the owner's signature (V1). |
 | View tag leaks one byte of S's PRF output | Accepted, standard (Monero, ERC-5564); domain-separated from the tweak. |
-| Run secret is a signature over a public message | No domain prefix such as Solana's off-chain message format is used. Any software that obtains this signature learns the run's R_i and amounts; the same holds for spl-token-cli's signature-derived source keys (V50). Operator consequences: [payer.md](payer.md). [open] |
-| Spend scalar as HKDF input for d | [open], see Each derivation. |
+| Run secret is a signature over a public message | The 0xff prefix keeps it apart from transactions, but software that obtains this signature, or a leaked payer key, learns every R_i and amount of the run; the same holds for spl-token-cli's signature-derived source keys (V50). Operator consequences: [payer.md](payer.md). |
+| Zeroization is best effort | Secret wrappers wipe on drop, but by-value copies and the `Hkdf` state can remain in memory. "Nothing secret is stored" does not mean none is ever in memory. |
 
 Alternatives considered:
 
@@ -117,8 +117,8 @@ Alternatives considered:
 ## What we ask reviewers to check
 
 1. The three PRK labels, the run-secret labels and the destination salt never collide; `ct_ikm`, not S, feeds zk-sdk; d comes from b_spend, not S.
-2. Whether the spend scalar may be HKDF input for d, or a dedicated recipient master secret is needed.
-3. Whether a raw Ed25519 signature over `scope-run-secret/v1 || run_id` is a sound KDF input, and whether it needs a domain prefix that no transaction or other protocol message can share.
+2. Our position that the spend scalar may be HKDF input for d, and that T in the info is enough.
+3. Whether a raw Ed25519 signature over `0xff || scope-run-secret/v2 || run_id` is a sound KDF input.
 4. That derived Pedersen openings, reused across attempts of one row, leak nothing beyond the amount, and that disclosing them reveals that amount only.
 5. The raw-scalar signer in `signing.rs` against RFC 8032 section 5.1.6, including the nonce prefix.
 6. The S7 algebra in `curve.rs` and the client's torsion checks.

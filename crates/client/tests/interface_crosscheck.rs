@@ -67,6 +67,50 @@ fn reader_agrees_with_official_unpack() {
     assert_eq!(ct.maximum_pending_balance_credit_counter, 1);
 }
 
+#[test]
+fn reader_agrees_with_official_cpi_guard_in_either_tlv_order() {
+    use spl_token_2022_interface::extension::cpi_guard::CpiGuard;
+    for locked in [true, false] {
+        for guard_first in [true, false] {
+            let types = if guard_first {
+                [
+                    ExtensionType::CpiGuard,
+                    ExtensionType::ConfidentialTransferAccount,
+                ]
+            } else {
+                [
+                    ExtensionType::ConfidentialTransferAccount,
+                    ExtensionType::CpiGuard,
+                ]
+            };
+            let len = ExtensionType::try_calculate_account_len::<Account>(&types).expect("len");
+            let mut data = vec![0u8; len];
+            {
+                let mut state = StateWithExtensionsMut::<Account>::unpack_uninitialized(&mut data)
+                    .expect("unpack");
+                for ty in types {
+                    if ty == ExtensionType::CpiGuard {
+                        state
+                            .init_extension::<CpiGuard>(true)
+                            .expect("guard")
+                            .lock_cpi = locked.into();
+                    } else {
+                        state
+                            .init_extension::<ConfidentialTransferAccount>(true)
+                            .expect("ct");
+                    }
+                }
+                state.base.state = AccountState::Initialized;
+                state.pack_base();
+                state.init_account_type().expect("type");
+            }
+            let v = read_token_account(&data).expect("read");
+            assert_eq!(v.cpi_guard_locked, locked, "guard_first={guard_first}");
+            assert!(v.confidential.is_some());
+        }
+    }
+}
+
 /// Eight knobs, one per field the reader returns; a struct would only rename them.
 #[allow(clippy::too_many_arguments)]
 fn build(

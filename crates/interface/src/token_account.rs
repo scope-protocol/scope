@@ -11,6 +11,8 @@ pub const STATE_INITIALIZED: u8 = 1;
 const BASE_LEN: usize = 165;
 const ACCOUNT_TYPE_ACCOUNT: u8 = 2;
 const EXTENSION_CONFIDENTIAL_TRANSFER_ACCOUNT: u16 = 5;
+const EXTENSION_CPI_GUARD: u16 = 11;
+const CPI_GUARD_LEN: usize = 1;
 const CONFIDENTIAL_TRANSFER_ACCOUNT_LEN: usize = 295;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +24,9 @@ pub struct TokenAccountView {
     pub state: u8,
     pub close_authority: Option<[u8; 32]>,
     pub confidential: Option<ConfidentialView>,
+    /// A CpiGuard extension with `lock_cpi` set: Token-2022 then refuses a CPI `CloseAccount`
+    /// whose destination is not the owner, which is how `reclaim` pays the payer back.
+    pub cpi_guard_locked: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +42,7 @@ pub fn read_token_account(data: &[u8]) -> Result<TokenAccountView, ScopeError> {
     if data.len() <= BASE_LEN || data[BASE_LEN] != ACCOUNT_TYPE_ACCOUNT {
         return Err(ScopeError::NotTokenAccount);
     }
+    let (confidential, cpi_guard_locked) = extensions(data)?;
     Ok(TokenAccountView {
         mint: key(data, 0),
         owner: key(data, 32),
@@ -44,7 +50,8 @@ pub fn read_token_account(data: &[u8]) -> Result<TokenAccountView, ScopeError> {
         delegate: coption_key(data, 72)?,
         state: data[108],
         close_authority: coption_key(data, 129)?,
-        confidential: confidential(data)?,
+        confidential,
+        cpi_guard_locked,
     })
 }
 
@@ -68,37 +75,47 @@ fn coption_key(data: &[u8], at: usize) -> Result<Option<[u8; 32]>, ScopeError> {
     }
 }
 
-fn confidential(data: &[u8]) -> Result<Option<ConfidentialView>, ScopeError> {
+/// Walk the whole TLV area: the confidential-transfer view and the CpiGuard lock.
+fn extensions(data: &[u8]) -> Result<(Option<ConfidentialView>, bool), ScopeError> {
+    let mut confidential = None;
+    let mut cpi_guard_locked = false;
     let mut at = BASE_LEN + 1;
     while at + 4 <= data.len() {
         let ty = u16::from_le_bytes([data[at], data[at + 1]]);
         let len = u16::from_le_bytes([data[at + 2], data[at + 3]]) as usize;
         if ty == 0 {
-            return Ok(None);
+            break;
         }
         let value = data
             .get(at + 4..at + 4 + len)
             .ok_or(ScopeError::NotTokenAccount)?;
-        if ty == EXTENSION_CONFIDENTIAL_TRANSFER_ACCOUNT {
+        if ty == EXTENSION_CONFIDENTIAL_TRANSFER_ACCOUNT && confidential.is_none() {
             if len != CONFIDENTIAL_TRANSFER_ACCOUNT_LEN {
                 return Err(ScopeError::NotTokenAccount);
             }
-            return Ok(Some(ConfidentialView {
+            confidential = Some(ConfidentialView {
                 approved: value[0] != 0,
                 allow_confidential_credits: value[261] != 0,
                 allow_non_confidential_credits: value[262] != 0,
                 pending_balance_credit_counter: u64_le(value, 263),
                 maximum_pending_balance_credit_counter: u64_le(value, 271),
-            }));
+            });
+        } else if ty == EXTENSION_CPI_GUARD {
+            if len != CPI_GUARD_LEN {
+                return Err(ScopeError::NotTokenAccount);
+            }
+            cpi_guard_locked |= value[0] != 0;
         }
         at += 4 + len;
     }
-    Ok(None)
+    Ok((confidential, cpi_guard_locked))
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
     use super::*;
+    use alloc::vec::Vec;
 
     fn base(owner: u8, close: Option<u8>) -> [u8; 166] {
         let mut d = [0u8; 166];
@@ -166,5 +183,58 @@ mod tests {
             read_token_account(&d[..d.len() - 1]),
             Err(ScopeError::NotTokenAccount)
         );
+    }
+
+    fn tlv(ty: u16, value: &[u8]) -> Vec<u8> {
+        let mut t = ty.to_le_bytes().to_vec();
+        t.extend((value.len() as u16).to_le_bytes());
+        t.extend(value);
+        t
+    }
+
+    #[test]
+    fn reads_cpi_guard_in_either_order_and_only_when_locked() {
+        let ct = with_ct(&base(4, Some(8)), 1, false);
+        let ct_tlv = ct[166..].to_vec();
+        for (locked, expect) in [(1u8, true), (0u8, false)] {
+            let guard = tlv(11, &[locked]);
+            let mut before = base(4, Some(8)).to_vec();
+            before.extend(&guard);
+            before.extend(&ct_tlv);
+            let mut after = base(4, Some(8)).to_vec();
+            after.extend(&ct_tlv);
+            after.extend(&guard);
+            for d in [before, after] {
+                let v = read_token_account(&d).expect("valid");
+                assert_eq!(v.cpi_guard_locked, expect);
+                assert!(v.confidential.is_some());
+            }
+        }
+        assert!(!read_token_account(&ct).expect("valid").cpi_guard_locked);
+    }
+
+    #[test]
+    fn reads_the_extension_behind_unrelated_ones_and_padding() {
+        let ct = with_ct(&base(4, Some(8)), 1, false);
+        let mut d = base(4, Some(8)).to_vec();
+        d.extend(tlv(7, &[]));
+        d.extend(tlv(8, &[1]));
+        d.extend(&ct[166..]);
+        d.extend([0u8; 12]);
+        let v = read_token_account(&d).expect("valid");
+        assert_eq!(
+            v.confidential
+                .expect("ct")
+                .maximum_pending_balance_credit_counter,
+            1
+        );
+        assert!(!v.cpi_guard_locked);
+    }
+
+    #[test]
+    fn rejects_a_cpi_guard_of_the_wrong_length() {
+        let mut d = base(4, None).to_vec();
+        d.extend(tlv(11, &[1, 0]));
+        assert_eq!(read_token_account(&d), Err(ScopeError::NotTokenAccount));
     }
 }

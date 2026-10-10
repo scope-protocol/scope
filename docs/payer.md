@@ -78,7 +78,7 @@ Each stdout line is the row, the account paid and the payment signature. Keep th
 
 One `recipient,amount` per line. The first line that is not blank or a comment is a header if it starts with `recipient`; blank lines are skipped and `#` starts a comment anywhere on a line.
 
-- **Recipient.** A plain row names the recipient's own configured confidential token account. A stealth row names a `scope:` meta-address; the parser checks its checksum, version and keys before anything is derived (verification: V62). A payer can look up meta-addresses that wallets published with `scope lookup <wallet>... --url <rpc>`, which prints `<wallet>\t<meta-address>` or `<wallet>\tnot published`; it fetches every registry entry in one query and picks locally (verification: V81).
+- **Recipient.** A plain row names the recipient's own configured confidential token account. A stealth row names a `scope:` meta-address; the parser checks its checksum, version and keys before anything is derived (verification: V62). A payer can look up meta-addresses that wallets published with `scope lookup <wallet>... --url <rpc>`, which prints `<wallet>\t<meta-address>` or `<wallet>\tnot published` (verification: V81). What a lookup reveals: [privacy.md](privacy.md).
 - **Amount.** Token units, a plain decimal with at most the mint's decimals: no sign, no exponent, not zero. The most one row can move is 2^48 - 1 base units, the limit of one confidential transfer; 281474976.710655 is the largest amount on a 6-decimal mint (verification: V84).
 - **Row number.** Rows are numbered from 0 in file order, counting only rows, not the header, comments or blank lines. `--status`, the output and `disclose --row` use this number.
 

@@ -72,6 +72,7 @@ pub struct SweepReport {
     pub payment_authority: Address,
     pub retained_lamports: Option<u64>,
     pub ephemeral: [u8; 32],
+    pub token_account: Address,
     pub amount: u64,
     pub burned_public_amount: Option<u64>,
     pub public_amount_remaining: Option<u64>,
@@ -86,12 +87,13 @@ impl fmt::Display for SweepReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "genesis_hash\t{}\ndestination\t{}\nowner\t{}\npayment_authority\t{}\nephemeral\t{}\nattempt_signature\t{}",
+            "genesis_hash\t{}\ndestination\t{}\nowner\t{}\npayment_authority\t{}\nephemeral\t{}\ntoken_account\t{}\nattempt_signature\t{}",
             Address::new_from_array(self.genesis_hash),
             self.destination,
             self.destination_owner,
             self.payment_authority,
             Address::new_from_array(self.ephemeral),
+            self.token_account,
             self.attempt_signature
         )?;
         if let Some(signature) = &self.finalized_signature {
@@ -188,7 +190,10 @@ fn destination<C: RecipientChain>(
     payment: &OwnedPayment,
 ) -> Result<Destination, SweepError> {
     let seed = recipient
-        .derive_sweep_destination(&payment.info.ephemeral)
+        .derive_sweep_destination(
+            &payment.info.ephemeral,
+            &payment.info.token_account.to_bytes(),
+        )
         .map_err(|e| invalid(format!("sweep key derivation: {e:?}")))?;
     let owner = Keypair::new_from_array(*seed.as_bytes());
     let mint_account = chain
@@ -603,6 +608,7 @@ pub fn prepare<C: RecipientChain>(
         payment_authority: Address::new_from_array(plan.payment.payment_public_key),
         retained_lamports: Some(retained_lamports),
         ephemeral: info.ephemeral,
+        token_account: info.token_account,
         amount: info.amount,
         burned_public_amount: Some(if reclaimed { info.public_amount } else { 0 }),
         public_amount_remaining: Some(if reclaimed { 0 } else { info.public_amount }),

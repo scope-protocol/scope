@@ -186,4 +186,42 @@ mod tests {
             .is_err()
         );
     }
+
+    fn proofs_for(amount: u64, openings: &AmountOpenings) -> Result<TransferProofData, String> {
+        let source = ElGamalKeypair::new_rand();
+        let destination = ElGamalKeypair::new_rand();
+        let balance = 1u64 << 49;
+        let current = source.pubkey().encrypt(balance);
+        transfer_proofs(
+            &current,
+            balance,
+            amount,
+            &source,
+            destination.pubkey(),
+            None,
+            openings,
+        )
+    }
+
+    #[test]
+    fn the_48_bit_limit_is_exact_and_every_split_boundary_verifies() {
+        let secret = crate::run_secret::RunSecret::derive(
+            &solana_keypair::Keypair::new(),
+            "00ff00ff00ff00ff",
+        )
+        .expect("derive");
+        let openings = secret.openings("00ff00ff00ff00ff", 0);
+        for amount in [0, 1, 0xFFFF, 0x1_0000, 0x1_FFFF, (1u64 << 48) - 1] {
+            let proofs = proofs_for(amount, &openings).unwrap_or_else(|e| panic!("{amount}: {e}"));
+            proofs.range_proof_data.verify_proof().expect("range");
+            proofs
+                .ciphertext_validity_proof_data_with_ciphertext
+                .proof_data
+                .verify_proof()
+                .expect("validity");
+        }
+        for amount in [1u64 << 48, (1u64 << 48) + 1, 1 << 63, u64::MAX] {
+            assert!(proofs_for(amount, &openings).is_err(), "{amount}");
+        }
+    }
 }

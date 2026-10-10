@@ -96,9 +96,10 @@ pub(super) fn export_owner(
     path: &Path,
     recipient: &RecipientSecretKeys,
     ephemeral: &[u8; 32],
+    token_account: &[u8; 32],
 ) -> anyhow::Result<Keypair> {
     let seed = recipient
-        .derive_sweep_destination(ephemeral)
+        .derive_sweep_destination(ephemeral, token_account)
         .map_err(|error| anyhow::anyhow!("deriving sweep owner: {error:?}"))?;
     let owner = Keypair::new_from_array(*seed.as_bytes());
     let bytes = Zeroizing::new(owner.to_bytes());
@@ -164,8 +165,13 @@ mod tests {
         )
         .expect("payment");
         let path = dir.join("owner.json");
-        let owner = export_owner(&path, &recipient, &sent.announcement.ephemeral_public_key)
-            .expect("export");
+        let owner = export_owner(
+            &path,
+            &recipient,
+            &sent.announcement.ephemeral_public_key,
+            &[4; 32],
+        )
+        .expect("export");
         let imported = solana_keypair::read_keypair_file(&path).expect("standard keypair");
         assert_eq!(imported.pubkey(), owner.pubkey());
         assert_eq!(
@@ -182,7 +188,15 @@ mod tests {
                 0o700
             );
         }
-        assert!(export_owner(&path, &recipient, &sent.announcement.ephemeral_public_key).is_err());
+        assert!(
+            export_owner(
+                &path,
+                &recipient,
+                &sent.announcement.ephemeral_public_key,
+                &[4; 32],
+            )
+            .is_err()
+        );
         assert_eq!(
             solana_keypair::read_keypair_file(&path)
                 .expect("preserved")
@@ -191,7 +205,15 @@ mod tests {
         );
         let link = dir.join("link.json");
         std::os::unix::fs::symlink(&path, &link).expect("symlink");
-        assert!(export_owner(&link, &recipient, &sent.announcement.ephemeral_public_key).is_err());
+        assert!(
+            export_owner(
+                &link,
+                &recipient,
+                &sent.announcement.ephemeral_public_key,
+                &[4; 32],
+            )
+            .is_err()
+        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
 

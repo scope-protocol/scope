@@ -195,3 +195,69 @@ fn rejects_announcement_with_data() {
     h.svm.set_account(case.announcement, occupied).expect("set");
     assert_scope_error(h.send(&case.setup, &[]), ScopeError::AnnouncementInUse);
 }
+
+/// One TLV entry: type, length, value.
+fn tlv(ty: u16, value: &[u8]) -> Vec<u8> {
+    let mut entry = ty.to_le_bytes().to_vec();
+    entry.extend((value.len() as u16).to_le_bytes());
+    entry.extend(value);
+    entry
+}
+
+#[test]
+fn rejects_cpi_guard_after_the_confidential_extension() {
+    let mut h = Harness::new();
+    let mut case = h.stealth_case();
+    let announce = setup_without_announce(&mut h, &mut case);
+    patch_token_account(&mut h, &case, |d| d.extend(tlv(11, &[1])));
+    assert_scope_error(h.send(&[announce], &[]), ScopeError::CpiGuardEnabled);
+}
+
+#[test]
+fn rejects_cpi_guard_before_the_confidential_extension() {
+    let mut h = Harness::new();
+    let mut case = h.stealth_case();
+    let announce = setup_without_announce(&mut h, &mut case);
+    patch_token_account(&mut h, &case, |d| {
+        d.splice(166..166, tlv(11, &[1]));
+    });
+    assert_scope_error(h.send(&[announce], &[]), ScopeError::CpiGuardEnabled);
+}
+
+#[test]
+fn accepts_an_unlocked_cpi_guard() {
+    let mut h = Harness::new();
+    let mut case = h.stealth_case();
+    let announce = setup_without_announce(&mut h, &mut case);
+    patch_token_account(&mut h, &case, |d| d.extend(tlv(11, &[0])));
+    h.send(&[announce], &[])
+        .expect("an unlocked guard is harmless");
+}
+
+#[test]
+fn rejects_frozen_token_account() {
+    let mut h = Harness::new();
+    let mut case = h.stealth_case();
+    let announce = setup_without_announce(&mut h, &mut case);
+    patch_token_account(&mut h, &case, |d| d[108] = 2);
+    assert_scope_error(
+        h.send(&[announce], &[]),
+        ScopeError::TokenAccountNotInitialized,
+    );
+}
+
+#[test]
+fn finds_the_confidential_extension_behind_other_extensions_and_padding() {
+    let mut h = Harness::new();
+    let mut case = h.stealth_case();
+    let announce = setup_without_announce(&mut h, &mut case);
+    patch_token_account(&mut h, &case, |d| {
+        // ImmutableOwner (7, empty) and MemoTransfer (8) ahead of it, zero padding after.
+        let mut before = tlv(7, &[]);
+        before.extend(tlv(8, &[0]));
+        d.splice(166..166, before);
+        d.extend([0u8; 16]);
+    });
+    h.send(&[announce], &[])
+        .expect("extension order is irrelevant");
+}
