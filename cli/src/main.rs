@@ -739,7 +739,7 @@ struct PayArgs {
     reclaim: bool,
     /// Return the rent of every swept one-time account this payer ever made, found on chain
     /// and without a run journal.
-    #[arg(long, conflicts_with_all = ["dry_run", "yes"])]
+    #[arg(long, conflicts_with_all = ["dry_run"])]
     reclaim_all: bool,
     /// Run every preflight and print the plan and its cost; send nothing, write no journal.
     #[arg(long, conflicts_with_all = ["resume", "status", "reclaim_all"])]
@@ -793,7 +793,27 @@ fn runs_dir(path: &str) -> anyhow::Result<PathBuf> {
     std::path::absolute(&path).with_context(|| format!("resolving {}", path.display()))
 }
 
+/// True when `dir` holds at least one run, a subdirectory with a journal.
+fn has_runs(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.path().join("journal.jsonl").is_file())
+    })
+}
+
+/// Runs created before the default moved sit in `./runs`; the duplicate guard cannot see them.
+fn warn_about_old_runs(runs_flag: &str) {
+    if runs_flag == DEFAULT_RUNS && has_runs(std::path::Path::new("runs")) {
+        eprintln!(
+            "warning: ./runs holds earlier runs, but the default is now {DEFAULT_RUNS}, so \
+             the duplicate-input guard and --resume will not see them; pass --runs ./runs to use them"
+        );
+    }
+}
+
 fn run_pay(args: PayArgs) -> anyhow::Result<()> {
+    warn_about_old_runs(&args.runs);
     let keypair_path = expand_home(&args.keypair)?;
     let payer = read_keypair_file(&keypair_path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", keypair_path.display()))?;
@@ -807,10 +827,24 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
     };
     if let Some(run_id) = args.status {
         let mut chain = chain;
+        if args.reclaim {
+            pay::mainnet_gate(
+                &chain.genesis_hash()?,
+                args.yes,
+                pay::GateFor::ResumeOrReclaim,
+            )
+            .map_err(anyhow::Error::msg)?;
+        }
         return print_status(&mut chain, &payer, &run_id, args.reclaim, &opts);
     }
     if args.reclaim_all {
         let mut chain = chain;
+        pay::mainnet_gate(
+            &chain.genesis_hash()?,
+            args.yes,
+            pay::GateFor::ResumeOrReclaim,
+        )
+        .map_err(anyhow::Error::msg)?;
         println!("announcement\ttoken_account\toutcome");
         for r in pay::reclaim_all(&mut chain, &payer, &opts)? {
             let outcome = match r.outcome {
@@ -842,7 +876,12 @@ fn run_pay(args: PayArgs) -> anyhow::Result<()> {
         }
         return Ok(());
     }
-    pay::mainnet_gate(&chain.genesis_hash()?, args.yes).map_err(anyhow::Error::msg)?;
+    let gate = if args.resume.is_some() {
+        pay::GateFor::ResumeOrReclaim
+    } else {
+        pay::GateFor::NewRun
+    };
+    pay::mainnet_gate(&chain.genesis_hash()?, args.yes, gate).map_err(anyhow::Error::msg)?;
     let report = match args.resume {
         Some(run_id) => {
             let keys = SourceKeys::from_signer(&payer)?;
@@ -1480,6 +1519,26 @@ mod tests {
         assert!(dir.is_absolute());
         assert!(dir.ends_with(".local/share/scope/runs"));
         assert!(runs_dir("runs").expect("relative").is_absolute());
+    }
+
+    #[test]
+    fn earlier_runs_are_found_by_their_journals() {
+        let dir = std::env::temp_dir().join(format!("scope-has-runs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!has_runs(&dir), "a missing directory holds none");
+        std::fs::create_dir_all(dir.join("abc")).expect("run dir");
+        assert!(
+            !has_runs(&dir),
+            "a directory without a journal is not a run"
+        );
+        std::fs::write(dir.join("abc/journal.jsonl"), b"").expect("journal");
+        assert!(has_runs(&dir));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn reclaim_all_takes_yes_for_mainnet() {
+        assert!(parse_pay(&["--reclaim-all", "--yes"]).expect("yes").yes);
     }
 
     #[test]

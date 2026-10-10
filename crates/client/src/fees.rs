@@ -31,6 +31,16 @@ pub fn priority_price(mut prices: Vec<u64>, cap: u64) -> Result<u64, FeeAboveCap
     Ok(price)
 }
 
+/// How many times the sampled price the payer's own transaction fees are budgeted at.
+pub const BUDGET_FACTOR: u64 = 3;
+
+/// The per-CU price the payer budgets its own fees at: the sampled p75 (at least 1) times
+/// `BUDGET_FACTOR`, never above `cap`. Funding for P stays at the cap.
+pub fn budget_price(prices: Vec<u64>, cap: u64) -> u64 {
+    let sampled = priority_price(prices, u64::MAX).unwrap_or(u64::MAX);
+    sampled.max(1).saturating_mul(BUDGET_FACTOR).min(cap)
+}
+
 /// Nearest-rank percentile of a sorted, non-empty slice.
 pub fn percentile(sorted: &[u64], pct: usize) -> u64 {
     let n = sorted.len();
