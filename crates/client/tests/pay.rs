@@ -1418,7 +1418,7 @@ fn reclaim_stops_after_three_lost_attempts() {
     chain.drop_sends = usize::MAX;
     let stopped = pay::reclaim(&mut chain, &h.payer, &run_id, &o);
     assert!(
-        matches!(&stopped, Err(PayError::Halted(why)) if why.contains("10 attempts")),
+        matches!(&stopped, Err(PayError::Halted(why)) if why.contains("3 attempts")),
         "{stopped:?}"
     );
 }
