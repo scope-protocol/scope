@@ -200,6 +200,9 @@ fn recipient_chain(url: String) -> RpcChain {
     ))
 }
 
+/// Appended where a missing payment signature may only be a payment that has not finalized.
+const FINALIZE_HINT: &str = "a payment finalizes about 13 seconds after it lands; retry shortly";
+
 fn run_scan(args: ScanArgs) -> anyhow::Result<()> {
     let recipient = args.keys.load()?;
     let chain = recipient_chain(rpc_url(args.url));
@@ -242,7 +245,14 @@ fn run_scan(args: ScanArgs) -> anyhow::Result<()> {
                 if args.with_signature {
                     match history::payment_signature(&chain, &p.token_account) {
                         Ok(Some(signature)) => write!(output, "\t{signature}")?,
-                        Ok(None) => write!(output, "\tunknown")?,
+                        Ok(None) => {
+                            writeln!(
+                                io::stderr().lock(),
+                                "signature for {}: not found yet; {FINALIZE_HINT}",
+                                p.token_account
+                            )?;
+                            write!(output, "\tunknown")?
+                        }
                         Err(error) => {
                             writeln!(
                                 io::stderr().lock(),
@@ -273,7 +283,12 @@ fn run_meta_address(args: MetaAddressArgs) -> anyhow::Result<()> {
 fn run_recover(args: RecoverArgs) -> anyhow::Result<()> {
     let recipient = args.keys.load()?;
     let chain = recipient_chain(rpc_url(args.url));
-    let report = history::recover(
+    let mut output = io::stdout().lock();
+    writeln!(
+        output,
+        "payer\tmint\ttoken_account\tephemeral\tsignature\tdestination\tdestination_exists\tdestination_lamports\tdestination_base_units"
+    )?;
+    let report = history::recover_with(
         &chain,
         &chain,
         &recipient,
@@ -281,42 +296,48 @@ fn run_recover(args: RecoverArgs) -> anyhow::Result<()> {
             limit: args.limit,
             since: args.since,
         },
+        |p| {
+            let (exists, lamports, amount) = match &p.destination_state {
+                Some(d) => (
+                    "yes",
+                    d.lamports.to_string(),
+                    d.amount.map_or("unknown".into(), |a| a.to_string()),
+                ),
+                None => ("no", "-".into(), "-".into()),
+            };
+            writeln!(
+                output,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{exists}\t{lamports}\t{amount}",
+                p.payer,
+                p.mint,
+                p.token_account,
+                Address::new_from_array(p.ephemeral),
+                p.signature,
+                p.destination
+            )?;
+            output.flush()
+        },
     )?;
-    let mut output = io::stdout().lock();
-    writeln!(
-        output,
-        "payer\tmint\ttoken_account\tephemeral\tsignature\tdestination\tdestination_exists\tdestination_lamports\tdestination_base_units"
-    )?;
-    for p in &report.found {
-        let (exists, lamports, amount) = match &p.destination_state {
-            Some(d) => (
-                "yes",
-                d.lamports.to_string(),
-                d.amount.map_or("unknown".into(), |a| a.to_string()),
-            ),
-            None => ("no", "-".into(), "-".into()),
-        };
-        writeln!(
-            output,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{exists}\t{lamports}\t{amount}",
-            p.payer,
-            p.mint,
-            p.token_account,
-            Address::new_from_array(p.ephemeral),
-            p.signature,
-            p.destination
-        )?;
-    }
     eprintln!(
-        "examined {} transactions, found {} payments",
+        "listed {} transactions, examined {}, found {} payments",
+        report.listed,
         report.examined,
         report.found.len()
     );
     if report.unavailable > 0 {
         eprintln!(
-            "warning: the node would not return {} listed transactions; use an RPC that keeps history for the program",
+            "warning: the node does not have {} listed transactions; use an RPC that keeps history for the program",
             report.unavailable
         );
+    }
+    if report.truncated {
+        eprintln!(
+            "warning: examined {} transactions; older ones were not examined (raise --limit or pass --since <last signature>)",
+            report.listed
+        );
+        if let Some(last) = report.last_signature {
+            eprintln!("last signature examined: {last}");
+        }
     }
     Ok(())
 }
@@ -324,12 +345,17 @@ fn run_recover(args: RecoverArgs) -> anyhow::Result<()> {
 fn run_register(args: RegisterArgs) -> anyhow::Result<()> {
     let path = expand_home(&args.recipient_key)?;
     let address = recipient_keys::create(&path, args.encrypt_to.as_deref())?;
-    println!("{address}");
     eprintln!("recipient backup: {}", path.display());
     match &args.verify_identity {
         Some(identity) => {
-            recipient_keys::verify_readback(&path, &expand_home(identity)?, &address)
-                .context("the new backup does not decrypt with that identity; do not rely on it")?;
+            recipient_keys::verify_readback(&path, &expand_home(identity)?, &address).with_context(
+                || {
+                    format!(
+                        "the new backup does not decrypt with that identity; do not rely on it (the file is left in place at {} and unverified)",
+                        path.display()
+                    )
+                },
+            )?;
             eprintln!("backup decrypted and matches the meta-address");
         }
         None if args.encrypt_to.is_some() => eprintln!(
@@ -339,6 +365,7 @@ fn run_register(args: RegisterArgs) -> anyhow::Result<()> {
             "warning: the backup is a plaintext file; anyone who can read it can spend your payments (use --encrypt-to)"
         ),
     }
+    println!("{address}");
     Ok(())
 }
 
@@ -720,7 +747,7 @@ fn run_disclose(args: DiscloseArgs) -> anyhow::Result<()> {
                 .token_account
                 .context("--run, --signature or --token-account")?;
             let signature = history::payment_signature(&chain, &token_account)?.with_context(|| {
-                format!("no payment transaction for {token_account} in this node's history; pass --signature")
+                format!("no payment transaction for {token_account} in this node's history; pass --signature, or {FINALIZE_HINT}")
             })?;
             eprintln!("payment signature: {signature}");
             receipt::disclose_as_recipient(&chain, &args.keys.load()?, &signature)?
