@@ -46,7 +46,7 @@ scope disclose --token-account <T> \
 # payment signature: <signature>                          (stderr)
 ```
 
-`disclose` then looks the signature up itself: it lists the transactions that touch `T`, and takes the oldest successful one that holds an `announce` for `T`, since anyone can send lamports to that address first. This works after `reclaim` closed `T`, because the node still lists the transaction. A node that keeps no history for `T` gives "no payment transaction"; pass `--signature` then.
+`disclose` then looks the signature up itself: it lists the transactions that touch `T`, and takes the oldest successful one that holds an `announce` for `T`, since anyone can send lamports to that address first. This works after `reclaim` closed `T`, because the node still lists the transaction. History is read at finalized commitment, so a payment younger than about 13 seconds is not found yet. A node that keeps no history for `T` gives "no payment transaction"; pass `--signature` then.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -142,7 +142,7 @@ A mint auditor key, where the issuer set one, is a second path: the auditor decr
 
 ## Limits
 
-- A recipient needs the payment signature or the token account. `scope pay` prints the signature per row, so the payer can hand it over; `scope recover` lists both from history. Recovery from the key backup alone needs an RPC that keeps transaction history for the program, within `--limit` transactions, and fails without one.
+- A recipient needs the payment signature or the token account. `scope pay` prints the signature per row, so the payer can hand it over; `scope recover` lists both from history. Recovery from the key backup alone needs an RPC that keeps transaction history for the program, within `--limit` listed signatures (failed ones count; the command says when the limit cut the walk short), and fails without one.
 - The payer needs the run's journal and input copy as well as the key: the run secret rebuilds the openings, but the row's signature and amount come from the run directory.
 - A receipt covers one transfer. Proving a total means one receipt per row.
 - `disclose --run` reads the mint's decimals from the chain to parse the input copy, so the mint account must still exist [unverified: no test].

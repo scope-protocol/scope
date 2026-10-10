@@ -63,6 +63,16 @@ pub enum HistoryError {
     Chain(#[from] ChainError),
     #[error(transparent)]
     Receipt(#[from] ReceiptError),
+    /// Rows already reported are valid; the walk did not get further than `examined`.
+    #[error("stopped after listing {listed} and examining {examined} transactions: {source}")]
+    Stopped {
+        listed: usize,
+        examined: usize,
+        #[source]
+        source: ChainError,
+    },
+    #[error("writing recover results: {0}")]
+    Output(#[source] std::io::Error),
     #[error("{0} has too many transactions to search; pass the payment signature instead")]
     Busy(Address),
 }
@@ -164,7 +174,7 @@ pub struct FoundPayment {
 
 #[derive(Clone, Debug, Default)]
 pub struct RecoverOptions {
-    /// Successful program transactions to examine, newest first.
+    /// Program signatures to list, newest first. Failed transactions count against it.
     pub limit: usize,
     /// Stop at this signature, for an incremental run.
     pub since: Option<Signature>,
@@ -173,9 +183,16 @@ pub struct RecoverOptions {
 #[derive(Debug)]
 pub struct RecoverReport {
     pub found: Vec<FoundPayment>,
+    /// Signatures the node listed, failed ones included.
+    pub listed: usize,
+    /// Successful transactions looked at.
     pub examined: usize,
-    /// Transactions the node listed but would not return.
+    /// Transactions the node listed but does not have (pruned or not yet finalized).
     pub unavailable: usize,
+    /// The oldest signature listed, where a later run can continue with `since`.
+    pub last_signature: Option<Signature>,
+    /// The limit ended the walk with older history still to list.
+    pub truncated: bool,
 }
 
 /// Walks the program's transactions, newest first, and returns the payments addressed to
@@ -187,47 +204,87 @@ pub fn recover<C: Chain, H: SignatureHistory + TransactionArchive>(
     recipient: &RecipientSecretKeys,
     opts: &RecoverOptions,
 ) -> Result<RecoverReport, HistoryError> {
+    recover_with(chain, history, recipient, opts, |_| Ok(()))
+}
+
+/// `recover`, handing each payment to `on_found` as soon as it is authenticated. A chain
+/// error ends the walk with `HistoryError::Stopped`, and the payments already handed over
+/// stay valid.
+pub fn recover_with<C: Chain, H: SignatureHistory + TransactionArchive>(
+    chain: &C,
+    history: &H,
+    recipient: &RecipientSecretKeys,
+    opts: &RecoverOptions,
+    mut on_found: impl FnMut(&FoundPayment) -> std::io::Result<()>,
+) -> Result<RecoverReport, HistoryError> {
     let genesis = history.genesis_hash()?;
     let mut report = RecoverReport {
         found: Vec::new(),
+        listed: 0,
         examined: 0,
         unavailable: 0,
+        last_signature: None,
+        truncated: false,
     };
     let mut before: Option<Signature> = None;
-    let mut listed = 0;
-    while listed < opts.limit {
-        let want = (opts.limit - listed).min(PAGE);
-        let page = history.signatures_for_address(
-            &program_id(),
-            &SignatureQuery {
-                before: before.as_ref(),
-                until: opts.since.as_ref(),
-                limit: want,
-                commitment: Commitment::Finalized,
-            },
-        )?;
-        listed += page.len();
+    let mut last_page_full = false;
+    while report.listed < opts.limit {
+        let want = (opts.limit - report.listed).min(PAGE);
+        let page = history
+            .signatures_for_address(
+                &program_id(),
+                &SignatureQuery {
+                    before: before.as_ref(),
+                    until: opts.since.as_ref(),
+                    limit: want,
+                    commitment: Commitment::Finalized,
+                },
+            )
+            .map_err(|source| stopped(&report, source))?;
         for entry in &page {
+            report.listed += 1;
+            report.last_signature = Some(entry.signature);
             if !entry.succeeded {
                 continue;
             }
             report.examined += 1;
-            let Ok(tx) = receipt::fetch(history, &entry.signature) else {
-                report.unavailable += 1;
-                continue;
+            let tx = match receipt::fetch(history, &entry.signature) {
+                Ok(tx) => tx,
+                Err(ReceiptError::Chain(e)) if e.is_not_found() => {
+                    report.unavailable += 1;
+                    continue;
+                }
+                Err(ReceiptError::Chain(source)) => return Err(stopped(&report, source)),
+                Err(_) => {
+                    report.unavailable += 1;
+                    continue;
+                }
             };
             for a in announces(&tx) {
-                if let Some(found) = authenticate(chain, recipient, genesis, &tx, &a, entry)? {
+                let found = authenticate(chain, recipient, genesis, &tx, &a, entry)
+                    .map_err(|source| stopped(&report, source))?;
+                if let Some(found) = found {
+                    on_found(&found).map_err(HistoryError::Output)?;
                     report.found.push(found);
                 }
             }
         }
+        last_page_full = page.len() == want;
         match page.last() {
-            Some(last) if page.len() == want => before = Some(last.signature),
+            Some(last) if last_page_full => before = Some(last.signature),
             _ => break,
         }
     }
+    report.truncated = last_page_full && report.listed >= opts.limit;
     Ok(report)
+}
+
+fn stopped(report: &RecoverReport, source: ChainError) -> HistoryError {
+    HistoryError::Stopped {
+        listed: report.listed,
+        examined: report.examined,
+        source,
+    }
 }
 
 fn authenticate<C: Chain>(
@@ -237,7 +294,7 @@ fn authenticate<C: Chain>(
     tx: &VersionedTransaction,
     a: &Announce,
     entry: &SignatureEntry,
-) -> Result<Option<FoundPayment>, HistoryError> {
+) -> Result<Option<FoundPayment>, ChainError> {
     let note = PaymentAnnouncement {
         ephemeral_public_key: a.ephemeral,
         discovery_tag: a.view_tag,

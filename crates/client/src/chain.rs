@@ -14,14 +14,15 @@ use solana_rpc_client::{
             UiAccountEncoding,
         },
         filter::{Memcmp, RpcFilterType},
-        request::RpcError,
+        request::{RpcError, RpcRequest},
     },
     rpc_client::{GetConfirmedSignaturesForAddress2Config, RpcClient},
 };
 use solana_signature::Signature;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction_status_client_types::{
-    TransactionDetails, TransactionStatus, UiTransactionEncoding,
+    EncodedConfirmedTransactionWithStatusMeta, TransactionDetails, TransactionStatus,
+    UiTransactionEncoding,
 };
 use std::{
     future::Future,
@@ -51,6 +52,20 @@ pub struct AccountData {
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct ChainError(pub String);
+
+/// Starts the message of the error for a signature the node does not have.
+const NOT_FOUND: &str = "transaction not found";
+
+impl ChainError {
+    /// The node has no such transaction: not yet finalized, or pruned from its history.
+    pub fn not_found(signature: &Signature) -> Self {
+        Self(format!("{NOT_FOUND}: {signature}"))
+    }
+
+    pub fn is_not_found(&self) -> bool {
+        self.0.starts_with(NOT_FOUND)
+    }
+}
 
 pub trait Chain {
     fn account(
@@ -335,10 +350,10 @@ impl Chain for RpcChain {
         let mut found = Vec::with_capacity(addresses.len());
         for chunk in addresses.chunks(100) {
             let rows = self
-                .call(
+                .read(|| {
                     self.rpc()
-                        .get_multiple_accounts_with_commitment(chunk, config(commitment)),
-                )?
+                        .get_multiple_accounts_with_commitment(chunk, config(commitment))
+                })?
                 .value;
             if rows.len() != chunk.len() {
                 return Err(ChainError(
@@ -613,14 +628,30 @@ impl crate::receipt::TransactionArchive for RpcChain {
         &self,
         signature: &Signature,
     ) -> Result<crate::receipt::ArchivedTransaction, ChainError> {
-        let found = self.call(self.rpc().get_transaction_with_config(
-            signature,
+        let params = serde_json::json!([
+            signature.to_string(),
             RpcTransactionConfig {
                 encoding: Some(UiTransactionEncoding::Base64),
                 commitment: Some(CommitmentConfig::finalized()),
                 max_supported_transaction_version: Some(1),
+            }
+        ]);
+        // A null result is a missing transaction; a block gap is a pruned one.
+        let found = match self.read_with(
+            || {
+                self.rpc()
+                    .send::<Option<EncodedConfirmedTransactionWithStatusMeta>>(
+                        RpcRequest::GetTransaction,
+                        params.clone(),
+                    )
             },
-        ))?;
+            false,
+        ) {
+            Ok(Some(found)) => found,
+            Ok(None) => return Err(ChainError::not_found(signature)),
+            Err(f) if f.block_gap => return Err(ChainError::not_found(signature)),
+            Err(f) => return Err(f.error),
+        };
         let transaction = found
             .transaction
             .transaction
@@ -646,15 +677,17 @@ impl crate::history::SignatureHistory for RpcChain {
         address: &Address,
         query: &crate::history::SignatureQuery<'_>,
     ) -> Result<Vec<crate::history::SignatureEntry>, ChainError> {
-        let rows = self.call(self.rpc().get_signatures_for_address_with_config(
-            address,
-            GetConfirmedSignaturesForAddress2Config {
-                before: query.before.copied(),
-                until: query.until.copied(),
-                limit: Some(query.limit),
-                commitment: Some(config(query.commitment)),
-            },
-        ))?;
+        let rows = self.read(|| {
+            self.rpc().get_signatures_for_address_with_config(
+                address,
+                GetConfirmedSignaturesForAddress2Config {
+                    before: query.before.copied(),
+                    until: query.until.copied(),
+                    limit: Some(query.limit),
+                    commitment: Some(config(query.commitment)),
+                },
+            )
+        })?;
         rows.into_iter()
             .map(|row| {
                 Ok(crate::history::SignatureEntry {

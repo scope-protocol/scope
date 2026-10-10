@@ -66,6 +66,29 @@ fn payment_instructions(
     Address,
     AeKey,
 ) {
+    payment_instructions_to(h, recipient, r, amount, None)
+}
+
+/// Where a crafted payment's transfer goes instead of the one-time account and its key.
+type Redirect<'a> = (
+    Option<Address>,
+    Option<&'a solana_zk_sdk::encryption::elgamal::ElGamalPubkey>,
+);
+
+/// `payment_instructions`, with the confidential transfer optionally sent to another token
+/// account or encrypted to another key than the announcement implies.
+fn payment_instructions_to(
+    h: &Harness,
+    recipient: &RecipientSecretKeys,
+    r: u8,
+    amount: u64,
+    redirect: Option<Redirect<'_>>,
+) -> (
+    Vec<solana_instruction::Instruction>,
+    Address,
+    Address,
+    AeKey,
+) {
     let sent = derive_payment_with_ephemeral(
         &recipient.derive_public_keys(),
         &EphemeralSecret::from_bytes([r; 32]),
@@ -96,7 +119,13 @@ fn payment_instructions(
         lamports_for_owner: 8_000_000,
     })
     .expect("setup");
-    ixs.extend(transfer(h, account, keys.pubkey(), amount));
+    let (to, key) = redirect.unwrap_or((None, None));
+    ixs.extend(transfer(
+        h,
+        to.unwrap_or(account),
+        key.unwrap_or(keys.pubkey()),
+        amount,
+    ));
     (ixs, announcement, account, ae)
 }
 
@@ -2043,6 +2072,10 @@ mod history {
     struct Archive {
         txs: Vec<(Signature, VersionedTransaction)>,
         listings: Cell<usize>,
+        /// Signatures the node lists as failed.
+        failed: Vec<Signature>,
+        /// Signatures whose fetch answers with this message instead of the transaction.
+        fetch_errors: Vec<(Signature, String)>,
     }
 
     impl Archive {
@@ -2078,7 +2111,7 @@ mod history {
                 .map(|(slot, signature)| SignatureEntry {
                     signature,
                     slot: slot as u64,
-                    succeeded: true,
+                    succeeded: !self.failed.contains(&signature),
                 })
                 .collect())
         }
@@ -2090,14 +2123,17 @@ mod history {
         }
 
         fn transaction(&self, signature: &Signature) -> Result<ArchivedTransaction, ChainError> {
+            if let Some((_, message)) = self.fetch_errors.iter().find(|(s, _)| s == signature) {
+                return Err(ChainError(message.clone()));
+            }
             self.txs
                 .iter()
                 .find(|(s, _)| s == signature)
                 .map(|(_, tx)| ArchivedTransaction {
                     transaction: tx.clone(),
-                    succeeded: true,
+                    succeeded: !self.failed.contains(signature),
                 })
-                .ok_or_else(|| ChainError(format!("{signature}: not found")))
+                .ok_or_else(|| ChainError::not_found(signature))
         }
     }
 
@@ -2238,6 +2274,175 @@ mod history {
         };
         assert_eq!(find(PAGE), (0, PAGE, 1), "the limit ends the walk");
         assert_eq!(find(2 * PAGE), (1, PAGE + 101, 2));
+    }
+
+    /// A payment transaction that announces to `recipient` but sends the transfer elsewhere.
+    fn crafted(
+        h: &mut Harness,
+        archive: &mut Archive,
+        recipient: &RecipientSecretKeys,
+        r: u8,
+        redirect: Redirect<'_>,
+    ) -> Signature {
+        let (ixs, ..) = payment_instructions_to(h, recipient, r, AMOUNT, Some(redirect));
+        let tx = v1_transaction(&h.payer, &[], &ixs, h.svm.latest_blockhash());
+        h.svm.expire_blockhash();
+        archive.push(tx)
+    }
+
+    fn all(
+        chain: &SvmChain<'_>,
+        archive: &Archive,
+        who: &RecipientSecretKeys,
+        limit: usize,
+    ) -> history::RecoverReport {
+        history::recover(chain, archive, who, &RecoverOptions { limit, since: None })
+            .expect("recover")
+    }
+
+    #[test]
+    fn recover_skips_failed_transactions_but_counts_them_against_the_limit() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let (failed, _) = pay(&mut h, &mut archive, &alice, 3);
+        let (landed, _) = pay(&mut h, &mut archive, &alice, 4);
+        archive.failed.push(failed);
+        let chain = SvmChain::new(&mut h.svm);
+        let report = all(&chain, &archive, &alice, DEFAULT_LIMIT);
+        assert_eq!(
+            report.found.iter().map(|f| f.signature).collect::<Vec<_>>(),
+            [landed]
+        );
+        assert_eq!((report.listed, report.examined), (2, 1));
+        assert!(!report.truncated);
+        assert_eq!(
+            history::payment_signature(&archive, &Address::new_unique()).expect("lookup"),
+            None
+        );
+    }
+
+    #[test]
+    fn payment_signature_ignores_a_failed_announcement() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let (failed, account) = pay(&mut h, &mut archive, &alice, 3);
+        archive.failed.push(failed);
+        assert_eq!(
+            history::payment_signature(&archive, &account).expect("lookup"),
+            None
+        );
+    }
+
+    #[test]
+    fn recover_rejects_a_tag_match_whose_transfer_pays_another_key() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let stranger_key = ElGamalKeypair::new_rand();
+        let mut archive = Archive::default();
+        crafted(
+            &mut h,
+            &mut archive,
+            &alice,
+            3,
+            (None, Some(stranger_key.pubkey())),
+        );
+        let (genuine, _) = pay(&mut h, &mut archive, &alice, 4);
+        let chain = SvmChain::new(&mut h.svm);
+        let report = all(&chain, &archive, &alice, DEFAULT_LIMIT);
+        assert_eq!(report.examined, 2);
+        assert_eq!(
+            report.found.iter().map(|f| f.signature).collect::<Vec<_>>(),
+            [genuine]
+        );
+    }
+
+    #[test]
+    fn recover_rejects_a_transfer_to_another_token_account() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        crafted(
+            &mut h,
+            &mut archive,
+            &alice,
+            3,
+            (Some(Address::new_unique()), None),
+        );
+        let chain = SvmChain::new(&mut h.svm);
+        assert!(
+            all(&chain, &archive, &alice, DEFAULT_LIMIT)
+                .found
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn recover_says_when_the_limit_cut_the_walk_short() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let (first, _) = pay(&mut h, &mut archive, &alice, 3);
+        let (second, _) = pay(&mut h, &mut archive, &alice, 4);
+        let chain = SvmChain::new(&mut h.svm);
+        let cut = all(&chain, &archive, &alice, 1);
+        assert!(cut.truncated);
+        assert_eq!((cut.listed, cut.last_signature), (1, Some(second)));
+        let whole = all(&chain, &archive, &alice, 5);
+        assert!(!whole.truncated);
+        assert_eq!((whole.listed, whole.last_signature), (2, Some(first)));
+    }
+
+    #[test]
+    fn recover_counts_missing_transactions_and_stops_on_a_transport_error_with_rows_kept() {
+        let mut h = Harness::new();
+        let alice = recipient(1);
+        let mut archive = Archive::default();
+        let (oldest, _) = pay(&mut h, &mut archive, &alice, 3);
+        let (pruned, _) = pay(&mut h, &mut archive, &alice, 4);
+        let (middle, _) = pay(&mut h, &mut archive, &alice, 5);
+        let (newest, _) = pay(&mut h, &mut archive, &alice, 6);
+        archive
+            .fetch_errors
+            .push((pruned, ChainError::not_found(&pruned).0));
+        // Listed newest first: newest, middle, pruned, oldest.
+        archive
+            .fetch_errors
+            .push((oldest, "connection reset".into()));
+        let chain = SvmChain::new(&mut h.svm);
+        let mut streamed = Vec::new();
+        let error = history::recover_with(
+            &chain,
+            &archive,
+            &alice,
+            &RecoverOptions {
+                limit: DEFAULT_LIMIT,
+                since: None,
+            },
+            |f| {
+                streamed.push(f.signature);
+                Ok(())
+            },
+        )
+        .expect_err("transport error");
+        assert_eq!(streamed, [newest, middle]);
+        assert!(
+            matches!(
+                &error,
+                history::HistoryError::Stopped {
+                    listed: 4,
+                    examined: 4,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        // The same walk without the transport error counts the pruned one as unavailable.
+        archive.fetch_errors.retain(|(s, _)| *s == pruned);
+        let report = all(&chain, &archive, &alice, DEFAULT_LIMIT);
+        assert_eq!(report.unavailable, 1);
+        assert_eq!(report.found.len(), 3);
     }
 
     #[test]
