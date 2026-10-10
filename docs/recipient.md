@@ -122,9 +122,9 @@ Success is a finalized successful signature for this attempt, even if follow-up 
 
 ## Recovery
 
-The recovery journal (default `<recipient-key>.sweeps.jsonl`) is a locked, owner-only JSONL file with header `{"format":"scope-recipient-recovery","version":1}`. Before every new attempt the sweep appends `genesis_hash`, `ephemeral`, `destination`, `owner`, `payment_authority` and `attempt_signature`, syncs it, then prints the same record to stdout; if either fails, that attempt is not sent. It holds no private key and no amount. A torn last record is cut before the next append; a file that is not a SCOPE journal, or a symlink, is refused (verification: V70). A journal entry records a prepared attempt, not a landed one.
+The recovery journal (default `<recipient-key>.sweeps.jsonl`) is a locked, owner-only JSONL file with header `{"format":"scope-recipient-recovery","version":1}`. Before every new attempt the sweep appends `genesis_hash`, `ephemeral`, `token_account`, `destination`, `owner`, `payment_authority` and `attempt_signature`, syncs it, then prints the same record to stdout; if either fails, that attempt is not sent. It holds no private key and no amount. A torn last record is cut before the next append; a file that is not a SCOPE journal, or a symlink, is refused (verification: V70). A journal entry records a prepared attempt, not a landed one.
 
-Once an announcement is reclaimed (a full sweep does this itself), scan no longer lists that payment. Exact R plus the key backup rebuilds D_owner and D's keys, so keep the journal or the saved output: the key backup alone cannot list past destinations. Finding them from historical payer transactions is not built (Q17 in [plan.md](plan.md)) (verification: V61, V65).
+Once an announcement is reclaimed (a full sweep does this itself), scan no longer lists that payment. R and T plus the key backup rebuild D_owner and D's keys, so keep the journal or the saved output: the key backup alone cannot list past destinations. Finding them from historical payer transactions is not built (Q17 in [plan.md](plan.md)) (verification: V61, V65).
 
 ## Spending the swept funds
 

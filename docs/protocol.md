@@ -42,7 +42,7 @@ sequenceDiagram
 
 ### Transaction 1: the payer pays one stealth row
 
-One v1 transaction (V21), one signature, 2,998 bytes of 4,096, 254,565 CU at bump 255 (V56, V73). Built by `scope_client::ix::stealth_setup` plus the transfer.
+One v1 transaction (V21), one signature, 2,998 bytes of 4,096, 254,576 CU at bump 255 (V56, V73). Built by `scope_client::ix::stealth_setup` plus the transfer.
 
 | # | Instruction | Signer | Notes |
 |---|---|---|---|
@@ -235,7 +235,7 @@ So a stealth row locks 4,008,120 lamports of payer rent until the sweep's `recla
 
 | Instruction | CU measured (LiteSVM, bump 255) | CI ceiling | V |
 |---|---|---|---|
-| `announce` | 6,373; each lower bump adds about 1,500 | 7,700 | V55 |
+| `announce` | 6,384; each lower bump adds about 1,500 | 7,700 | V55 |
 | `reclaim` | 3,256 | 4,000 | V55 |
 | `register` | 8,728 | 10,500 | V82 |
 | `deregister` | 489 | 600 | V81 |
@@ -243,7 +243,7 @@ So a stealth row locks 4,008,120 lamports of payer rent until the sweep's `recla
 | Transaction | Signatures | Bytes | CU measured | V |
 |---|---|---|---|---|
 | Plain payment | 1 | 2,395 | 237,792 | V49, V73 |
-| Stealth payment | 1 | 2,998 | 254,565 | V56, V73 |
+| Stealth payment | 1 | 2,998 | 254,576 | V56, V73 |
 | Full sweep (auditor, dust burn, reclaim) | 2 | 3,350 | 268,049 | V68, V73 |
 | `reclaim` alone (payer's backstop) | 1 | not measured | 3,260 | V73 |
 
