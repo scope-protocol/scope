@@ -633,10 +633,11 @@ impl crate::receipt::TransactionArchive for RpcChain {
         // A null result is a missing transaction; a block gap is a pruned one.
         let found = match self.read_with(
             || {
-                self.rpc().send::<Option<EncodedConfirmedTransactionWithStatusMeta>>(
-                    RpcRequest::GetTransaction,
-                    params.clone(),
-                )
+                self.rpc()
+                    .send::<Option<EncodedConfirmedTransactionWithStatusMeta>>(
+                        RpcRequest::GetTransaction,
+                        params.clone(),
+                    )
             },
             false,
         ) {

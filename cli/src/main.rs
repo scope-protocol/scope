@@ -1454,7 +1454,10 @@ mod tests {
         assert_eq!(attempted, found[..3]);
         assert!(format!("{error:#}").contains("payment authority is not funded"));
         let text = String::from_utf8(output).expect("text");
-        assert!(text.contains(&format!("stopped: 2 of 4 swept, 0 failed before it, {} failed", found[2])));
+        assert!(text.contains(&format!(
+            "stopped: 2 of 4 swept, 0 failed before it, {} failed",
+            found[2]
+        )));
         assert!(!text.contains("swept 4 of 4"));
     }
 
@@ -1491,7 +1494,10 @@ mod tests {
         assert_eq!(waits, 2);
         let text = String::from_utf8(output).expect("text");
         assert!(text.contains("swept 3 of 4; not swept:"));
-        assert!(text.contains(&format!("  {}\tpreparing: payment authority holds 1", found[0])));
+        assert!(text.contains(&format!(
+            "  {}\tpreparing: payment authority holds 1",
+            found[0]
+        )));
     }
 
     #[test]
