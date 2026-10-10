@@ -838,13 +838,24 @@ pub fn cluster_name(genesis: &[u8; 32]) -> String {
         )
 }
 
-/// A real run on mainnet-beta needs `--yes`; anything else goes ahead.
-pub fn mainnet_gate(genesis: &[u8; 32], yes: bool) -> Result<(), String> {
+/// What a mainnet-beta confirmation is for; it decides which hint the refusal gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateFor {
+    NewRun,
+    /// `--resume`, `--status --reclaim` and `--reclaim-all`, which accept no `--dry-run`.
+    ResumeOrReclaim,
+}
+
+/// Anything that sends on mainnet-beta needs `--yes`; other clusters go ahead.
+pub fn mainnet_gate(genesis: &[u8; 32], yes: bool, what: GateFor) -> Result<(), String> {
     if cluster_name(genesis) == "mainnet-beta" && !yes {
-        return Err(
-            "this node is on mainnet-beta; check the plan with --dry-run, then rerun with --yes"
-                .into(),
-        );
+        let hint = match what {
+            GateFor::NewRun => "check the plan with --dry-run, then rerun with --yes",
+            GateFor::ResumeOrReclaim => {
+                "rerun with --yes (--status without --reclaim reads the run and sends nothing)"
+            }
+        };
+        return Err(format!("this node is on mainnet-beta; {hint}"));
     }
     Ok(())
 }
@@ -1949,12 +1960,20 @@ mod tests {
             solana_message::Hash::from_str("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d")
                 .expect("genesis hash")
                 .to_bytes();
-        let refused = mainnet_gate(&mainnet, false).expect_err("no --yes");
+        let refused = mainnet_gate(&mainnet, false, GateFor::NewRun).expect_err("no --yes");
         assert!(
             refused.contains("--dry-run") && refused.contains("--yes"),
             "{refused}"
         );
-        mainnet_gate(&mainnet, true).expect("--yes");
-        mainnet_gate(&[9; 32], false).expect("other clusters need no flag");
+        let refused =
+            mainnet_gate(&mainnet, false, GateFor::ResumeOrReclaim).expect_err("no --yes");
+        assert!(
+            refused.contains("--yes") && !refused.contains("check the plan"),
+            "{refused}"
+        );
+        for what in [GateFor::NewRun, GateFor::ResumeOrReclaim] {
+            mainnet_gate(&mainnet, true, what).expect("--yes");
+            mainnet_gate(&[9; 32], false, what).expect("other clusters need no flag");
+        }
     }
 }
