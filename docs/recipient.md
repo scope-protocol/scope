@@ -136,7 +136,7 @@ The sweep resends one signed transaction while its outcome is unknown. Only a fi
 
 `--timeout` starts after preparation and the first recovery record; no new send starts after it, but a sent transaction can still finalize. On timeout the sweep exits with "sweep completion has not been observed; check chain state before retrying" and the last recovery record (verification: V65).
 
-Success is a finalized successful signature for this attempt, even if follow-up reads fail (`unknown`). Without it, the sweep is complete only when the one-time account is empty or closed and D is your authenticated account (verification: V69).
+Success is a finalized successful signature for this attempt, even if follow-up reads fail (`unknown`). Otherwise it is complete only when the one-time account is empty or closed and D is yours (verification: V69).
 
 ## Recovery
 
