@@ -213,7 +213,7 @@ def main():
     values["elgamal_scalar"] = elgamal_scalar.to_bytes(32, "little")
     values["balance_key"] = balance_key
     _, sweep_seed = hkdf(spend.to_bytes(32, "little"), b"stealth-dest/v1",
-                         b"d-owner" + values["spend_public"] + ephemeral_public + bytes([4])*32, 32, "sha512")
+                         b"d-owner" + ephemeral_public + bytes([4])*32, 32, "sha512")
     sweep_expanded = hashlib.sha512(sweep_seed).digest()
     sweep_scalar = bytearray(sweep_expanded[:32])
     sweep_scalar[0] &= 248

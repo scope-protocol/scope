@@ -9,8 +9,8 @@ use solana_keypair::Keypair;
 use solana_signer::Signer;
 use solana_zk_sdk::encryption::{auth_encryption::AeKey, elgamal::ElGamalKeypair};
 
-/// Measured 2026-09-30 at bump 255: announce 6,373, reclaim 3,256 (bump 254: announce
-/// 7,873). Ceilings about 20% above; raise only with a reason in the commit.
+/// Measured 2026-09-30 at bump 255: announce 6,384, reclaim 3,256 (bump 254: announce
+/// 7,884). Ceilings about 20% above; raise only with a reason in the commit.
 const ANNOUNCE_CU_MAX: u64 = 7_700;
 const RECLAIM_CU_MAX: u64 = 4_000;
 
