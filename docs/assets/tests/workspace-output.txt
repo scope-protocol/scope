@@ -1,0 +1,481 @@
+   Compiling scope-program v0.1.0 (/Users/abhineet/DEV/Build/scope/programs/scope)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.92s
+     Running unittests src/main.rs (target/debug/deps/scope-c79faa6ec1525a83)
+
+running 30 tests
+test recipient_keys::tests::encrypted_backup_round_trips_with_age ... ignored, requires age and age-keygen on PATH
+test tests::exit_codes_tell_retry_from_inspect_from_refused ... ok
+test tests::export_requires_public_r_and_an_explicit_output_file ... ok
+test tests::disclose_needs_a_run_a_signature_or_a_token_account_and_only_one ... ok
+test private_files::tests::failed_writes_remove_only_the_new_file ... ok
+test recipient_keys::tests::encrypted_backup_round_trips_when_age_is_installed ... ok
+test tests::pay_defaults_to_an_absolute_runs_directory_and_an_unset_url ... ok
+test tests::earlier_runs_are_found_by_their_journals ... ok
+test recovery::tests::failed_journal_writes_stop_the_checkpoint_before_stdout ... ok
+test tests::recovery_output_must_be_flushed_before_submission ... ok
+test tests::reclaim_all_takes_yes_for_mainnet ... ok
+test tests::recover_takes_since_and_before_together ... ok
+test tests::recipient_commands_parse_and_sweep_requires_an_announcement ... ok
+test tests::scan_filters_and_register_verification_parse ... ok
+test tests::pay_flags_parse_and_conflict_where_they_must ... ok
+test tests::sweep_all_skips_payments_that_fail_alone_and_reports_them_at_the_end ... ok
+test tests::sweep_all_stops_on_an_unclassified_error_and_says_how_far_it_got ... ok
+test recipient_keys::tests::private_backup_round_trips_and_cannot_be_overwritten ... ok
+test tests::sweep_all_waits_between_sweeps_with_the_drawn_delay ... ok
+test tests::sweep_all_stops_when_a_completion_was_not_observed_or_the_chain_fails ... ok
+test tests::sweep_all_without_jitter_never_sleeps_and_an_empty_list_is_fine ... ok
+test tests::sweep_takes_one_announcement_or_all_and_all_only_flags_need_all ... ok
+test tests::the_jitter_draw_stays_within_its_bound ... ok
+test tests::the_rpc_url_comes_from_the_flag_then_the_environment_then_localhost ... ok
+test tests::transparent_chain_errors_and_stops_after_sending_are_classified ... ok
+test recipient_keys::tests::rejects_public_permissions_symlinks_and_invalid_material ... ok
+test tests::checkpoint_requires_durable_recovery_and_dry_runs_do_not_append ... ok
+test recovery::tests::checkpoints_are_private_public_only_and_locked ... ok
+test recovery::tests::unrelated_private_files_are_preserved_and_torn_records_are_repaired ... ok
+test recipient_keys::tests::exported_owner_is_a_private_standard_keypair_and_cannot_be_overwritten ... ok
+
+test result: ok. 29 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running unittests src/lib.rs (target/debug/deps/scope_client-7428c07b7745cef7)
+
+running 46 tests
+test fees::tests::priority_fee_rounds_up ... ok
+test fees::tests::percentile_is_nearest_rank ... ok
+test fees::tests::priority_price_sorts_samples_and_enforces_the_cap ... ok
+test input::tests::amounts_are_exact ... ok
+test input::tests::amounts_reject_bad_input ... ok
+test chain::tests::only_a_finalized_error_counts_as_landed_failed ... ok
+test input::tests::parses_rows_with_header_and_comments ... ok
+test fees::tests::v1_vote_transaction_is_excluded ... ok
+test fees::tests::v1_price_comes_from_the_header ... ok
+test chain::tests::rpc_urls_never_reach_error_text ... ok
+test chain::tests::prices_fall_back_to_earlier_slots_when_a_block_is_skipped ... ok
+test journal::tests::hex_round_trips ... ok
+test input::tests::rejects_bad_rows ... ok
+test input::tests::parses_stealth_rows_by_meta_address ... ok
+test chain::tests::expired_rpc_deadline_does_not_start_a_request ... ok
+test confidential::tests::sdk_keys_match_independent_hkdf_sha512_vectors ... ok
+test chain::tests::malformed_rpc_account_encoding_returns_an_error ... ok
+test chain::tests::reads_retry_transport_errors_and_block_gaps_a_bounded_number_of_times ... ok
+test mint_policy::tests::a_mint_without_confidential_transfers_is_not_usable ... ok
+test mint_policy::tests::a_paused_mint_is_refused_and_an_unpaused_one_is_not ... ok
+test mint_policy::tests::a_permanent_delegate_a_close_authority_and_burn_extensions_are_allowed ... ok
+test chain::tests::a_failed_connection_does_not_leak_the_endpoint ... ok
+test mint_policy::tests::a_plain_confidential_mint_passes ... ok
+test mint_policy::tests::a_pyusd_shaped_mint_is_refused_for_its_fee_and_hook ... ok
+test journal::tests::second_writer_is_refused ... ok
+test mint_policy::tests::every_refused_extension_is_refused_by_name ... ok
+test mint_policy::tests::stealth_needs_auto_approval ... ok
+test journal::tests::a_garbage_last_line_with_a_newline_is_cut_before_the_next_append ... ok
+test pay::tests::known_clusters_are_named_and_others_show_their_hash ... ok
+test journal::tests::journals_without_a_format_still_read_and_newer_ones_are_refused ... ok
+test pay::tests::mainnet_needs_an_explicit_yes ... ok
+test journal::tests::records_round_trip_and_file_is_private ... ok
+test journal::tests::run_directories_are_private ... ok
+test pay::tests::token_amounts_print_with_the_mints_decimals ... ok
+test pay::tests::the_input_key_ignores_order_and_binds_mint_and_payer ... ok
+test testkit::budget_tests::reads_only_our_program_lines ... ok
+test pay::tests::a_journal_without_an_input_key_still_matches_on_the_raw_hash ... ok
+test run_secret::tests::matches_independent_known_answers ... ok
+test run_secret::tests::the_payer_key_alone_rebuilds_the_same_material ... ok
+test run_secret::tests::runs_rows_and_parts_are_separated ... ok
+test journal::tests::torn_last_line_is_dropped_but_corruption_is_not ... ok
+test journal::tests::appends_after_a_torn_tail_stay_readable ... ok
+test testkit::elf_guard_tests::newest_mtime_walks_subdirectories ... ok
+test proofs::tests::proofs_verify_and_commit_to_the_amount_under_the_given_openings ... ok
+test chain::tests::rpc_deadline_cancels_slow_responses_and_rate_limit_retries ... ok
+test proofs::tests::the_48_bit_limit_is_exact_and_every_split_boundary_verifies ... ok
+
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.28s
+
+     Running tests/confidential.rs (target/debug/deps/confidential-e6369be3b521424b)
+
+running 4 tests
+test sweep_destination_seed_builds_a_solana_signer ... ok
+test recovered_payment_signs_a_solana_transaction_with_the_protocol_context ... ok
+test sdk_decryption_covers_pending_component_boundaries ... ok
+test payer_recipient_and_disclosure_derive_the_same_usable_keys ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.68s
+
+     Running tests/input_properties.rs (target/debug/deps/input_properties-6e75b98c2a4ceb50)
+
+running 4 tests
+test a_decimal_string_parses_to_the_exact_base_units ... ok
+test arbitrary_amount_text_never_panics ... ok
+test parse_never_panics_on_line_shaped_text ... ok
+test parse_never_panics_on_arbitrary_text ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests/interface_crosscheck.rs (target/debug/deps/interface_crosscheck-d29fa0e980723487)
+
+running 6 tests
+test program_id_bytes_match_base58 ... ok
+test token_2022_id_matches ... ok
+test close_account_byte_matches ... ok
+test reader_agrees_with_official_unpack ... ok
+test reader_agrees_with_official_cpi_guard_in_either_tlv_order ... ok
+test reader_agrees_with_official_unpack_on_generated_accounts ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/journal_properties.rs (target/debug/deps/journal_properties-d02a8387a03eb322)
+
+running 3 tests
+test a_tail_that_closes_a_brace_is_corrupt_and_a_cut_record_is_repaired ... ok
+test garbage_after_the_records_never_panics_and_a_repaired_journal_stays_usable ... ok
+test a_cut_at_any_byte_reopens_with_a_prefix_and_accepts_appends ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.47s
+
+     Running tests/pay.rs (target/debug/deps/pay-99ef026ed005a371)
+
+running 52 tests
+test a_refused_mint_extension_stops_the_run_before_anything_is_sent ... ok
+test a_dry_run_reports_the_run_and_changes_nothing ... ok
+test a_concurrent_start_is_refused ... ok
+test chaos_converges_from_every_kill_point_of_a_20_row_run ... ignored, sixty full runs; run by hand before a release
+test a_funded_stealth_run_passes_the_sol_check ... ok
+test a_second_writer_is_refused ... ok
+test a_run_records_its_cluster_and_refuses_another_one ... ok
+test create_with_seed_refuses_a_prefunded_address_and_the_fallback_does_not ... ok
+test a_dry_run_runs_the_same_preflights_as_a_real_run ... ok
+test disclose_refuses_a_run_from_before_derived_openings ... ok
+test attempts_that_land_with_an_error_halt_the_row_with_that_error_after_three ... ok
+test disclose_survives_a_later_auditor_key_that_does_not_parse ... ok
+test halts_when_the_source_moves_outside_the_run ... ok
+test halts_when_a_landed_row_is_not_on_chain ... ok
+test a_landed_stealth_row_resumes_after_the_mint_stops_auto_approving ... ok
+test an_unreadable_earlier_journal_stops_a_second_run_of_the_same_input ... ok
+test a_landed_row_settles_even_when_the_mint_is_refused_and_the_wallet_is_short ... ok
+test a_prefunded_one_time_address_still_gets_paid ... ok
+test counts_every_row_to_one_recipient_against_its_credit_room ... ok
+test refuses_a_run_the_payers_sol_cannot_cover_before_sending ... ok
+test refuses_bad_recipients_and_overspend_before_sending ... ok
+test refuses_foreign_source_keys ... ok
+test refuses_stealth_rows_on_a_mint_that_does_not_auto_approve ... ok
+test payer_receipts_prove_plain_and_stealth_amounts ... ok
+test a_paid_stealth_row_sweeps_to_the_recipient_and_returns_both_rents_to_the_payer ... ok
+test rebuilds_only_after_the_attempt_expires ... ok
+test refuses_the_same_input_twice_unless_again ... ok
+test a_row_that_keeps_expiring_halts_after_ten_attempts_and_resume_continues ... ok
+test pays_through_a_mint_with_an_auditor ... ok
+test resume_does_not_preflight_a_row_that_already_landed ... ok
+test source_keys_match_spl_token_cli ... ok
+test rows_still_to_pay_are_refused_on_a_mint_that_is_now_refused ... ok
+test reclaim_stops_after_three_lost_attempts ... ok
+test receipts_still_verify_after_the_sweep_closes_every_account ... ok
+test status_shows_an_unswept_row_as_open_and_cannot_reclaim_it ... ok
+test status_tells_unpaid_from_unresolved_and_resume_settles_it ... ok
+test recipient_receipts_prove_a_stealth_amount_and_reject_forged_keys ... ok
+test resuming_a_payment_that_nearly_drains_the_source_does_not_underflow ... ok
+test reclaim_all_closes_swept_announcements_without_a_journal ... ok
+test the_payers_fees_follow_the_sampled_price_not_the_cap ... ok
+test status_and_reclaim_follow_a_stealth_row_from_paid_to_reclaimed ... ok
+test status_reports_a_landed_but_unrecorded_row_that_was_swept_as_unresolved ... ok
+test pays_every_row_once_in_shuffled_order ... ok
+test pays_plain_and_stealth_rows_and_each_recipient_finds_its_payment ... ok
+test the_duplicate_guard_sees_through_formatting_and_row_order ... ok
+test the_run_summary_counts_rows_and_tells_done_from_halted_from_unfinished ... ok
+test stealth_rows_resume_after_kill_after_send ... ok
+test stealth_rows_resume_after_kill_before_send ... ok
+test stealth_rows_resume_after_kill_between_rows ... ok
+test resumes_after_kill_after_send ... ok
+test resumes_after_kill_before_send ... ok
+test resumes_after_kill_between_rows ... ok
+
+test result: ok. 51 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 12.63s
+
+     Running tests/recipient.rs (target/debug/deps/recipient-c942acc33bd3be1d)
+
+running 52 tests
+test history::payment_signature_ignores_a_failed_announcement ... ok
+test history::payment_signature_skips_earlier_transfers_to_the_address_and_reads_every_page ... ok
+test history::recover_honors_the_limit_and_since ... ok
+test history::recover_rejects_a_transfer_to_another_token_account ... ok
+test history::recover_continues_into_older_history_with_before_not_since ... ok
+test history::recover_rejects_a_tag_match_whose_transfer_pays_another_key ... ok
+test history::recover_counts_missing_transactions_and_stops_on_a_transport_error_with_rows_kept ... ok
+test history::recover_says_when_the_limit_cut_the_walk_short ... ok
+test history::recover_pages_through_long_histories ... ok
+test history::recover_skips_failed_transactions_but_counts_them_against_the_limit ... ok
+test finalized_sweep_proves_completion_despite_lagging_account_reads ... ok
+test full_recipient_transaction_fits_the_v1_wire_and_compute_budgets ... ok
+test scan_ignores_wrong_announcement_bumps_and_invalid_ephemeral_keys ... ok
+test bounded_retries_cover_cleanup_and_subsequent_credit_races ... ok
+test completed_sweep_remains_successful_if_the_payer_recreates_the_source ... ok
+test scan_rejects_forged_balance_hints_and_elgamal_keys ... ok
+test history::recover_finds_swept_and_unswept_payments_and_ignores_others ... ok
+test concurrent_sweep_completion_does_not_claim_an_unexecuted_signature ... ok
+test retry_decryption_respects_the_submission_deadline ... ok
+test scan_handles_empty_retired_sources_without_changing_their_balances ... ok
+test scan_recovers_backed_up_recipient_and_ignores_other_payments ... ok
+test restored_standard_owner_can_apply_and_spend_the_swept_balance ... ok
+test observed_completion_survives_unavailable_cleanup_and_sol_metadata ... ok
+test scan_reports_each_batch_before_the_next_read ... ok
+test sweep_builds_proofs_for_the_mint_auditor ... ok
+test sweep_accepts_destination_prefunding_after_simulation ... ok
+test sweep_can_finish_when_cpi_guard_blocks_reclaim ... ok
+test sweep_burns_public_dust_and_handles_a_prefunded_destination ... ok
+test sweep_moves_the_whole_balance_closes_accounts_and_refunds_rent ... ok
+test sweep_pending_preserves_send_errors_without_claiming_failure ... ok
+test sweep_moves_confidential_funds_when_permissioned_burning_blocks_cleanup ... ok
+test sweep_preserves_recovery_details_when_rpc_fails_after_send ... ok
+test scan_and_sweep_support_large_pending_balances ... ok
+test finalized_sweeps_succeed_when_metadata_is_unavailable_or_times_out ... ok
+test sweep_refuses_a_mint_that_now_requires_destination_approval ... ok
+test scan_skips_mismatched_elgamal_keys_without_blocking_valid_payments ... ok
+test sweep_reports_success_when_closed_addresses_are_refunded ... ok
+test recovery_is_checkpointed_for_each_attempt_and_flush_failure_stops_sends ... ok
+test sweep_deadline_prevents_late_sends_and_caps_poll_sleeps ... ok
+test sweep_dry_run_and_underfunding_leave_the_payment_untouched ... ok
+test sweep_survives_a_credit_to_the_authority_after_simulation ... ok
+test sweep_retry_refreshes_applied_balances_when_a_new_credit_arrives ... ok
+test sweep_retries_without_cleanup_only_after_an_unknown_attempt_expires ... ok
+test sweep_retry_refreshes_a_changed_mint_auditor ... ok
+test sweep_timeout_preserves_recovery_details_after_execution ... ok
+test sweep_reprices_only_rebuilt_attempts_and_rechecks_the_cap ... ok
+test sweep_retry_rechecks_funding_after_a_failed_attempt_charges_fees ... ok
+test sweep_transfers_a_small_surplus_to_an_already_funded_owner ... ok
+test sweep_retries_without_cleanup_after_a_finalized_dust_failure ... ok
+test the_sweep_requirement_is_exact_at_the_price_cap_and_the_payer_funds_retries_on_top ... ok
+test sweep_funding_boundaries_include_the_reserve_and_quote_exact_shortages ... ok
+test sweep_retry_refreshes_destination_rent_after_prefunding ... ok
+
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.74s
+
+     Running tests/recipient_rpc.rs (target/debug/deps/recipient_rpc-610b8b4f68d34fc2)
+
+running 8 tests
+test a_null_transaction_is_not_found_and_not_retried ... ok
+test signatures_for_address_passes_the_query_and_reads_the_listing ... ok
+test a_batch_with_a_missing_account_in_the_middle_skips_only_that_payment ... ok
+test a_transient_listing_error_is_retried ... ok
+test scan_reads_candidate_accounts_in_batches_of_one_hundred ... ok
+test a_transient_batch_error_is_retried_and_the_scan_completes ... ok
+test a_failed_batch_stops_the_scan_with_the_progress_made ... ok
+test scan_authenticates_payments_over_rpc_among_one_thousand_announcements ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.67s
+
+     Running tests/registry.rs (target/debug/deps/registry-da015999eb795764)
+
+running 1 test
+test a_payer_looks_up_a_published_meta_address_and_pays_it ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s
+
+     Running unittests src/lib.rs (target/debug/deps/scope_interface-ba08684149ac6807)
+
+running 19 tests
+test error::tests::codes_are_positions_and_round_trip ... ok
+test instruction::tests::announce_round_trips ... ok
+test instruction::tests::announce_rejects_wrong_length ... ok
+test seeds::tests::seed_parts_are_domain_and_r ... ok
+test seeds::tests::seed_is_lowercase_hex_of_first_16_bytes ... ok
+test state::tests::layout_matches_design ... ok
+test state::tests::meta_entry_round_trips_in_srfc_42_layout ... ok
+test instruction::tests::deregister_round_trips ... ok
+test instruction::tests::discriminators_are_stable ... ok
+test instruction::tests::register_round_trips_in_srfc_42_order ... ok
+test state::tests::round_trips ... ok
+test token_account::tests::no_extension_reads_as_none ... ok
+test state::tests::rejects_wrong_length_and_discriminator ... ok
+test token_account::tests::reads_cpi_guard_in_either_order_and_only_when_locked ... ok
+test token_account::tests::reads_owner_close_authority_and_extension ... ok
+test token_account::tests::reads_the_extension_behind_unrelated_ones_and_padding ... ok
+test token_account::tests::rejects_a_cpi_guard_of_the_wrong_length ... ok
+test token_account::tests::rejects_short_data_bad_type_and_bad_coption_tag ... ok
+test token_account::tests::rejects_truncated_extension ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/properties.rs (target/debug/deps/properties-b83c4ed7a8774fce)
+
+running 5 tests
+test announce_data_round_trips ... ok
+test announcement_round_trips ... ok
+test parsers_never_panic ... ok
+test token_reader_never_panics_on_the_confidential_extension ... ok
+test token_reader_never_panics_past_the_base ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running unittests src/lib.rs (target/debug/deps/scope_program-c31436416a1116b6)
+
+running 3 tests
+test curve::tests::accepts_prime_order_points_only ... ok
+test curve::tests::rejects_every_torsion_point_alone_and_mixed ... ok
+test curve::tests::no_point_with_a_non_canonical_encoding_has_prime_order ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/it/main.rs (target/debug/deps/it-f7bb77e3d5036f73)
+
+running 64 tests
+test announce_attacks::rejects_announcement_with_data ... ok
+test announce::announce_rejects_public_credits_enabled ... ok
+test announce::announce_succeeds_when_announcement_prefunded ... ok
+test announce::announce_writes_the_record ... ok
+test announce::announce_rejects_wrong_ephemeral ... ok
+test announce::announce_keeps_a_prefund_at_or_above_rent ... ok
+test announce_attacks::accepts_an_unlocked_cpi_guard ... ok
+test announce::announce_rejects_other_close_authority ... ok
+test announce_attacks::rejects_announcement_owned_by_another_program ... ok
+test announce::announce_twice_fails ... ok
+test announce::announce_rejects_owner_still_payer ... ok
+test announce_attacks::finds_the_confidential_extension_behind_other_extensions_and_padding ... ok
+test announce_attacks::rejects_non_canonical_announcement_address ... ok
+test announce_attacks::rejects_cpi_guard_after_the_confidential_extension ... ok
+test announce_attacks::rejects_missing_confidential_extension ... ok
+test announce_attacks::rejects_uninitialized_token_account ... ok
+test announce_attacks::rejects_frozen_token_account ... ok
+test announce_attacks::rejects_cpi_guard_before_the_confidential_extension ... ok
+test announce_attacks::rejects_delegate ... ok
+test announce_attacks::rejects_stranger_announcing_the_payers_account ... ok
+test announce_attacks::rejects_token_account_not_owned_by_token_2022 ... ok
+test announce_attacks::rejects_payer_that_did_not_sign ... ok
+test announce_attacks::rejects_credit_cap_above_one ... ok
+test announce_attacks::rejects_short_and_long_data ... ok
+test announce_attacks::rejects_wrong_system_program ... ok
+test budget::announce_stays_within_budget ... ok
+test budget::register_stays_within_budget ... ok
+test announce_attacks::rejects_wrong_account_type ... ok
+test budget::deregister_stays_within_budget ... ok
+test budget::reclaim_stays_within_budget ... ok
+test reclaim::reclaim_rejects_decoy_token_account ... ok
+test reclaim::reclaim_fails_while_balance_remains ... ok
+test budget::reclaim_transaction_keeps_headroom_under_its_limit ... ok
+test reclaim::reclaim_rejects_wrong_payer ... ok
+test reclaim::reclaim_rejects_non_announcement ... ok
+test reclaim::reclaim_returns_both_rents_to_payer ... ok
+test reclaim_attacks::rejects_wrong_token_program ... ok
+test reclaim_attacks::rejects_program_owned_account_that_is_not_an_announcement ... ok
+test reclaim_attacks::rejects_data_after_the_discriminator ... ok
+test registry::a_prefunded_entry_address_still_registers ... ok
+test registry::a_legacy_transaction_registers_and_deregisters ... ok
+test reclaim_attacks::second_reclaim_fails ... ok
+test registry::deregister_refuses_an_announcement_in_place_of_an_entry ... ok
+test registry::registers_again_after_deregistering ... ok
+test registry::deregister_rejects_bad_data_a_missing_signature_a_stranger_and_a_wrong_scheme ... ok
+test registry::rejects_an_entry_address_owned_by_another_program ... ok
+test registry::registers_in_srfc_42_layout_and_deregisters_with_the_rent_back ... ok
+test registry::rejects_an_entry_address_that_holds_data ... ok
+test registry::rejects_an_entry_that_is_not_the_canonical_pda ... ok
+test registry::rejects_bad_data_scheme_version_and_flags ... ok
+test registry::rejects_a_registrant_that_did_not_sign ... ok
+test registry::rejects_registering_twice ... ok
+test registry::rejects_wrong_system_program ... ok
+test budget::stealth_payment_keeps_headroom_under_its_limit ... ok
+test budget::plain_transfer_keeps_headroom_under_its_limit ... ok
+test reclaim_attacks::refuses_while_confidential_balance_is_pending ... ok
+test token_attacks::a_credit_in_another_mint_is_refused ... ok
+test token_attacks::a_mint_without_auto_approve_leaves_the_account_unpayable ... ok
+test token_attacks::public_credits_are_refused_but_mint_to_lands ... ok
+test token_attacks::the_credit_cap_refuses_a_second_credit ... ok
+test s1_size::s5_both_stealth_transactions_fit_and_are_measured ... ok
+test token_attacks::only_p_can_apply_transfer_or_empty_after_the_handover ... ok
+test registry::s7_rejects_identity_small_order_mixed_order_and_non_canonical_spend_keys ... ok
+test s3_sweep::s3_payment_then_sweep_in_one_recipient_transaction ... ok
+
+test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.62s
+
+     Running unittests src/lib.rs (target/debug/deps/stealth_keygen-7bedf2f1dc36d268)
+
+running 31 tests
+test derivation::tests::small_order_spend_points_are_rejected ... ok
+test derivation::tests::hkdf_matches_rfc5869_case_one ... ok
+test derivation::tests::cancellation_to_identity_is_rejected ... ok
+test derivation::tests::ct_ikm_matches_independent_vector_and_is_domain_separated ... ok
+test derivation::tests::equivalent_ephemeral_encodings_have_distinct_derivations ... ok
+test derivation::tests::ct_ikm_binds_every_context_field ... ok
+test derivation::tests::prk_tag_and_tweak_match_independent_vector ... ok
+test derivation::tests::zero_tweak_preserves_valid_spend_point ... ok
+test derivation::tests::rfc7748_shared_secret_matches ... ok
+test keys::tests::randomness_errors_propagate_at_both_requests ... ok
+test derivation::tests::purposes_are_separated_and_invalid_expansion_length_fails ... ok
+test keys::tests::secret_key_import_rejects_zero_and_noncanonical_scalars ... ok
+test keys::tests::zero_candidate_then_randomness_failure_returns_error ... ok
+test keys::tests::public_key_import_preserves_x25519_encodings ... ok
+test keys::tests::zero_scalar_candidate_is_retried ... ok
+test derivation::tests::low_order_x25519_inputs_are_rejected ... ok
+test derivation::tests::mixed_torsion_spend_points_are_rejected ... ok
+test keys::tests::public_keys_match_independent_vector ... ok
+test keys::tests::secret_key_import_preserves_raw_scan_bytes ... ok
+test meta_address::tests::meta_address_rejects_unknown_versions_and_wrong_payload_lengths ... ok
+test spender::tests::sender_propagates_randomness_failure ... ok
+test meta_address::tests::meta_address_checksum_does_not_bypass_key_validation ... ok
+test meta_address::tests::meta_address_rejects_malformed_input_and_bad_checksum ... ok
+test meta_address::tests::meta_address_matches_independent_vector ... ok
+test spender::tests::sender_output_matches_independent_vector ... ok
+test keys::tests::public_key_import_rejects_invalid_spend_encodings_and_subgroups ... ok
+test recipient::tests::recovered_scalar_and_shared_material_match_independent_vector ... ok
+test signing::tests::signing_matches_independent_vector_and_response_is_canonical ... ok
+test keys::tests::supplied_ephemeral_rejects_payment_identity ... ok
+test keys::tests::public_key_import_rejects_low_order_scan_keys ... ok
+test keys::tests::supplied_ephemeral_rejects_invalid_recipient_keys ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/payment_flow.rs (target/debug/deps/payment_flow-8efd581cc4b6d8a9)
+
+running 20 tests
+test public_errors_preserve_randomness_failure ... ok
+test invalid_ephemeral_keys_are_errors_and_do_not_prevent_later_recovery ... ok
+test imported_public_keys_reproduce_the_payment ... ok
+test public_api_matches_fixed_payment_and_signature_vector ... ok
+test shared_meta_address_supports_payment_recovery_and_sweep_derivation ... ok
+test fresh_payments_have_distinct_keys_and_cannot_sign_for_each_other ... ok
+test restored_recipient_recovers_and_signs_existing_payments ... ok
+test sweep_destination_is_recoverable_and_binds_spend_secret_and_exact_r ... ok
+test sweep_destination_matches_independent_seed_key_and_signature_vectors ... ok
+test public_key_field_mutation_cannot_change_the_signing_challenge ... ok
+test supplied_ephemeral_uses_x25519_clamping ... ok
+test supplied_ephemeral_reconstructs_payment_after_drop ... ok
+test supplied_ephemeral_matches_random_api_and_independent_vectors ... ok
+test ct_ikm_agrees_and_is_deterministic_and_payment_specific ... ok
+test signatures_are_deterministic_and_message_specific ... ok
+test altered_messages_and_signatures_are_rejected ... ok
+test standard_verifier_accepts_multiple_keys_and_message_boundaries ... ok
+test every_incorrect_discovery_tag_is_rejected ... ok
+test altered_ephemeral_encoding_cannot_recover_the_original_payment ... ok
+test discovery_tag_collision_does_not_authorize_another_recipients_payment ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/properties.rs (target/debug/deps/properties-1c981d9db1ca934d)
+
+running 3 tests
+test meta_addresses_round_trip_and_reject_any_flipped_character ... ok
+test payer_and_recipient_agree_and_the_one_time_key_signs ... ok
+test a_stranger_whose_tag_collides_still_gets_a_different_key ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s
+
+   Doc-tests scope_client
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scope_interface
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scope_program
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests stealth_keygen
+
+running 1 test
+test crates/stealth-keygen/src/spender.rs - spender::derive_payment_with_ephemeral (line 91) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+all doctests ran in 0.70s; merged doctests compilation took 0.33s
