@@ -1,6 +1,7 @@
 mod announce;
 mod announce_attacks;
 mod budget;
+mod extra_attacks;
 mod reclaim;
 mod reclaim_attacks;
 mod registry;
