@@ -5,8 +5,15 @@ all-features = true
 yanked = "deny"
 # Unmaintained notices count only for our direct dependencies; the ones in the
 # tree today (bincode, paste, derivative, ansi_term, libsecp256k1) arrive through
-# Solana crates. Vulnerabilities still fail at any depth.
+# Solana crates. Vulnerabilities fail at any depth except the reviewed case below.
 unmaintained = "workspace"
+# LiteSVM -> solana-syscalls -> solana-secp256k1-recover -> k256 0.13 ->
+# elliptic-curve 0.13 requires crypto-bigint 0.5; the fix is only in >=0.7.6.
+# This path recovers public keys from public hashes/signatures, not secret
+# integers. Revisit when Solana upgrades k256, or if we add secret-key use.
+ignore = [
+    { id = "RUSTSEC-2026-0387", reason = "Solana's k256 dependency only performs public-key recovery on public inputs; no secret integers reach the affected operations." },
+]
 
 [licenses]
 # ISC and CDLA-Permissive-2.0 arrive with TLS for the RPC client: ring, rustls-webpki
